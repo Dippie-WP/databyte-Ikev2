@@ -1,0 +1,60 @@
+name: strongswan
+
+# SAFETY: profile [vpn] means `docker compose up -d` does NOT start this.
+#   Start:  docker compose --profile vpn up -d
+#   Stop:   docker compose --profile vpn down
+#
+# Built from Dockerfile: strongx509 fork + EAP-MSCHAPv2/RADIUS, 6.0.7 for CVE-2026-47895.
+# v1.2: +pools +attr-sql +sqlite for per-user static VIP leases.
+#
+# Sysctl note: Docker's host network namespace whitelists NO non-namespaced sysctls.
+# Required sysctls (net.ipv4.ip_forward=1, net.ipv6 forwarding, redirect hardening)
+# are applied at the LXC host level in /etc/sysctl.d/99-strongswan.conf.
+#
+# SECURITY NOTE: The strongSwan container uses `network_mode: host` because IKE
+# (UDP 500/4500) and ESP (proto 50) require direct host access. This means the
+# container shares the LXC host's network namespace. Acceptable for trusted LAN.
+# If exposing beyond, add firewall rules to limit UDP 500/4500 source ranges.
+
+services:
+  vpn:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zun/strongswan:6.0.7-mschapv2-attrsql
+    container_name: strongswan
+    profiles: [vpn]
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # NO privileged: yes | NO restart: always (per the v1.0 incident)
+    restart: unless-stopped
+    init: true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Charon foreground, PID 2 (tini is PID 1). /usr/sbin/ipsec NOT in this image.
+    command: ["/start.sh"]
+    volumes:
+      # swanctl configs (read-only) — includes conf.d/, x509/, x509ca/, private/
+      - ./swanctl:/etc/swanctl:ro
+      # charon config overrides. EACH FILE bind-mounted individually — see 5A.6 lesson.
+      # The strongSwan `include strongswan.d/*.conf` directive only reads files
+      # actually present in the container at startup. Forgetting a bind-mount
+      # means that override is silently ignored. (See docs/ISSUES-LOG.md.)
+      - ./strongswan.d/debug.conf:/etc/strongswan.d/debug.conf:ro
+      - ./strongswan.d/attr-sql.conf:/etc/strongswan.d/attr-sql.conf:ro
+      - ./strongswan.d/00-virtual-ip.conf:/etc/strongswan.d/00-virtual-ip.conf:ro
+      # Host-side charon log (bind-mounted to container's filelog path)
+      - /var/log/charon-log-host/charon.log:/var/log/charon-filog.log:rw
+      # SQLite DB with user data + leases
+      - /var/lib/strongswan:/var/lib/strongswan
+    # Healthcheck: verify VICI socket AND charon responds.
+    healthcheck:
+      test: ["CMD-SHELL", "swanctl --uri=tcp://127.0.0.1:4502 --stats >/dev/null && ss -ltn | grep -q :4502"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

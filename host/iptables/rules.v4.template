@@ -1,0 +1,72 @@
+# /etc/iptables/rules.v4.template
+# iptables-persistent rules format. Loaded by netfilter-persistent at boot.
+#
+# Apply with:  sudo cp rules.v4.template /etc/iptables/rules.v4
+#              sudo systemctl enable netfilter-persistent
+#              sudo systemctl restart netfilter-persistent
+#
+# Verify:     sudo iptables-restore -t < /etc/iptables/rules.v4
+#             sudo iptables -L -n -v
+#
+# This file's purpose:
+#   1. MSS clamp (5A.7 fix) — required for 5G carriers, see TCPMSS rule below
+#   2. FORWARD ACCEPT for 10.99.0.0/24 — allow VPN client traffic through
+#   3. INPUT ACCEPT for 10.99.0.0/24 — allow VPN clients to reach us
+#   4. POSTROUTING MASQUERADE for 10.99.0.0/24 — NAT client traffic
+#      (Note: firewalld trusted zone ALSO has a MASQ rule. Both apply;
+#       the kernel uses the first match, so they're functionally equivalent
+#       and harmless duplicate. If you remove one, the other still works.)
+#
+# ==== CRITICAL: 5A.7 MSS CLAMP ====
+# Without this rule, 5G phones (and other CGNAT carriers) see TCP
+# connections complete the handshake then time out, because the
+# path MTU + ESP overhead (50-70 bytes) exceeds the carrier's
+# effective MTU (often 1280-1400). PMTUD fails because ICMP
+# "fragmentation needed" is blocked on CGNAT.
+#
+# Calculation for `--set-mss 1260`:
+#   Phone MTU (set in strongSwan app): 1400
+#   - TCP+IP headers:                  40
+#   - ESP + UDP-encap + outer IP:     ~70
+#   = Safe MSS:                        1290
+#   Use 1260 to leave headroom for variable ESP auth/tag overhead.
+#
+# Place the TCPMSS rule in mangle FORWARD so the SYN packets going from
+# the LXC to remote sites (post-MASQ) advertise MSS=1260, ensuring
+# remote sites send us back packets that fit through the tunnel.
+
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# ==== FORWARD/INPUT ACCEPT for VPN clients ====
+-A INPUT -s 10.99.0.0/24 -j ACCEPT
+-A FORWARD -s 10.99.0.0/24 -j ACCEPT
+-A FORWARD -d 10.99.0.0/24 -j ACCEPT
+
+COMMIT
+
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# ==== 5A.7: MSS clamp — required for 5G carrier compatibility ====
+-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260
+
+COMMIT
+
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# ==== MASQ for VPN client traffic ====
+# (firewalld's trusted zone ALSO has this. Both are active; harmless dup.)
+-A POSTROUTING -s 10.99.0.0/24 -o eth0 -j MASQUERADE
+
+COMMIT

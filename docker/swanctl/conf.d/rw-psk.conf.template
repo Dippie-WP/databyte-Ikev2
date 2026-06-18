@@ -1,0 +1,53 @@
+# rw-psk.conf.template — PSK connection (fallback for iOS, friends)
+#
+# Used by:
+#   - iOS (currently broken — see docs/ISSUES-LOG.md §"iOS .mobileconfig
+#     cert validation". Will be revisited in v1.3 with certbot + LE cert)
+#   - Android strongSwan app (works, password-only profile)
+#   - Friend's laptop (test device)
+#
+# The PSK is per-deployment and lives in a secrets block at the bottom
+# of THIS FILE (after copying from .template). The template shows the
+# structure; the actual `secret = "..."` is replaced per host.
+
+connections {
+  rw-psk {
+    version = 2
+    local_addrs  = 0.0.0.0
+    remote_addrs = %any
+    pools = rw-pool
+    proposals    = aes256-sha256-modp2048,aes128-sha256-modp2048
+    unique       = replace
+    rekey_time   = 24h
+    reauth_time  = 24h
+    mobike       = yes
+    dpd_delay    = 30s
+    dpd_timeout  = 120s
+    local {
+      auth = psk
+      id   = "vpn.homelab.local"
+    }
+    remote {
+      auth = psk
+      id   = %any
+    }
+    children {
+      net {
+        mode = tunnel
+        local_ts  = 0.0.0.0/0
+        remote_ts = dynamic
+        dpd_action   = clear
+        start_action = start
+        rekey_time   = 1h
+        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+      }
+    }
+  }
+}
+
+# secrets { ike-psk { id = "vpn.homelab.local"; id-remote = %any; secret = "REPLACE_ME_BASE64"; } }
+#
+# Generate a strong PSK:
+#   openssl rand -base64 32
+# Paste the result as `secret = "..."`. Set this once per host; share
+# with the iOS / Android user via your usual channel (NOT in git).

@@ -1,0 +1,48 @@
+# Secrets, runtime state, and build artifacts.
+# See docs/DEPLOYMENT.md for the per-host setup that generates these.
+
+# Live private keys (CA + server + client)
+docker/swanctl/private/*.pem
+!docker/swanctl/private/.gitkeep
+
+# Live certificates (regenerated per deploy from CA)
+docker/swanctl/x509/*.pem
+!docker/swanctl/x509/.gitkeep
+docker/swanctl/x509ca/*.pem
+!docker/swanctl/x509ca/.gitkeep
+
+# SQLite DB with user data + leases
+*.db
+*.db.backup-*
+ipsec.db
+
+# Charon logs (ephemeral, written to /var/log/charon-log in container)
+charon*.log
+*.log
+
+# Build artifacts
+*.tar
+*.tar.bz2
+*.tar.gz
+strongswan-*/
+
+# Backup compose / dockerfile variants we kept during iteration
+*.bak-*
+*.new
+*.r1
+*.pre-*
+
+# Editor + OS
+*~
+.DS_Store
+.idea/
+.vscode/
+
+# Local IP / endpoint overrides (per-host)
+.env
+.env.local
+docker/.env
+
+# rclone config with S3 credentials
+rclone.conf
+.rclone.conf

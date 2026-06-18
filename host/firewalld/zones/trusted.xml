@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  /etc/firewalld/zones/trusted.xml
+  firewalld zone for strongSwan VPN client traffic.
+
+  Why "trusted": clients on 10.99.0.0/24 are authenticated (EAP-MSCHAPv2
+  or PSK) and have proven identity. They get full routing and
+  masquerade so they can reach the internet through the LXC's eth0.
+
+  Apply with:  sudo cp trusted.xml /etc/firewalld/zones/
+               sudo firewall-cmd --reload
+               sudo firewall-cmd --zone=trusted --list-all
+
+  Backend: firewalld is configured to use iptables backend
+  (FirewallBackend=iptables in /etc/firewalld/firewalld.conf).
+  This means these rules translate to iptables, not nftables.
+-->
+<zone target="ACCEPT">
+  <short>Trusted</short>
+  <description>All network connections are accepted.</description>
+  <masquerade/>
+  <source address="10.99.0.0/24"/>
+  <forward/>
+</zone>

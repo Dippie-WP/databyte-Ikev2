@@ -1,0 +1,71 @@
+# rw-eap.conf.template — EAP-MSCHAPv2 (primary auth)
+#
+# 5A lock-in config. Server-cert + EAP-MSCHAPv2, per-user sticky VIPs
+# via attr-sql. Coexists with rw-psk (no port conflict; auth-type dispatch).
+#
+# 5A.1 — initial config
+# 5A.2 — user seeded in DB, VIP pinned to 10.99.0.50
+# 5A.3 — public-path test (Android strongSwan app, 5G carrier)
+# 5A.4 — reconnect test (same VIP returned)
+# 5A.6 — install_virtual_ip = no (gateway-mode, NOT client default)
+# 5A.7 — server-side MSS clamp at 1260 (5G PMTUD fix; lives on LXC, not here)
+#
+# Notable choices:
+#   - send_cert = always (NOT inside local{}) — forces charon to send the
+#     cert in every IKE_AUTH response, even when not requested
+#   - cacerts = strongswan-ca.crt.pem — clients verify chain
+#   - eap_id = %any — any EAP username accepted (the secrets block matches)
+#   - fragmentation = yes — large EAP packets (cert chain exchange)
+#   - pools = rw-pool — references the pool in swanctl.conf
+
+connections {
+  rw-eap {
+    version = 2
+    send_cert = always
+    local_addrs  = 0.0.0.0
+    remote_addrs = %any
+    pools        = rw-pool
+    proposals    = aes256-sha256-modp2048,aes128-sha256-modp2048
+    unique       = replace
+    rekey_time   = 24h
+    reauth_time  = 24h
+    mobike       = yes
+    fragmentation = yes
+    dpd_delay    = 30s
+    dpd_timeout  = 120s
+
+    local {
+      auth = pubkey
+      certs = server.crt.pem
+      cacerts = strongswan-ca.crt.pem
+      id    = "vpn.homelab.local"
+    }
+    remote {
+      auth = eap-mschapv2
+      eap_id = %any
+    }
+
+    children {
+      net {
+        mode = tunnel
+        local_ts  = 0.0.0.0/0
+        remote_ts = dynamic
+        dpd_action   = clear
+        start_action = start
+        rekey_time   = 1h
+        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+      }
+    }
+  }
+}
+
+# secrets { eap-USERNAME { id = USERNAME; secret = "REPLACE_ME_PASSWORD"; } }
+#
+# Add one `secrets { eap-X { id = X; secret = "..."; } }` block per EAP
+# user. Generate passwords with `openssl rand -base64 16`. The NTLM hash
+# (for older Microsoft clients) is derived automatically by charon on
+# load — no need to pre-compute.
+#
+# Note: EAP-MSCHAPv2 uses the `secrets {}` block in swanctl.conf, NOT
+# the `users` table in SQLite. The `users` table is for the sql plugin's
+# different auth model.
