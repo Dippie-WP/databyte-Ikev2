@@ -81,3 +81,29 @@ sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null
 
 **Better:** when the template is next re-deployed (`cp rules.v4.template /etc/iptables/rules.v4`),
 this gap closes naturally. Just don't forget the mangle section.
+
+## 5A.7 MSS Clamp — APPLIED 2026-06-19 14:18 UTC
+
+Was flagged above; **now applied** for live 5G testing. Used
+`quota/install_mss_clamp.sh` (idempotent):
+
+1. Applies `iptables-legacy -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260` in memory
+2. Edits `/etc/iptables/rules.v4` directly to add/keep a single `*mangle` section with TCPMSS
+3. Removes any duplicate `*mangle` sections (`iptables-restore` uses the FIRST occurrence of each table)
+4. Survives `strongswan-iptables-watchdog` re-applies
+
+Verified:
+- 1 `*mangle` section in `rules.v4` (was 0)
+- TCPMSS rule in mangle FORWARD in memory
+- Survives strongSwan container restart (watchdog test PASS)
+- Per-VIP quota rules (508) still in `*filter` FORWARD
+
+Run on LXC 903 host: `sudo bash /home/zunaid/strongswan/quota/install_mss_clamp.sh`
+
+5G test symptoms this fixes:
+- TCP handshake completes
+- Data transfer hangs (no progress)
+- ICMP "fragmentation needed" silently dropped by CGNAT
+- StrongSwan app shows connected but no traffic flows
+
+MSS clamp forces client to advertise 1260-byte MSS so server responses fit through the CGNAT path.
