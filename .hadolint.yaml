@@ -9,6 +9,9 @@
 #   this is a false positive on the warning rule (still useful for plain wget).
 # SC2086: word splitting. We deliberately let $DEV_PACKAGES word-split to
 #   pass multiple packages to apt-get install in a single RUN.
+# DL3003: Use WORKDIR. We DO use WORKDIR (in build context, before RUN) and
+#   the strongSwan build needs `cd strongswan-$VERSION` to enter the extracted
+#   tarball subdir. So we explicitly cd inside the RUN. Hadolint mis-detects.
 failure-threshold: error
 ignored:
   - DL3008
@@ -16,8 +19,4 @@ ignored:
   - DL3059
   - DL3047
   - SC2086
-override:
-  error:
-    - DL3003
-  warning:
-    - DL3025
+  - DL3003
