@@ -1,0 +1,101 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same branch on new push
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build image + smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: |
+          docker build \
+            --tag strongswan:ci \
+            --file docker/Dockerfile \
+            docker/
+
+      - name: Verify charon version
+        run: |
+          # charon lives at /usr/libexec/ipsec/charon, not in PATH
+          VERSION=$(docker run --rm --entrypoint /usr/libexec/ipsec/charon strongswan:ci --version)
+          echo "charon reports: $VERSION"
+          if ! echo "$VERSION" | grep -q "strongSwan 6.0.7"; then
+            echo "::error::charon version mismatch (expected strongSwan 6.0.7)"
+            exit 1
+          fi
+
+      - name: Verify required plugins present
+        run: |
+          docker run --rm --entrypoint bash strongswan:ci -c '
+            set -eu
+            plugins_dir=/usr/lib/ipsec/plugins
+            required=(attr-sql sqlite eap-mschapv2 eap-radius eap-tls eap-identity kernel-netlink vici)
+            missing=()
+            for p in "${required[@]}"; do
+              if [ ! -f "$plugins_dir/libstrongswan-$p.so" ]; then
+                missing+=("$p")
+              fi
+            done
+            if [ "${#missing[@]}" -ne 0 ]; then
+              echo "::error::Missing plugins: ${missing[*]}"
+              exit 1
+            fi
+            echo "All required plugins present: ${required[*]}"
+          '
+
+      - name: Verify baked strongswan.conf
+        run: |
+          # The image bakes /etc/strongswan.conf with the start-scripts block.
+          # Smoke check: the file must exist and reference the TCP VICI socket.
+          docker run --rm --entrypoint bash strongswan:ci -c '
+            set -eu
+            if [ ! -f /etc/strongswan.conf ]; then
+              echo "::error::Missing /etc/strongswan.conf"
+              exit 1
+            fi
+            if ! grep -q "tcp://127.0.0.1:4502" /etc/strongswan.conf; then
+              echo "::error::strongswan.conf does not reference TCP VICI socket"
+              exit 1
+            fi
+            if ! grep -q "start-scripts" /etc/strongswan.conf; then
+              echo "::error::strongswan.conf missing start-scripts block"
+              exit 1
+            fi
+            echo "strongswan.conf: VICI socket + start-scripts block present"
+          '
+
+      - name: Verify /start.sh entrypoint is executable
+        run: |
+          docker run --rm --entrypoint stat strongswan:ci /start.sh
+          # stat exits 0 if file exists, regardless of perms; check perms explicitly
+          docker run --rm --entrypoint bash strongswan:ci -c '
+            if [ ! -x /start.sh ]; then
+              echo "::error::/start.sh is not executable"
+              exit 1
+            fi
+            echo "/start.sh executable: OK"
+          '
+
+      - name: Lint Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3
+        with:
+          dockerfile: docker/Dockerfile
+          failure-threshold: warning
+          ignore: DL3008,DL3015,DL3059

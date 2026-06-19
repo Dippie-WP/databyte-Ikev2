@@ -2,6 +2,8 @@
 
 Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite, server-cert + EAP-MSCHAPv2 with PSK fallback. v1.2 lock-in, both gates green.
 
+[![CI](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/Dippie-WP/databyte-Ikev2)](https://github.com/Dippie-WP/databyte-Ikev2/releases)
+
 ## What this is
 
 A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. Single-tenant homelab use today; structured to make multi-tenant / commercial per-user billing straightforward later (Phase 5B–5D roadmap).
@@ -60,6 +62,11 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas
 | Phase | Description | Gate |
 |---|---|---|
 | **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, reconnect, MSS clamp, server cert RSASSA-PSS, monitoring, backup | ✅ **GREEN (signed off 2026-06-19)** |
+
+## CI
+
+- **`.github/workflows/ci.yml`** — runs on every push to `main` and every PR. Builds the image, runs smoke tests (charon version, plugin presence, strongswan.conf structure, entrypoint perms), and lints the Dockerfile with hadolint. Bad pushes are blocked.
+- **`.github/workflows/release.yml`** — runs on every `v*` tag push. Builds the image, pushes to `ghcr.io/dippie-wp/databyte-ikev2:<version>` + `:latest`, and creates a GitHub release with auto-generated notes.
 | **5H** | HA + LB (2x v1.2 + keepalived VRRP, shared DB) — recovery story replaces version regression | ⏳ Queued for after 5A sign-off |
 | 5B | Quota layer (nftables accounting + monitor + alerts) | ⏳ Gated on 5A sign-off |
 | 5C | Surface (status FastAPI + Grafana dashboard polish) | ⏳ Gated on 5B |
