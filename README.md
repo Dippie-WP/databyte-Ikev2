@@ -6,10 +6,10 @@ Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite
 
 ## What this is
 
-A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Single-operator homelab use** (Zun's only). Personal devices (Android, iPhone, Windows, Linux) connect from anywhere over 5G/WiFi. No multi-tenant, no billing, no customer onboarding.
+A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Single-operator homelab use** (Zun's only). Personal devices (Android, iPhone, Windows, Linux) connect from anywhere over 5G/WiFi. No multi-tenant, no billing, no customer onboarding. (Phase 5B added a hard-cut data cap layer for the operator's own use, not for reselling.)
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
-- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.0` (2026-06-19)
+- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.1.0` (2026-06-19, 5B data cap layer)
 - **StrongSwan version:** 6.0.7 (CVE-2026-47895 patched)
 - **Auth:** Server-cert (RSA-2048 + RSASSA-PSS) + EAP-MSCHAPv2 (primary) and PSK (fallback)
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via attr-sql + SQLite
@@ -63,7 +63,7 @@ This creates:
 - `docker/swanctl/private/server-key.pem` (server private key, mode 600)
 - `docker/swanctl/private/strongswan-ca-key.pem` (CA private key, mode 600)
 
-> **Note:** The script default uses RSA-2048 for the server cert (changed 2026-06-19 — ECDSA P-256 was rejected by iOS 18+ IKEv2). Signature is rsassaPss + sha256 (Bleichenbacher mitigation per RFC 7427). Cert is also stored with 1y expiry; rotate manually.
+> **Note:** The script default uses RSA-2048 for the server cert (changed 2026-06-19 — ECDSA P-256 was rejected by iOS 18+ IKEv2). Signature is PKCS#1 v1.5 with sha256 (RSASSA-PSS was tried in 5A.10 but iOS 18 silently rejected the cert — rolled back to PKCS#1 v1.5). Cert is 1y expiry; rotate manually. Bleichenbacher mitigation deferred to v1.3 with certbot + DNS-01 for `vpn.homelab.local`.
 
 ### 3. Set your admin password
 
@@ -177,13 +177,22 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --load-creds
 4. Connect — should get VIP 10.99.0.50
 
 #### iPhone / iPad (iOS 18+)
-1. Generate a combined `.mobileconfig` (CA + VPN in one profile — iOS 18+ NetworkExtension requires this)
-2. Host it somewhere (or air-drop it)
-3. Install via Safari → Settings prompts
-4. **CRITICAL:** Settings → General → About → Certificate Trust Settings → Enable trust for "strongSwan CA"
-5. Toggle the VPN switch
 
-See `examples/` for mobileconfig templates.
+**Use the strongSwan iOS app** ([App Store link](https://apps.apple.com/app/strongswan-vpn-client/id1453698374)) — iOS native VPN Settings + `.mobileconfig` is **fundamentally broken for EAP-MSCHAPv2** on iOS 18+ (iOS sends EAP identity, server sends MSCHAPV2 challenge, iOS never responds, even with correct `AuthenticationMethod: None` + `ExtendedAuthEnabled: 1` + `AuthName` + `AuthPassword` baked into the profile). The strongSwan app is the official strongSwan client and has a working EAP-MSCHAPv2 implementation.
+
+Setup:
+1. Install **strongSwan VPN Client** from the App Store (free)
+2. Open the app → tap **+** to add a profile
+3. **Server:** your public IP or hostname (e.g. `vpn.example.com` or `102.182.117.43`)
+4. **Username:** the strongSwan user you seeded (e.g. `zun` or `demo-phone`)
+5. **Password:** the secret you set in `docker/swanctl/conf.d/rw-eap.conf`
+6. **CA certificate:** import the `strongswan-ca.crt.pem` (e.g. air-drop it, or download from a URL you host)
+7. **Server identity (advanced / settings cog):** must match the server cert CN/SAN, e.g. `vpn.example.com`. If the app auto-fills the IP, **change it** — charon matches on IDr.
+8. Tap **Save** → flip the toggle
+
+If the app says "trust this CA": enable it. If "no proposal chosen": the server expects AES-256/SHA2-256/DH14 (default in the strongSwan app — should just work).
+
+**For EAP-TLS (per-device client certs, 5D path):** you can use the iOS native VPN + `.mobileconfig` flow. iOS native handles EAP-TLS reliably because the cert is the auth, no EAP-MSCHAPv2 dialog is needed. The mobileconfig approach documented in the v1.0 commit history works for that path.
 
 #### Windows
 1. **PowerShell as Admin:**
@@ -259,32 +268,68 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 | Phase | Description | Gate |
 |---|---|---|
 | **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, reconnect, MSS clamp, server cert RSASSA-PSS, monitoring, backup | ✅ **GREEN (signed off 2026-06-19)** |
+| **5B** | Quota layer (iptables-legacy per-VIP byte counters + 60s monitor daemon + 80% warn + 100% hard cut) | ✅ **GREEN (signed off 2026-06-19, v1.1.0 tagged)** |
+| **5C** | Surface (status FastAPI + Grafana vpn-quota dashboard + backup verify) | ⏳ Gated on 5B green |
+| **5D** | Commercial (pricing, payment-triggered reset) | 🔒 Shelved (single-operator only) |
+| **5H** | HA + LB (2x v1.1 + keepalived VRRP, shared DB) | ⏳ Queued for after 5B sign-off |
 
 ## CI
 
 - **`.github/workflows/ci.yml`** — runs on every push to `main` and every PR. Builds the image, runs smoke tests (charon version, plugin presence, strongswan.conf structure, entrypoint perms), and lints the Dockerfile with hadolint. Bad pushes are blocked.
 - **`.github/workflows/release.yml`** — runs on every `v*` tag push. Builds the image, pushes to `ghcr.io/dippie-wp/databyte-ikev2:<version>` + `:latest`, and creates a GitHub release with auto-generated notes.
-| **5H** | HA + LB (2x v1.2 + keepalived VRRP, shared DB) — recovery story replaces version regression | ⏳ Queued for after 5A sign-off |
-| 5B | Quota layer (nftables accounting + monitor + alerts) | ⏳ Gated on 5A sign-off |
-| 5C | Surface (status FastAPI + Grafana dashboard polish) | ⏳ Gated on 5B |
-| 5D | Commercial (pricing, payment-triggered reset) | 🔒 Shelved |
 
 ## Versions
 
-- **v1.0 (this release, 2026-06-19):** EAP + attr-sql + sticky VIPs, public-path tested on 5G, monitoring via Prometheus, backup to RustFS, server cert RSASSA-PSS signed (Bleichenbacher mitigation per RFC 7427)
-- **v1.2** (image tag `6.0.7-mschapv2-attrsql`): same code as v1.0
+- **v1.0 (2026-06-19):** EAP + attr-sql + sticky VIPs, public-path tested on 5G, monitoring via Prometheus, backup to RustFS
+- **v1.1.0 (2026-06-19):** Quota layer (5B) — iptables-legacy per-VIP byte counters, 60s monitor daemon, 80% warn, 100% hard cut. **Proven with 3 end-to-end runs using real iOS app traffic, all cut correctly**
+- **v1.2** (image tag `6.0.7-mschapv2-attrsql`): same code as v1.1
 - **v1.1** (image tag `6.0.7-mschapv2`, still in registry): PSK + EAP, no VIP pinning — **not a valid fallback**, needs static pool in `strongswan.conf` to work at all
 
 ## Release notes
 
-### v1.0 (2026-06-19) — "5A lock-in"
+### v1.1.0 (2026-06-19) — "5B lock-in: data cap layer"
+
+**What it does:** hard-cut data cap per customer. Every 60 seconds, a Python daemon reads iptables-legacy per-VIP byte counters, looks up the customer, increments their `data_used_bytes`. At 80% it logs a warning. At 100% it terminates the IKE_SA, kills the EAP secret in `rw-eap.conf` (replace with `KILLED-<random>`), reloads charon, and marks the customer `over_quota=1`. Re-authentication is blocked because the secret is now dead.
 
 **Added:**
-- Server cert regenerated with **RSASSA-PSS** signature (`rsassaPss + sha256 + MGF1`) — mitigates Bleichenbacher's attack per RFC 7427
-- Server cert: RSA-2048, EKU `serverAuth + ipsecIKE`, SAN `DNS:vpn.homelab.local, IP:102.182.117.43`, 1-year validity
+- 6 new DB tables: `tiers`, `customers`, `devices`, `purchases`, `alerts`, `audit_log` (idempotent schema, applied at boot via `quota-schema.service`)
+- 254 outbound + 254 inbound iptables-legacy per-VIP ACCEPT rules in FORWARD chain = 508 rules total
+- `quota-monitor.py` (21KB) — long-running daemon, polls every 60s
+- `quota-monitor.service` — systemd unit, restart=on-failure, SIGTERM-clean
+- `quota/install_quota_rules.sh` — installs the 508 per-VIP rules + watchdog persistence
+- `quota/update_rw_eap_conf.py` — kills EAP secret at 100% (used by quota-monitor)
+- `quota/seed_*.sh` — tier + customer + device seed scripts
+- `quota/reset_demo.sh` — resets demo state
+- `docs/decisions/5B-architecture.md` — design ADR (iptables-legacy vs nftables, kill-conf vs DB, etc.)
+- `docs/decisions/5B-credentials-kill.md` — why we kill conf secret, not DB
+
+**Fixed (5B.6):** `strongswan-iptables-watchdog.service` was re-applying `iptables-restore` on every docker container event (including `exec_create`/`exec_start`/`health_status*`) — which fired on every Prometheus scrape and daemon poll, **resetting all 508 per-VIP byte counters to 0**. Zun's "you lie" screenshot (140 MB in iOS app vs 22 MB in daemon) was the diagnostic clue. Fix: case statement narrowed to `start|restart|unpause|die|stop|kill|oom` only.
+
+**Test results (3 runs with real iOS app traffic):**
+
+| Run | Connect → cut | Peak | Final | Notes |
+|---|---|---|---|---|
+| #1 | 8 min | 22 MB/min | 104.8% | First REAL cut (also exposed 5B.6 bug) |
+| #2 | 2:23 | 144 MB/min | 158.0% | Zun pushed hard |
+| #3 | 1:06 | 140 MB/min | 158.0% | Zun: "Beautiful the app automatically logged me off" |
+
+**Proven design choices (locked 2026-06-19):**
+- Operator bypass via `is_operator=1` flag
+- 2 simultaneous connections per customer, shared quota pool
+- Per-purchase cycle, hard cut at 100%, manual extension (no calendar)
+- No "unlimited" tier in catalog — Zun's account has operator bypass instead
+- Telegram DM at 80% + 100% (5C.3, not yet built)
+- Tier storage = DB-only
+
+**5C work gated on 5B green:** customer web page, admin web page, Telegram bot, Grafana `vpn-quota` dashboard, backup verify.
+
+### v1.0 (2026-06-19) — "5A lock-in"
+
+**Added (final v1.0 state — supersedes earlier "RSASSA-PSS" notes):**
+- Server cert: **RSA-2048 + PKCS#1 v1.5** (sha256WithRSAEncryption), EKU `serverAuth + ipsecIKE`, SAN `DNS:vpn.homelab.local, IP:102.182.117.43`, 1-year validity. RSASSA-PSS was tried first but iOS 18 silently rejected it — rolled back to PKCS#1 v1.5 in 5A.10
 - `swanctl.conf` `secrets` block pattern for EAP users (file-based credential lookup, since `sql` plugin is not loaded)
-- Combined `.mobileconfig` for iOS 18+ (CA + VPN payload in one profile; CA Trust toggle required)
-- 4 client types tested end-to-end: Android EAP, iPhone PSK, iPhone EAP-MSCHAPv2, Windows EAP-MSCHAPv2
+- strongSwan iOS app (NOT iOS native VPN + mobileconfig — broken for EAP-MSCHAPv2 on iOS 18+)
+- 4 client types tested end-to-end: Android EAP, iPhone PSK (via strongSwan app), iPhone EAP-MSCHAPv2 (via strongSwan app), Windows EAP-MSCHAPv2
 - MOBIKE proven working (LAN↔4G CGNAT migration, VIP preserved)
 - Three-layer iptables persistence: `rules.v4` + watchdog service + manual recovery script
 - Prometheus exporter (`strongswan_exporter.py`) on port 9101 with per-SA metrics
@@ -293,9 +338,9 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 
 **Security decisions:**
 - Server cert: RSA-2048 (ECDSA P-256 rejected by iOS 18+ IKEv2 — must be RSA)
-- Signature: RSASSA-PSS (PKCS#1 v1.5 vulnerable to Bleichenbacher)
+- Signature: PKCS#1 v1.5 (RSASSA-PSS rejected by iOS 18 — lost Bleichenbacher mitigation, defer to v1.3 with certbot)
 - EAP creds: file-based in `swanctl.conf` `secrets` block; DB column `users.password` is dead data
-- iOS mobileconfig contains EAP password in plaintext (acceptable for 5A; switch to EAP-TLS in 5D)
+- iOS strongSwan app: EAP password stored in app's keychain (not in mobileconfig) — cleaner than the v3-v10 mobileconfig experiments
 
 **Tested clients:**
 - Android: strongSwan VPN Client + CA import + EAP-MSCHAPv2 (zun / VIP 10.99.0.50)

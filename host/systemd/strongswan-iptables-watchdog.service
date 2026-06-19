@@ -1,0 +1,13 @@
+[Unit]
+Description=strongSwan iptables watchdog (re-apply rules on container restart)
+After=docker.service strongswan-vpn.service
+Wants=strongswan-vpn.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/strongswan-iptables-watchdog.sh
+
+[Install]
+WantedBy=multi-user.target

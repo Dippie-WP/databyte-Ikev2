@@ -8,25 +8,78 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 | Step | What | Status |
 |---|---|---|
-| 5A.1 | `rw-eap` conn config + self-signed CA + server cert (ECDSA P-256) | ✅ |
+| 5A.1 | `rw-eap` conn config + self-signed CA + server cert (RSA-2048) | ✅ |
 | 5A.2 | DB: `rw-pool` (10.99.0.0/24) + `zun` user + sticky VIP pin (10.99.0.50) | ✅ |
 | 5A.3 | End-to-end client test (Android strongSwan app, 5G public path) | ✅ |
 | 5A.4 | Reconnect test — same VIP returned | ✅ |
-| 5A.5 | Rollback rehearsal (charon-cmd LAN, 30s swap, no DB loss) | ✅ |
+| 5A.5 | ~~Rollback rehearsal~~ OBSOLETE — replaced by 5H (HA + LB) | ⛔ |
 | 5A.6 | `install_virtual_ip = no` fix (gateway mode) | ✅ |
 | 5A.7 | Server-side MSS clamp at 1260 (5G PMTUD) | ✅ |
+| 5A.8 | Daily backup to RustFS (DB + configs + certs) | ✅ |
+| 5A.9 | Prometheus exporter + Grafana `strongswan-v1-2` dashboard | ✅ |
+| 5A.10 | Server cert regen to PKCS#1 v1.5 (iOS 18 compat — RSASSA-PSS rejected by iOS) | ✅ |
+| 5A.11 | ~~Load test~~ partial — PSS cert validated, 8-client sim blocked (charon-cmd 5.9.5 too old) | ⚠️ |
+| 5A.12 | CI pipeline (`.github/workflows/ci.yml` + `release.yml`) | ✅ |
+| 5A.13 | PR template + full end-to-end deploy guide in README | ✅ |
+| 5A.14 | SCOPE LOCKED: single-operator only (no "for a friend" / multi-tenant framing) | ✅ |
 
-**Files added/touched:** see `SESSION-HISTORY.md`.
+## 5B — Quota layer — ✅ GREEN (both gates, 2026-06-19 23:30 UTC, **v1.1.0 tagged**)
 
-## 5B — Quota layer — ⏳ Pending operator sign-off on 5A
+**Goal (revised 2026-06-19 13:17 UTC — single-operator + paying customers):**
+- Operator account: unlimited, no data cap, bypasses all quota checks
+- Customers: 2 simultaneous connections per purchase, shared quota pool, 3GB/10GB/15GB catalog
+- 100% = hard cut, manual extension by operator after payment (no calendar cycle)
+- Customer-facing web page: read + "buy more" CTA → DM to operator → operator sends payment link
+- Customer auth: username + password (bcrypt)
+- Customer notifications: Telegram DM at 80% warn + 100% cut
+- Grafana: operator-only, system + all users monitoring
+- Admin web page: operator manages customers/tiers/devices/quota extensions
 
-**Goal:** Per-user data quota, 80% Telegram alert, 100% disconnect.
-
-| Step | What | Notes |
+| Step | What | Status |
 |---|---|---|
-| 5B.1 | nftables accounting rules (`strongswan-quota.nft`) | outline in `runbooks/v1.2-nftables-accounting-outline.md` (RustFS) |
-| 5B.2 | `quota-monitor.py` (nftables counters → SQLite → Telegram) | reads nftables counters |
-| 5B.3 | 80% alert + 100% disconnect test | 100% triggers `swanctl --terminate --ike` |
+| 5B.1 | DB schema — 6 new tables (customers, tiers, devices, purchases, alerts, audit_log) + 10 indexes + seeds + systemd unit | ✅ DONE 2026-06-19 13:30 UTC |
+| 5B.2 | iptables-legacy per-VIP byte counters (508 rules, 254 outbound + 254 inbound) in FORWARD chain | ✅ DONE 2026-06-19 13:49 UTC |
+| 5B.3 | `quota-monitor.py` — per-VIP counter sampling, 80% warn, 100% hard cut (terminate SA + kill EAP secret + reload charon) | ✅ DONE 2026-06-19 17:42 UTC |
+| 5B.4 | systemd unit (`quota-monitor.service`, Type=simple, restart=on-failure, SIGTERM-clean) | ✅ DONE 2026-06-19 17:53 UTC |
+| 5B.5 | End-to-end test with demo-customer — **3 clean runs**, real iOS app traffic, 100% cut fires, secret killed, re-auth blocked | ✅ DONE 2026-06-19 23:30 UTC |
+| 5B.6 | iptables-legacy watchdog bug fix — only re-apply rules.v4 on actual container lifecycle events, NOT on every docker exec | ✅ DONE 2026-06-19 19:48 UTC |
+| 5C.1 | Customer web page (FastAPI + bcrypt) | ⏳ Gated on 5B green |
+| 5C.2 | Admin web page (`/admin`, customer mgmt + credential gen + quota extension) | ⏳ |
+| 5C.3 | Telegram bot (vpn-bot.py — auth + buy-more relay + outbound alerts) | ⏳ |
+| 5C.4 | Grafana `vpn-quota` dashboard (active SAs per customer, usage, alerts) | ⏳ |
+
+**5B deliverables (tagged v1.1.0):**
+- `quota/quota_schema.sql` — 6 tables, 10 indexes, idempotent `IF NOT EXISTS`
+- `quota/apply_quota_schema.sh` — host-side applier, idempotent, pre/post check
+- `quota/seed_real_tiers.sh` — 3GB/10GB/15GB tiers
+- `quota/seed_5B1.sh` — demo_100mb tier + zun-operator + demo-customer + 5 device links
+- `quota/seed_demo_creds.sh` — conf-driven EAP creds (avoids hard-coding secrets in DB)
+- `quota/reset_demo.sh` — resets demo customer's `data_used_bytes` to 0
+- `quota/install_quota_rules.sh` — installs 508 per-VIP ACCEPT counters + watchdog persistence
+- `quota/install_mss_clamp.sh` — installs `*mangle` TCPMSS rule (5A.7 fix)
+- `quota/update_rw_eap_conf.py` — kills EAP secret at 100% (used by quota-monitor.py)
+- `quota/quota-monitor.py` — main daemon (21KB, 60s poll)
+- `host/systemd/quota-schema.service` — oneshot at host boot, applies schema
+- `host/systemd/quota-monitor.service` — long-running daemon, restart=on-failure
+- `host/systemd/strongswan-iptables-watchdog.service` — re-applies rules.v4 on container restart (FIXED 5B.6)
+- `host/systemd/strongswan-iptables-watchdog.sh` — script (FIXED 5B.6)
+- `host/systemd/README.md` — install instructions + 5B.6 gotcha
+- `docs/ARCHITECTURE.md` — 5B section with data flow
+- `docs/decisions/5B-architecture.md` — design ADR (iptables-legacy vs nftables, kill-conf vs DB, etc.)
+- `docs/decisions/5B-credentials-kill.md` — why we kill conf secret, not DB
+
+**Test results (4 end-to-end runs, real iOS app traffic where possible):**
+
+| Run | Time | Connect → cut | Peak throughput | Final DB | Notes |
+|---|---|---|---|---|---|
+| #1 | 2026-06-19 17:42 UTC | n/a (synthetic pre-set 100 MiB + 1 byte) | n/a | 104.8% | First proven 100% cut, no real client |
+| #2 | 2026-06-19 19:44 UTC | 8 min | 22 MB/min | 104.8% | First REAL-traffic cut (iOS app: 140 MB used in app / 100 MB cap in daemon — exposed 5B.6 watchdog bug) |
+| #3 | 2026-06-19 19:56 UTC | 2 min 23 sec | 144 MB/min | 158.0% | Zun pushed hard, cap fired at 158% |
+| #4 | 2026-06-19 23:26 UTC | 1 min 6 sec | 140 MB/min | 158.0% | iOS app auto-logged off — Zun confirmed "Beautiful" |
+
+**5B.6 (watchdog bug):** the `strongswan-iptables-watchdog.service` originally re-applied `iptables-restore` on EVERY docker container event including `exec_create`/`exec_start`/`health_status*` — which fired on every Prometheus scrape (30s) and daemon poll (60s), **resetting all 508 per-VIP byte counters to 0**. Zun's "you lie" screenshot (140 MB in iOS app vs 22 MB in daemon) was the diagnostic clue. The fix: case statement narrowed to `start|restart|unpause|die|stop|kill|oom` only. See ADR `5B-architecture.md` for full root cause + math.
+
+**Backups:** `ipsec.db.bak-5B1-20260619-132059` retained on LXC 903. Kill-conf backups at `/home/zunaid/strongswan/swanctl/conf.d/.backups/rw-eap.conf.bak-quotamon-*` (one per cut event).
 
 ## 5C — Surface — ⏳ Gated on 5B green
 
@@ -38,9 +91,9 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | 5C.2 | Grafana `vpn-quota` dashboard |
 | 5C.3 | Backup verify (RustFS) |
 
-## 5D — Commercial — 🔒 Shelved (out of scope, single-operator only)
+## 5D — Commercial — 🔒 Shelved (out of scope, customer-facing bits moved to 5C)
 
-**Status:** Zun confirmed 2026-06-19: "I'm the only one hosting the server." No multi-tenant, no billing, no customer onboarding. 5D will not happen unless scope changes.
+**Status:** Zun confirmed 2026-06-19 12:30 UTC: "I'm the only one hosting the server." Single-operator only — no multi-tenant SaaS, no automated billing, no customer self-signup. The "buy more → DM to Zun → payment link" flow is manual by design.
 
 **Original goal (if scope ever changes):** Multi-tenant billing, payment-triggered reset, customer-facing messages.
 
@@ -61,3 +114,6 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - **Server-side defaults audit** — every `charon.*` setting reviewed for gateway vs client default
 - **Cloudflare bot detection** — ifconfig.me may give `ERR_CONNECTION_CLOSED` because shared MASQ IP looks bot-like
 - **5G MTU/PMTUD** — server-side MSS clamp at 1260 fixes (5A.7). May need carrier-specific tuning
+- **5G CGNAT stability** — iOS SAs die in 4-30 min on cellular. Try lower fragment_size (1100), raise `ikesa_max_halfopen` to 10, install_virtual_ip=yes test
+- **5H — HA + LB** — 2x v1.1 + keepalived VRRP active/passive, shared DB, ~5s failover. Tier 1 for homelab SLA.
+- **iptables → nftables migration** — nftables named counters persist across rule reloads. Would prevent future 5B.6-style bugs. ~2-3h work, low priority since 5B.6 fix is in place.

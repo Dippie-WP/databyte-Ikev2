@@ -1,0 +1,31 @@
+[Unit]
+Description=strongSwan quota monitor (Phase 5B.3 — iptables-legacy counters + 80% warn + 100% hard cut)
+Documentation=file:///home/zunaid/strongswan/quota/quota-monitor.py
+After=docker.service quota-schema.service
+Wants=quota-schema.service
+
+# quota-monitor.py is the daemon that:
+#   1. Samples per-VIP byte counters from iptables-legacy FORWARD chain
+#      (rules created by quota/install_quota_rules.sh)
+#   2. Joins VIP → username via swanctl --list-sas
+#   3. Joins username → customer/tier via DB
+#   4. Updates customers.data_used_bytes
+#   5. Fires 80% warn (logs to alerts/audit_log) on first crossing
+#   6. Fires 100% hard cut: terminates active SAs, replaces EAP secret
+#      in rw-eap.conf with KILLED-<random>, sets customers.over_quota=1
+#
+# Run on the LXC 903 host (uses `docker exec strongswan` for VICI access).
+# The script reads charon creds from /home/zunaid/strongswan/swanctl/conf.d/
+# and writes back mutations there. StrongSwan container bind-mounts this dir.
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/zunaid/strongswan/quota/quota-monitor.py
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
