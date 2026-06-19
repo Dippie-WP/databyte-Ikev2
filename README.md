@@ -177,13 +177,22 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --load-creds
 4. Connect — should get VIP 10.99.0.50
 
 #### iPhone / iPad (iOS 18+)
-1. Generate a combined `.mobileconfig` (CA + VPN in one profile — iOS 18+ NetworkExtension requires this)
-2. Host it somewhere (or air-drop it)
-3. Install via Safari → Settings prompts
-4. **CRITICAL:** Settings → General → About → Certificate Trust Settings → Enable trust for "strongSwan CA"
-5. Toggle the VPN switch
 
-See `examples/` for mobileconfig templates.
+**Use the strongSwan iOS app** ([App Store link](https://apps.apple.com/app/strongswan-vpn-client/id1453698374)) — iOS native VPN Settings + `.mobileconfig` is **fundamentally broken for EAP-MSCHAPv2** on iOS 18+ (iOS sends EAP identity, server sends MSCHAPV2 challenge, iOS never responds, even with correct `AuthenticationMethod: None` + `ExtendedAuthEnabled: 1` + `AuthName` + `AuthPassword` baked into the profile). The strongSwan app is the official strongSwan client and has a working EAP-MSCHAPv2 implementation.
+
+Setup:
+1. Install **strongSwan VPN Client** from the App Store (free)
+2. Open the app → tap **+** to add a profile
+3. **Server:** your public IP or hostname (e.g. `vpn.example.com` or `102.182.117.43`)
+4. **Username:** the strongSwan user you seeded (e.g. `zun` or `demo-phone`)
+5. **Password:** the secret you set in `docker/swanctl/conf.d/rw-eap.conf`
+6. **CA certificate:** import the `strongswan-ca.crt.pem` (e.g. air-drop it, or download from a URL you host)
+7. **Server identity (advanced / settings cog):** must match the server cert CN/SAN, e.g. `vpn.example.com`. If the app auto-fills the IP, **change it** — charon matches on IDr.
+8. Tap **Save** → flip the toggle
+
+If the app says "trust this CA": enable it. If "no proposal chosen": the server expects AES-256/SHA2-256/DH14 (default in the strongSwan app — should just work).
+
+**For EAP-TLS (per-device client certs, 5D path):** you can use the iOS native VPN + `.mobileconfig` flow. iOS native handles EAP-TLS reliably because the cert is the auth, no EAP-MSCHAPv2 dialog is needed. The mobileconfig approach documented in the v1.0 commit history works for that path.
 
 #### Windows
 1. **PowerShell as Admin:**
