@@ -1,0 +1,23 @@
+# hadolint config — suppress false positives for our build pattern
+#
+# DL3008: pin apt package versions. We deliberately use latest because:
+#   1) the dev packages (gcc, make, libssl-dev) are removed after build
+#   2) the runtime packages we keep (iproute2, iputils-ping, nano) are stable
+# DL3015: --no-install-recommends. We accept defaults for the runtime tools.
+# DL3059: multiple consecutive RUN. Our build needs them in sequence.
+# DL3047: wget progress bar. We use --progress=dot:giga explicitly, so
+#   this is a false positive on the warning rule (still useful for plain wget).
+# SC2086: word splitting. We deliberately let $DEV_PACKAGES word-split to
+#   pass multiple packages to apt-get install in a single RUN.
+failure-threshold: error
+ignored:
+  - DL3008
+  - DL3015
+  - DL3059
+  - DL3047
+  - SC2086
+override:
+  error:
+    - DL3003
+  warning:
+    - DL3025

@@ -21,14 +21,14 @@ LABEL org.opencontainers.image.source="https://github.com/strongX509/docker"
 LABEL zun.fork.delta="+eap-mschapv2 +eap-radius; +attr-sql +sqlite; VERSION 6.0.7 for CVE-2026-47895; baked strongswan.conf with start-scripts"
 ENV VERSION="6.0.7"
 
+WORKDIR /strongswan-build
+
 RUN \
   DEV_PACKAGES="wget bzip2 make gcc libssl-dev libsqlite3-dev" && \
   apt-get -y update && \
   apt-get -y install iproute2 iputils-ping nano $DEV_PACKAGES && \
   \
-  mkdir /strongswan-build && \
-  cd /strongswan-build && \
-  wget https://download.strongswan.org/strongswan-$VERSION.tar.bz2 && \
+  wget --progress=dot:giga https://download.strongswan.org/strongswan-$VERSION.tar.bz2 && \
   tar xfj strongswan-$VERSION.tar.bz2 && \
   cd strongswan-$VERSION && \
   ./configure --prefix=/usr --sysconfdir=/etc --disable-defaults      \
@@ -42,8 +42,8 @@ RUN \
     --enable-attr-sql --enable-sqlite                                 \
     && \
    make all && make install && \
-   cd / && rm -R strongswan-build && \
-   ln -s /usr/libexec/ipsec/charon charon && \
+   cd / && rm -R /strongswan-build && \
+   ln -s /usr/libexec/ipsec/charon /usr/local/bin/charon && \
    \
    apt-get -y remove $DEV_PACKAGES && \
    apt-get -y autoremove && \
