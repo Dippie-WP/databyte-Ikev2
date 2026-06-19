@@ -6,7 +6,7 @@ Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite
 
 ## What this is
 
-A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. Single-tenant homelab use today; structured to make multi-tenant / commercial per-user billing straightforward later (Phase 5B–5D roadmap).
+A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Single-operator homelab use** (Zun's only). Personal devices (Android, iPhone, Windows, Linux) connect from anywhere over 5G/WiFi. No multi-tenant, no billing, no customer onboarding.
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
 - **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.0` (2026-06-19)
@@ -28,9 +28,11 @@ A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. Si
 | `docs/` | ROADMAP, ARCHITECTURE, DEPLOYMENT, ISSUES-LOG, SESSION-HISTORY |
 | `examples/` | Client profiles: Android `.sswan`, iOS `.mobileconfig` template (iOS path is broken; see issues) |
 
-## Quick start (new host)
+## Quick start (new host — or recovery rebuild)
 
-A complete end-to-end deploy from a fresh Linux box. Assumes you have:
+A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it. No tenants, no billing, no onboarding.
+
+Assumes you have:
 - A Linux server (Debian/Ubuntu) with Docker installed
 - A public IP (static, or dynamic with DDNS)
 - Access to your router to forward UDP 500 + UDP 4500

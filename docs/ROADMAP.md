@@ -38,9 +38,11 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | 5C.2 | Grafana `vpn-quota` dashboard |
 | 5C.3 | Backup verify (RustFS) |
 
-## 5D — Commercial — 🔒 Shelved
+## 5D — Commercial — 🔒 Shelved (out of scope, single-operator only)
 
-**Goal:** Multi-tenant billing, payment-triggered reset, customer-facing messages.
+**Status:** Zun confirmed 2026-06-19: "I'm the only one hosting the server." No multi-tenant, no billing, no customer onboarding. 5D will not happen unless scope changes.
+
+**Original goal (if scope ever changes):** Multi-tenant billing, payment-triggered reset, customer-facing messages.
 
 | Step | What |
 |---|---|

@@ -1,4 +1,4 @@
-# rw-psk.conf.template — PSK connection (fallback for iOS, friends)
+# rw-psk.conf.template — PSK connection (fallback for legacy iOS clients)
 #
 # Used by:
 #   - iOS (currently broken — see docs/ISSUES-LOG.md §"iOS .mobileconfig
