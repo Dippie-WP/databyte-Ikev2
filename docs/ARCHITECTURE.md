@@ -93,6 +93,119 @@ LE is what v1.3 will use. For v1.2, the Android strongSwan app handles self-sign
 ### Sticky VIP via attr-sql (NOT hard pin)
 Upstream attr-sql doesn't enforce hard pinning. The pattern we use: pre-insert the address row in `addresses` table with `identity=X, released=0`. charon picks it up and re-uses. But if the row gets deleted (e.g., charon crash recovery), the next user may get that VIP. v1.3 will add a custom plugin for hard pin.
 
+## Quota layer (Phase 5B — in progress)
+
+### Data model
+
+The quota layer extends the strongSwan attr-sql SQLite DB with 6 new tables:
+
+```
+strongSwan upstream tables (30):
+  users          ← identity + EAP password
+  pools          ← IP pool definitions (start/end BLOB)
+  leases         ← active VIP assignments (address BLOB, identity → users.id)
+  user_pools     ← user ↔ pool junction
+  ...
+
+Quota layer tables (6 new, additive):
+  tiers          ← catalog: name, data_limit_bytes, price_zar, is_active
+  customers      ← per-user: name, is_operator (bypass), tier_id, data_limit_bytes,
+                  data_used_bytes, over_quota (1=hard cut), is_active
+  devices        ← strongSwan user ↔ customer link (strongswan_user_id → users.id)
+  purchases      ← audit log: each top-up event (customer_id, data_added_bytes)
+  alerts         ← threshold events: 80%/100% fired (customer_id, threshold, ts)
+  audit_log      ← admin actions: create/extend/suspend/reset
+```
+
+**VIP resolution chain** (at quota-monitor query time):
+```
+nftables counter (bytes per VIP)
+  → leases.address (BLOB) → leases.identity (= users.id)
+    → devices.strongswan_user_id (= users.id)
+      → devices.customer_id
+        → customers.tier_id → tiers.data_limit_bytes
+        → customers.data_limit_bytes (effective limit = tier + manual extensions)
+        → customers.is_operator (bypass flag)
+```
+
+**Key design decisions (2026-06-19, locked):**
+- Operator (Zun): `is_operator=1`, bypasses ALL quota checks, no tier, no cap
+- Customers: 2 simultaneous connections per account (enforced at nftables layer)
+- Quota is shared across all devices of one customer (combined `data_used_bytes`)
+- Per-purchase model: 100% = hard cut, manual extension by operator after payment
+- No calendar/rolling cycle — data_limit_bytes is manual + tier-based
+
+### Tiers (seeded in 5B.1)
+
+| Name | Display | data_limit_bytes | Status |
+|------|---------|------------------|--------|
+| tier_3gb | 3 GB | 3,221,225,472 | Active, for sale |
+| tier_10gb | 10 GB | 10,737,418,240 | Active, for sale |
+| tier_15gb | 15 GB | 16,106,127,360 | Active, for sale |
+| demo_100mb | Demo 100 MB | 104,857,600 | Persistent demo account (Zun resets after each demo) |
+
+**Operator:** `zun-operator` (is_operator=1, no tier, unlimited bypass)
+
+### Components
+
+```
+[LXC 903 host]
+  quota-monitor.py          ← reads nftables counters + DB → alert/cut decisions
+  quota-schema.service      ← oneshot at boot, applies schema (idempotent)
+  nftables-zun-vpn.service ← accounting rules per VIP (5B.2, in progress)
+
+[strongSwan container]
+  charon                    ← VICI on TCP 127.0.0.1:4502 (read by quota-monitor)
+  ipsec.db                 ← bind-mount from host, shared with LXC
+
+[Customer-facing (5C, future)]
+  vpn-bot.py               ← Telegram bot: auth + buy-more relay + 80%/100% DMs
+  customer web page         ← FastAPI: usage bar, device list, "buy more" button
+  admin web page            ← FastAPI /admin: customer mgmt, cred gen, quota extend
+
+[Operator monitoring]
+  Grafana (existing)        ← operator-only: system health + all users overview
+  vpn-quota dashboard      ← 5C.4: per-customer usage, active SAs, alert history
+```
+
+### quota-monitor.py logic (5B.3)
+
+1. Read nftables byte counters for each active VIP in the rw-pool range
+2. For each VIP with non-zero bytes:
+   a. Resolve VIP → leases.identity → users.id
+   b. Resolve users.id → devices.strongswan_user_id → devices.customer_id
+   c. Load customers.row (is_operator? skip if yes)
+   d. Load customers.data_limit_bytes vs data_used_bytes
+   e. If threshold crossed (80% or 100%) and no existing alert row for this cycle:
+      - Log alert to `alerts` table
+      - Send Telegram DM to operator (Zun)
+      - Send Telegram DM to customer (if telegram_id known)
+   f. If 100% and customer.over_quota == 0:
+      - Set customers.over_quota = 1
+      - Terminate CHILD_SA via VICI (`swanctl --terminate --ike <conn> --ike-id <id>`)
+      - Block new SA by setting customers.is_active = 0 (optional)
+3. Also: check `leases` table for new VIP assignments since last run
+4. Update `devices.last_seen_v4` and `devices.last_seen_at` for active SAs
+5. Sleep 60s, repeat
+
+### nftables accounting rules (5B.2)
+
+Accounting is per VIP (not per user identity). This is simpler and avoids nftables having to track strongSwan's internal identity mapping. The `leases` table bridges VIP ↔ identity.
+
+Rules are in `host/systemd/nftables-zun-vpn.service` (extends existing FORWARD rules).
+
+```
+table ip strongswan-quota {
+  chain postrouting-quota {
+    type filter hook postrouting priority 0; policy accept;
+    ip saddr 10.99.0.0/24 counter comment "bytes-from-vip"
+    ip daddr 10.99.0.0/24 counter comment "bytes-to-vip"
+  }
+}
+```
+
+Counters are read by quota-monitor.py via `nft list chain ip strongswan-quota postrouting-quota`.
+
 ## Known limitations (v1.2)
 
 - **iOS** — `.mobileconfig` silently fails cert validation. The strongSwan app on iOS works (uses PSK), but the native IKEv2 client is broken. v1.3 + LE cert is the fix.
