@@ -1,6 +1,6 @@
 [Unit]
 Description=strongSwan quota monitor (Phase 5B.3 — iptables-legacy counters + 80% warn + 100% hard cut)
-Documentation=quota/quota-monitor.py
+Documentation=file:///home/zunaid/strongswan/quota/quota-monitor.py
 After=docker.service quota-schema.service
 Wants=quota-schema.service
 
