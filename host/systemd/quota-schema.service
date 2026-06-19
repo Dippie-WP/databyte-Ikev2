@@ -1,0 +1,18 @@
+[Unit]
+Description=Apply strongSwan quota schema to /var/lib/strongswan/ipsec.db (Phase 5B.1)
+Documentation=quota/quota_schema.sql
+After=local-fs.target
+
+# Schema is applied directly to the host-side DB file. The strongSwan
+# container bind-mounts the same path, so changes are visible to charon
+# on next DB query (no container restart required for schema additions).
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/zunaid/strongswan/quota/apply_quota_schema.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

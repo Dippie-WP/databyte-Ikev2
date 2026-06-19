@@ -1,0 +1,26 @@
+[Unit]
+Description=strongSwan quota monitor (Phase 5B.3 — nftables counters + 80%/100% alerts/cuts)
+Documentation=quota/quota-monitor.py
+After=strongswan.service quota-schema.service nftables-zun-vpn.service
+Wants=quota-schema.service
+
+# quota-monitor.py is built in 5B.3. This unit is the deployment target
+# (systemd-managed long-running process) and depends on:
+#   - quota-schema.service: quota tables exist in ipsec.db
+#   - nftables-zun-vpn.service: per-VIP accounting rules in place
+#   - strongswan.service: charon VICI socket available (TCP 127.0.0.1:4502)
+#
+# Until quota-monitor.py is built, the ExecStart is a stub. Replace
+# before 5B.3 sign-off.
+
+[Service]
+Type=simple
+ExecStart=/home/zunaid/strongswan/quota/quota-monitor.py
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
