@@ -58,3 +58,26 @@ that:
 
 **Until 5B.3:** the `ExecStart` points to a file that doesn't exist. Don't
 `enable` this unit until quota-monitor.py is built.
+
+## Known issue (NOT a 5B.2 deliverable, flagged for follow-up)
+
+The live `/etc/iptables/rules.v4` on LXC 903 does NOT include the
+`*mangle` section with the MSS clamp (`-A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260`)
+from `host/iptables/rules.v4.template` (5A.7 fix). The template has it;
+the live file doesn't. The 5B.2 install script did NOT add it back
+(only the *filter FORWARD changes were in scope).
+
+**Why this matters:** 5G PMTUD may be broken without the MSS clamp.
+If clients on 5G/CGNAT start seeing TCP timeouts after a TLS handshake,
+that's the symptom.
+
+**How to re-apply (one-off, not 5B.2 scope):**
+```bash
+# On LXC 903 host
+sudo iptables-legacy -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260
+sudo iptables-save | sudo tee /etc/iptables/rules.v4 > /dev/null
+# Verify: iptables-legacy -t mangle -L FORWARD -nvx
+```
+
+**Better:** when the template is next re-deployed (`cp rules.v4.template /etc/iptables/rules.v4`),
+this gap closes naturally. Just don't forget the mangle section.

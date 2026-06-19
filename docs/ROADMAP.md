@@ -33,7 +33,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | Step | What | Status |
 |---|---|---|
 | 5B.1 | **DB schema — 6 new tables (customers, tiers, devices, purchases, alerts, audit_log) + 10 indexes + seeds + systemd unit** | ✅ DONE 2026-06-19 13:30 UTC |
-| 5B.2 | nftables accounting rules (`strongswan-quota.nft`) — per-VIP byte counter, no rate-limit | ⏳ Next |
+| 5B.2 | **iptables-legacy per-VIP byte counters (508 rules) in FORWARD chain** | ✅ DONE 2026-06-19 13:49 UTC |
 | 5B.3 | `quota-monitor.py` — nftables + DB → 80% alert + 100% cut + VICI terminate | ⏳ |
 | 5B.4 | systemd unit (`quota-monitor.service`) | ⏳ (placeholder file added in 5B.1) |
 | 5B.5 | End-to-end test with demo-customer (100 MB tier, 80% + 100% trigger) | ⏳ |
