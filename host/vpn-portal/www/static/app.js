@@ -283,6 +283,8 @@
     if (S.loading[p]) return;  // already in flight
     // Stop Sessions auto-refresh if we're leaving it
     if (S.page === 'sessions' && p !== 'sessions') stopSessionsAutoRefresh();
+    // Stop customer-detail auto-refresh if leaving customers
+    if (S.page === 'customers' && p !== 'customers') stopCustDetailAutoRefresh();
     S.page = p;
     // Re-render first so the user sees the skeleton for the new page immediately.
     render();
@@ -524,8 +526,16 @@
 
     return el('div', { cls: 'vp-page' },
       el('div', { cls: 'vp-page-head' },
-        el('div', { cls: 'vp-page-title' }, 'Customers'),
-        el('div', { cls: 'vp-page-sub' }, 'Click a row for full detail. ↺ Reset zeroes usage.'),
+        el('div', { cls: 'vp-page-head-l' },
+          el('div', { cls: 'vp-page-title' }, 'Customers'),
+          el('div', { cls: 'vp-page-sub' }, 'Click a row for full detail. ↺ Reset zeroes usage.'),
+        ),
+        el('div', { cls: 'vp-page-head-r' },
+          el('button', {
+            cls: 'vp-btn vp-btn-primary',
+            onclick: () => openNewClientModal(),
+          }, '+ New client'),
+        ),
       ),
       err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
               '⚠ ' + err) : null,
@@ -594,6 +604,8 @@
       S.detail = await get('/api/customers/' + id);
     } catch(e) { showBanner(e.message, 'err'); S.detail = null; }
     render();
+    // Start the live current_session refresh (30s) while detail is open
+    if (S.detail) startCustDetailAutoRefresh();
   }
 
   function renderCustomerDetail() {
@@ -618,9 +630,15 @@
         el('dt', {}, 'Status'),  el('dd', {}, c.status + (c.is_active ? ' · active' : ' · INACTIVE')),
         el('dt', {}, 'Operator'), el('dd', {}, c.is_operator ? 'yes (bypass quota)' : 'no'),
         el('dt', {}, 'Telegram'), el('dd', {}, c.telegram_username || '—'),
+        el('dt', {}, 'Billing ID'), el('dd', {}, c.billing_id ? [el('span', { cls: 'vp-mono' }, c.billing_id)] : '—'),
+        el('dt', {}, 'Email'),     el('dd', {}, c.email ? [el('span', { cls: 'vp-mono' }, c.email)] : '—'),
         el('dt', {}, 'Created'),  el('dd', { cls: 'vp-mono' }, fmtTime(c.created_at)),
         el('dt', {}, 'Updated'),  el('dd', { cls: 'vp-mono' }, fmtTime(c.updated_at)),
         c.notes ? [el('dt', {}, 'Notes'), el('dd', {}, c.notes)] : [],
+      ),
+      // v1.2.7 — current session (public IP + VIP + since)
+      el('div', { cls: 'vp-current-session', id: 'vp-current-session' },
+        renderCurrentSession(c.current_session),
       ),
       // Devices (with metadata + edit)
       c.devices && c.devices.length ? [
@@ -1105,6 +1123,433 @@
 
   function spanBadge(text, kind) {
     return el('span', { cls: 'vp-badge vp-badge-' + kind }, text);
+  }
+
+  // ─── v1.2.7 — New client modal + one-shot password panel ────────────────
+
+  // Cached tiers (loaded on first open of the modal)
+  let _tiersCache = null;
+
+  async function loadTiers() {
+    if (_tiersCache) return _tiersCache;
+    try {
+      const rows = await get('/api/tiers');
+      _tiersCache = rows.filter(t => t.is_active);
+    } catch {
+      _tiersCache = [];
+    }
+    return _tiersCache;
+  }
+
+  function openNewClientModal() {
+    const modal = el('div', {
+      cls: 'vp-modal-bg',
+      onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
+    },
+      el('div', { cls: 'vp-modal vp-modal-lg' },
+        el('div', { cls: 'vp-modal-title' },
+          el('span', {}, '+ New client'),
+          el('button', { cls: 'vp-modal-x', onclick: closeModal, title: 'Close' }, '×'),
+        ),
+        el('div', { id: 'vp-new-client-body' }, 'Loading…'),
+      ),
+    );
+    document.body.appendChild(modal);
+    // Focus trap & ESC
+    document.addEventListener('keydown', _modalEscListener);
+    renderNewClientForm();
+  }
+
+  function _modalEscListener(e) {
+    if (e.key === 'Escape') closeModal();
+  }
+
+  function closeModal() {
+    document.removeEventListener('keydown', _modalEscListener);
+    const m = document.querySelector('.vp-modal-bg');
+    if (m) m.remove();
+  }
+
+  async function renderNewClientForm() {
+    const body = document.getElementById('vp-new-client-body');
+    if (!body) return;
+    const tiers = await loadTiers();
+
+    const tierOptions = [
+      el('option', { value: '', disabled: true, selected: true }, '— pick a tier —'),
+      ...tiers.map(t => el('option', { value: t.name },
+        `${t.display_name}  (${fmtBytes(t.quota_bytes)})`)),
+      el('option', { value: 'custom' }, 'Custom (MiB)…'),
+    ];
+
+    body.innerHTML = '';
+    body.appendChild(
+      el('form', { id: 'vp-new-client-form', onsubmit: onNewClientSubmit },
+        el('div', { cls: 'vp-form-grid' },
+          // Customer
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Client name (slug)'),
+            el('input', { id: 'vp-nc-name', cls: 'vp-inp', type: 'text', required: true,
+                           placeholder: 'acme-corp', maxlength: 32,
+                           pattern: '[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}',
+                           'aria-describedby': 'vp-nc-name-hint' }),
+            el('div', { cls: 'vp-hint', id: 'vp-nc-name-hint' },
+              'URL-safe: letters, digits, dash, underscore. 1-32 chars.'),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Display name'),
+            el('input', { id: 'vp-nc-display', cls: 'vp-inp', type: 'text', required: true,
+                           placeholder: 'Acme Corp', maxlength: 128 }),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Billing ID ', el('span', { cls: 'vp-optional' }, '(optional)')),
+            el('input', { id: 'vp-nc-billing', cls: 'vp-inp', type: 'text',
+                           placeholder: 'INV-2026-0042', maxlength: 128 }),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Email ', el('span', { cls: 'vp-optional' }, '(optional)')),
+            el('input', { id: 'vp-nc-email', cls: 'vp-inp', type: 'email',
+                           placeholder: 'ops@acme.com', maxlength: 128 }),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Telegram ', el('span', { cls: 'vp-optional' }, '(optional)')),
+            el('input', { id: 'vp-nc-tg', cls: 'vp-inp', type: 'text',
+                           placeholder: '@acme', maxlength: 64 }),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Notes ', el('span', { cls: 'vp-optional' }, '(optional)')),
+            el('input', { id: 'vp-nc-notes', cls: 'vp-inp', type: 'text',
+                           placeholder: 'KYC done, MDM-enrolled', maxlength: 256 }),
+          ),
+          // Tier
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Tier'),
+            el('select', { id: 'vp-nc-tier', cls: 'vp-inp', required: true }, tierOptions),
+          ),
+          el('div', { cls: 'vp-field', id: 'vp-nc-custom-wrap', style: 'display:none' },
+            el('label', { cls: 'vp-label' }, 'Custom cap (MiB)'),
+            el('input', { id: 'vp-nc-custom-mb', cls: 'vp-inp', type: 'number',
+                           min: 1, max: 1048576, placeholder: 'e.g. 1500 for 1.5 GB' }),
+            el('div', { cls: 'vp-hint' }, 'Binary MiB (× 1,048,576 bytes). Tier auto-created.'),
+          ),
+          // Device
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Device name'),
+            el('input', { id: 'vp-nc-device', cls: 'vp-inp', type: 'text', required: true,
+                           placeholder: 'laptop', maxlength: 32,
+                           pattern: '[a-zA-Z0-9][a-zA-Z0-9-]{0,31}',
+                           value: 'laptop' }),
+            el('div', { cls: 'vp-hint' }, 'Friendly name. EAP identity = client-name-device-name'),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Device type'),
+            el('select', { id: 'vp-nc-devtype', cls: 'vp-inp', required: true },
+              el('option', { value: 'iOS'     }, 'iOS'),
+              el('option', { value: 'Android' }, 'Android'),
+              el('option', { value: 'Windows' }, 'Windows'),
+              el('option', { value: 'macOS'   }, 'macOS'),
+              el('option', { value: 'Linux'   }, 'Linux'),
+              el('option', { value: 'Other'   }, 'Other'),
+            ),
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'OS version ', el('span', { cls: 'vp-optional' }, '(optional)')),
+            el('input', { id: 'vp-nc-osver', cls: 'vp-inp', type: 'text',
+                           placeholder: 'iOS 18.3.1', maxlength: 32 }),
+          ),
+        ),
+        // Live custom-cap preview
+        el('div', { id: 'vp-nc-custom-preview', cls: 'vp-custom-preview', style: 'display:none' }),
+        el('div', { id: 'vp-nc-form-err', cls: 'vp-form-err', style: 'display:none' }),
+        el('div', { cls: 'vp-btn-row', style: 'margin-top:18px; justify-content: flex-end' },
+          el('button', { type: 'button', cls: 'vp-btn vp-btn-ghost', onclick: closeModal }, 'Cancel'),
+          el('button', { type: 'submit', cls: 'vp-btn vp-btn-primary', id: 'vp-nc-submit' }, 'Create client'),
+        ),
+      ),
+    );
+
+    // Show/hide custom cap input + live preview
+    const tierSel = body.querySelector('#vp-nc-tier');
+    const customWrap = body.querySelector('#vp-nc-custom-wrap');
+    const customMb = body.querySelector('#vp-nc-custom-mb');
+    const preview  = body.querySelector('#vp-nc-custom-preview');
+    function refresh() {
+      const isCustom = tierSel.value === 'custom';
+      customWrap.style.display = isCustom ? '' : 'none';
+      if (isCustom) {
+        const mb = parseInt(customMb.value || '0', 10);
+        if (mb > 0) {
+          const bytes = mb * 1048576;
+          preview.style.display = '';
+          preview.innerHTML = '';
+          preview.appendChild(el('strong', {}, '→ New tier: '));
+          preview.appendChild(document.createTextNode(
+            `custom_${mb}mb_<ts> · ${fmtBytes(bytes)} (${mb} MiB)`));
+        } else {
+          preview.style.display = 'none';
+        }
+      } else {
+        preview.style.display = 'none';
+      }
+    }
+    tierSel.addEventListener('change', refresh);
+    customMb.addEventListener('input', refresh);
+
+    // Auto-derive client name from display name if not yet typed
+    const nameInp  = body.querySelector('#vp-nc-name');
+    const displayInp = body.querySelector('#vp-nc-display');
+    displayInp.addEventListener('blur', () => {
+      if (!nameInp.value) {
+        const slug = (displayInp.value || '').trim().toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 32);
+        if (slug) nameInp.value = slug;
+      }
+    });
+  }
+
+  async function onNewClientSubmit(ev) {
+    ev.preventDefault();
+    const errEl = document.getElementById('vp-nc-form-err');
+    errEl.style.display = 'none';
+    errEl.textContent = '';
+    const submitBtn = document.getElementById('vp-nc-submit');
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating…';
+
+    const body = {
+      name:               document.getElementById('vp-nc-name').value.trim(),
+      display_name:       document.getElementById('vp-nc-display').value.trim(),
+      billing_id:         document.getElementById('vp-nc-billing').value.trim() || null,
+      email:              document.getElementById('vp-nc-email').value.trim() || null,
+      telegram_username:  document.getElementById('vp-nc-tg').value.trim() || null,
+      notes:              document.getElementById('vp-nc-notes').value.trim() || null,
+      tier_name:          document.getElementById('vp-nc-tier').value,
+      custom_cap_mb:      parseInt(document.getElementById('vp-nc-custom-mb').value || '0', 10) || null,
+      device_name:        document.getElementById('vp-nc-device').value.trim(),
+      device_type:        document.getElementById('vp-nc-devtype').value,
+      os_version:         document.getElementById('vp-nc-osver').value.trim() || null,
+    };
+    if (body.tier_name !== 'custom') body.custom_cap_mb = null;
+
+    try {
+      const r = await post('/api/customers', body);
+      // Refresh customers list in the background
+      try { loadCustomers().then(render).catch(()=>{}); } catch {}
+      renderOneshotPanel(r);
+    } catch (e) {
+      errEl.textContent = e.message || String(e);
+      errEl.style.display = '';
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create client';
+    }
+  }
+
+  // ─── One-shot password panel (shown after successful create) ─────────────
+  function renderOneshotPanel(r) {
+    const c = r.customer, d = r.device;
+    const eapId = r.eap_identity, pw = r.password;
+    const server    = '102.182.117.43';
+    const remoteId  = 'vpn.homelab.local';
+    const localId   = eapId;
+
+    function fieldRow(label, value, copy = true) {
+      const row = el('div', { cls: 'vp-os-field' },
+        el('div', { cls: 'vp-os-field-l' }, label),
+        el('div', { cls: 'vp-os-field-r vp-mono' }, value),
+      );
+      if (copy && value) {
+        row.appendChild(el('button', {
+          type: 'button',
+          cls: 'vp-btn-icon',
+          title: 'Copy',
+          onclick: () => {
+            navigator.clipboard.writeText(String(value)).then(() => {
+              showBanner('Copied ' + label, 'ok');
+            }).catch(() => {});
+          },
+        }, '⧉'));
+      }
+      return row;
+    }
+
+    // Setup cards per OS
+    function setupCard(os, body) {
+      return el('div', { cls: 'vp-os-card' },
+        el('div', { cls: 'vp-os-card-h' }, os),
+        el('div', { cls: 'vp-os-card-b' }, body));
+    }
+
+    const iOS = setupCard('iOS',
+      el('ol', { cls: 'vp-setup-steps' },
+        el('li', {}, 'Settings → General → VPN & Device Management → Add VPN config'),
+        el('li', {}, 'Type: IKEv2'),
+        el('li', {}, 'Description: any (e.g. "databyte VPN")'),
+        el('li', {}, 'Server: ', el('span', { cls: 'vp-mono' }, server)),
+        el('li', {}, 'Remote ID: ', el('span', { cls: 'vp-mono' }, remoteId)),
+        el('li', {}, 'Local ID: ', el('span', { cls: 'vp-mono' }, localId)),
+        el('li', {}, 'User Authentication → Username: ', el('span', { cls: 'vp-mono' }, eapId)),
+        el('li', {}, 'User Authentication → Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+        el('li', {}, 'Tap "Done" then toggle the VPN switch'),
+      ),
+    );
+
+    const Android = setupCard('Android',
+      el('ol', { cls: 'vp-setup-steps' },
+        el('li', {}, 'Settings → Network & internet → VPN → +'),
+        el('li', {}, 'Type: IKEv2/IPSec MSCHAPv2'),
+        el('li', {}, 'Name: any (e.g. "databyte VPN")'),
+        el('li', {}, 'Server: ', el('span', { cls: 'vp-mono' }, server)),
+        el('li', {}, 'IPSec identifier: ', el('span', { cls: 'vp-mono' }, remoteId)),
+        el('li', {}, 'Username: ', el('span', { cls: 'vp-mono' }, eapId)),
+        el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+        el('li', {}, 'Save → tap to connect'),
+      ),
+    );
+
+    const Windows = setupCard('Windows',
+      el('ol', { cls: 'vp-setup-steps' },
+        el('li', {}, 'Settings → Network & internet → VPN → Add a VPN connection'),
+        el('li', {}, 'VPN provider: Windows (built-in)'),
+        el('li', {}, 'Connection name: any (e.g. "databyte VPN")'),
+        el('li', {}, 'Server name or address: ', el('span', { cls: 'vp-mono' }, server)),
+        el('li', {}, 'VPN type: IKEv2'),
+        el('li', {}, 'Type of sign-in info: User name and password'),
+        el('li', {}, 'User name: ', el('span', { cls: 'vp-mono' }, eapId)),
+        el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+        el('li', {}, 'Save → connect from network flyout'),
+        el('li', {}, 'If asked for "Remember my sign-in info": NO'),
+      ),
+    );
+
+    const macOS = setupCard('macOS',
+      el('ol', { cls: 'vp-setup-steps' },
+        el('li', {}, 'System Settings → Network → + → Interface: VPN, VPN Type: IKEv2'),
+        el('li', {}, 'Service Name: any (e.g. "databyte VPN")'),
+        el('li', {}, 'Server Address: ', el('span', { cls: 'vp-mono' }, server)),
+        el('li', {}, 'Remote ID: ', el('span', { cls: 'vp-mono' }, remoteId)),
+        el('li', {}, 'Local ID: ', el('span', { cls: 'vp-mono' }, localId)),
+        el('li', {}, 'Authentication Settings → Username: ', el('span', { cls: 'vp-mono' }, eapId)),
+        el('li', {}, 'Authentication Settings → Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+        el('li', {}, 'Connect'),
+      ),
+    );
+
+    const Linux = setupCard('Linux (NetworkManager)',
+      el('ol', { cls: 'vp-setup-steps' },
+        el('li', {}, 'Install strongswan / NetworkManager-strongswan / strongswan-nm'),
+        el('li', {}, 'Add connection: nmcli connection add type vpn vpn-type org.freedesktop.NetworkManager.strongswan'),
+        el('li', {}, 'Set: gateway = ', el('span', { cls: 'vp-mono' }, server)),
+        el('li', {}, 'Set: address = 10.99.0.0/24, 0.0.0.0/0 (split tunnel optional)'),
+        el('li', {}, 'Set: remote-id = ', el('span', { cls: 'vp-mono' }, remoteId)),
+        el('li', {}, 'Set: local-id  = ', el('span', { cls: 'vp-mono' }, localId)),
+        el('li', {}, 'Set: user = ', el('span', { cls: 'vp-mono' }, eapId)),
+        el('li', {}, 'Set: user-password = ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+        el('li', {}, 'nmcli connection up <name>'),
+      ),
+    );
+
+    const body = document.getElementById('vp-new-client-body');
+    if (!body) return;
+    body.innerHTML = '';
+
+    body.appendChild(
+      el('div', {},
+        // Warning banner
+        el('div', { cls: 'vp-oneshot-warn' },
+          el('span', { cls: 'vp-oneshot-warn-icon' }, '⚠'),
+          el('strong', {}, 'SAVE THESE NOW — '),
+          'the password is shown ONCE. Copy or send to the client before closing.'),
+        // Summary
+        el('div', { cls: 'vp-oneshot-summary' },
+          el('div', {}, 'Created customer ', el('strong', {}, c.display_name),
+            ' (id=', String(c.id), ', slug=', el('span', { cls: 'vp-mono' }, c.name), '), tier: ',
+            el('span', { cls: 'vp-mono' }, c.tier || '(unknown)')),
+          c.billing_id ? el('div', {}, 'Billing ID: ', el('span', { cls: 'vp-mono' }, c.billing_id)) : null,
+          c.email ? el('div', {}, 'Email: ', el('span', { cls: 'vp-mono' }, c.email)) : null,
+        ),
+        // Core fields
+        el('div', { cls: 'vp-os-card vp-os-card-core' },
+          el('div', { cls: 'vp-os-card-h' }, 'VPN connection details'),
+          el('div', { cls: 'vp-os-card-b vp-os-fields' },
+            fieldRow('Server', server),
+            fieldRow('Remote ID', remoteId),
+            fieldRow('Local ID', localId),
+            fieldRow('Username (EAP identity)', eapId),
+            fieldRow('Password (one-shot)', pw, true),
+          ),
+        ),
+        // Per-OS setup cards
+        el('div', { cls: 'vp-os-grid' }, iOS, Android, Windows, macOS, Linux),
+        // Footer
+        el('div', { cls: 'vp-btn-row', style: 'margin-top:20px; justify-content: flex-end' },
+          el('button', { type: 'button', cls: 'vp-btn vp-btn-primary', onclick: closeModal }, 'Done'),
+        ),
+      ),
+    );
+  }
+
+  // ─── v1.2.7 — renderCustomerDetail: show billing_id, email, current_session ──
+
+  function renderCurrentSession(sess) {
+    if (!sess || !sess.public_ip) {
+      return el('div', { cls: 'vp-cs-empty' },
+        el('span', { cls: 'vp-cs-dot vp-cs-dot-off' }),
+        el('span', { cls: 'vp-cs-label' }, 'No active session'),
+      );
+    }
+    const sinceStr = sess.since ? fmtTime(sess.since) + ' (' + relTime(sess.since) + ')' : '?';
+    return el('div', { cls: 'vp-cs-on' },
+      el('div', { cls: 'vp-cs-head' },
+        el('span', { cls: 'vp-cs-dot vp-cs-dot-on' }),
+        el('span', { cls: 'vp-cs-label' }, 'Active session'),
+      ),
+      el('dl', { cls: 'vp-cs-grid' },
+        el('dt', {}, 'Public IP'),
+        el('dd', { cls: 'vp-mono' }, sess.public_ip + (sess.remote_port ? ':' + sess.remote_port : '')),
+        el('dt', {}, 'VPN IP'),
+        el('dd', { cls: 'vp-mono' }, sess.vip || '—'),
+        el('dt', {}, 'Device'),
+        el('dd', { cls: 'vp-mono' }, sess.device || '—'),
+        el('dt', {}, 'Connected'),
+        el('dd', { cls: 'vp-mono' }, sinceStr),
+        sess.ike ? [el('dt', {}, 'IKE proposal'), el('dd', { cls: 'vp-mono' }, sess.ike)] : [],
+        sess.sa_bytes_in != null || sess.sa_bytes_out != null ? [
+          el('dt', {}, 'This session'),
+          el('dd', { cls: 'vp-mono' },
+            '↓ ' + fmtBytes(sess.sa_bytes_in || 0) + ' · ↑ ' + fmtBytes(sess.sa_bytes_out || 0)),
+        ] : [],
+      ),
+    );
+  }
+
+  function relTime(epoch) {
+    if (!epoch) return '?';
+    const secs = Math.floor(Date.now() / 1000) - epoch;
+    if (secs < 60) return secs + 's ago';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    return Math.floor(secs / 86400) + 'd ago';
+  }
+
+  // v1.2.7 — live refresh of customer detail (current_session updates)
+  let _custDetailTimer = null;
+  function startCustDetailAutoRefresh() {
+    if (_custDetailTimer) return;
+    _custDetailTimer = setInterval(async () => {
+      if (S.page !== 'customers' || !S.selectedId) { stopCustDetailAutoRefresh(); return; }
+      try {
+        const d = await get('/api/customers/' + S.selectedId);
+        S.detail = d;
+        const el2 = document.getElementById('vp-current-session');
+        if (el2) {
+          el2.innerHTML = '';
+          el2.appendChild(renderCurrentSession(d.current_session));
+        }
+      } catch { /* ignore */ }
+    }, 30000);
+  }
+  function stopCustDetailAutoRefresh() {
+    if (_custDetailTimer) { clearInterval(_custDetailTimer); _custDetailTimer = null; }
   }
 
   // ─── Boot ──────────────────────────────────────────────
