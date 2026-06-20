@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Databyte · VPN Portal (5C draft, 2026-06-20)</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body { background: #0E1117; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #161B22; }
+::-webkit-scrollbar-thumb { background: #2D3748; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useCallback } = React;
+
+const C = {
+ bg:"#0E1117", surface:"#161B22", surface2:"#1C2330",
+ border:"#2D3748", borderSub:"#1E2A3A",
+ cyan:"#00C9FF", cyanDim:"#0A3A4A",
+ amber:"#F59E0B", amberDim:"#2D2008",
+ red:"#EF4444", redDim:"#2D1010",
+ green:"#22C55E", greenDim:"#0A2D1A",
+ textPri:"#E2E8F0", textSec:"#8B95A3", textDim:"#4A5568",
+ mono:"'JetBrains Mono', 'Fira Code', monospace",
+ sans:"'Inter', system-ui, sans-serif",
+};
+
+const G = () => `
+ body { color:${C.textPri}; font-family:${C.sans}; font-size:14px; line-height:1.5; min-height:100vh; background:${C.bg}; }
+ .app { display:flex; flex-direction:column; min-height:100vh; }
+ .nav { display:flex; align-items:center; gap:12px; padding:0 24px; height:52px; border-bottom:1px solid ${C.border}; background:${C.surface}; position:sticky; top:0; z-index:100; }
+ .nav-logo { font-family:${C.mono}; font-size:13px; font-weight:500; color:${C.cyan}; letter-spacing:.05em; margin-right:8px; }
+ .nav-sep { width:1px; height:20px; background:${C.border}; }
+ .nav-tab { font-size:13px; color:${C.textSec}; background:none; border:none; cursor:pointer; padding:4px 10px; border-radius:6px; transition:color .15s,background .15s; font-family:${C.sans}; }
+ .nav-tab:hover { color:${C.textPri}; background:${C.surface2}; }
+ .nav-tab.active { color:${C.cyan}; background:${C.cyanDim}; }
+ .nav-right { margin-left:auto; display:flex; align-items:center; gap:10px; }
+ .nav-user { font-family:${C.mono}; font-size:12px; color:${C.textSec}; }
+ .nav-badge { font-size:11px; padding:2px 8px; border-radius:20px; font-weight:500; }
+ .badge-admin { background:${C.cyanDim}; color:${C.cyan}; border:1px solid ${C.cyan}22; }
+ .badge-user { background:${C.greenDim}; color:${C.green}; border:1px solid ${C.green}22; }
+ .main { flex:1; padding:24px; max-width:1100px; margin:0 auto; width:100%; }
+ .page-title { font-size:18px; font-weight:600; margin-bottom:4px; }
+ .page-sub { font-size:13px; color:${C.textSec}; margin-bottom:24px; }
+ .card { background:${C.surface}; border:1px solid ${C.border}; border-radius:10px; padding:20px; }
+ .card-sm { padding:14px 16px; }
+ .card-title { font-size:12px; font-weight:500; color:${C.textSec}; text-transform:uppercase; letter-spacing:.06em; margin-bottom:12px; }
+ .grid-4 { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:20px; }
+ .grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px; }
+ .grid-3 { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin-bottom:20px; }
+ @media(max-width:640px){.grid-2{grid-template-columns:1fr}}
+ .metric-val { font-family:${C.mono}; font-size:28px; font-weight:500; line-height:1.1; }
+ .metric-label { font-size:12px; color:${C.textSec}; margin-top:4px; }
+ .metric-sub { font-size:11px; color:${C.textDim}; margin-top:2px; }
+ .tbl-wrap { border:1px solid ${C.border}; border-radius:8px; overflow:hidden; margin-bottom:20px; }
+ table { width:100%; border-collapse:collapse; font-size:13px; }
+ th { background:${C.surface2}; font-weight:500; color:${C.textSec}; text-align:left; padding:9px 14px; font-size:11px; text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid ${C.border}; }
+ td { padding:10px 14px; color:${C.textPri}; border-bottom:1px solid ${C.borderSub}; vertical-align:middle; }
+ tr:last-child td { border-bottom:none; }
+ tr:hover td { background:${C.surface2}; }
+ .mono { font-family:${C.mono}; font-size:12px; }
+ .badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:500; padding:2px 8px; border-radius:20px; }
+ .b-green { background:${C.greenDim}; color:${C.green}; }
+ .b-red { background:${C.redDim}; color:${C.red}; }
+ .b-amber { background:${C.amberDim}; color:${C.amber}; }
+ .b-cyan { background:${C.cyanDim}; color:${C.cyan}; }
+ .b-dim { background:${C.surface2}; color:${C.textSec}; }
+ .dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; display:inline-block; }
+ .dot-green { background:${C.green}; box-shadow:0 0 6px ${C.green}88; animation:pulse 2s infinite; }
+ .dot-red { background:${C.red}; }
+ .dot-dim { background:${C.textDim}; }
+ @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+ .btn { font-size:12px; font-weight:500; padding:6px 12px; border-radius:6px; border:1px solid; cursor:pointer; transition:opacity .15s,background .15s; font-family:${C.sans}; }
+ .btn:hover { opacity:.85; }
+ .btn-ghost { background:none; border-color:${C.border}; color:${C.textSec}; }
+ .btn-ghost:hover { background:${C.surface2}; color:${C.textPri}; opacity:1; }
+ .btn-cyan { background:${C.cyanDim}; border-color:${C.cyan}44; color:${C.cyan}; }
+ .btn-red { background:${C.redDim}; border-color:${C.red}44; color:${C.red}; }
+ .btn-green { background:${C.greenDim}; border-color:${C.green}44; color:${C.green}; }
+ .btn-amber { background:${C.amberDim}; border-color:${C.amber}44; color:${C.amber}; }
+ .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
+ .inp { background:${C.surface2}; border:1px solid ${C.border}; border-radius:6px; padding:7px 10px; color:${C.textPri}; font-size:13px; font-family:${C.sans}; width:100%; outline:none; }
+ .inp:focus { border-color:${C.cyan}66; }
+ .inp-mono { font-family:${C.mono}; font-size:12px; }
+ .form-row { display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap; margin-bottom:14px; }
+ .form-group { display:flex; flex-direction:column; gap:5px; flex:1; min-width:140px; }
+ .form-label { font-size:11px; color:${C.textSec}; font-weight:500; text-transform:uppercase; letter-spacing:.05em; }
+ .bar-wrap { background:${C.surface2}; border-radius:4px; height:6px; overflow:hidden; }
+ .bar-fill { height:100%; border-radius:4px; transition:width .4s; }
+ .bar-green { background:${C.green}; }
+ .bar-amber { background:${C.amber}; }
+ .bar-red { background:${C.red}; }
+ .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+ .login-box { background:${C.surface}; border:1px solid ${C.border}; border-radius:12px; padding:36px 32px; width:340px; }
+ .login-logo { font-family:${C.mono}; font-size:14px; color:${C.cyan}; margin-bottom:6px; }
+ .login-sub { font-size:13px; color:${C.textSec}; margin-bottom:28px; }
+ .login-err { font-size:12px; color:${C.red}; margin-bottom:12px; background:${C.redDim}; border:1px solid ${C.red}33; border-radius:6px; padding:8px 10px; }
+ .sec-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; flex-wrap:wrap; gap:8px; }
+ .ring-wrap { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px 0; }
+ .ring-label { font-family:${C.mono}; font-size:32px; font-weight:500; margin-top:12px; }
+ .ring-sub { font-size:13px; color:${C.textSec}; margin-top:4px; }
+ .toast-wrap { position:fixed; bottom:20px; right:20px; display:flex; flex-direction:column; gap:8px; z-index:999; pointer-events:none; }
+ .toast { background:${C.surface2}; border:1px solid ${C.border}; border-radius:8px; padding:10px 14px; font-size:13px; color:${C.textPri}; animation:slideIn .2s ease; max-width:320px; }
+ .toast.t-ok { border-left:3px solid ${C.green}; }
+ .toast.t-err { border-left:3px solid ${C.red}; }
+ .toast.t-warn { border-left:3px solid ${C.amber}; }
+ @keyframes slideIn{from{transform:translateX(20px);opacity:0}to{transform:translateX(0);opacity:1}}
+ .modal-bg { position:fixed; inset:0; background:#00000090; display:flex; align-items:center; justify-content:center; z-index:200; }
+ .modal { background:${C.surface}; border:1px solid ${C.border}; border-radius:12px; padding:24px; width:460px; max-width:95vw; }
+ .modal h3 { font-size:15px; font-weight:600; margin-bottom:16px; }
+ .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:20px; }
+ .divider { height:1px; background:${C.border}; margin:16px 0; }
+ .copy-btn { background:none; border:1px solid ${C.border}; border-radius:4px; color:${C.textSec}; font-size:11px; padding:2px 7px; cursor:pointer; font-family:${C.sans}; }
+ .copy-btn:hover { background:${C.surface2}; color:${C.textPri}; }
+ .row { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid ${C.borderSub}; }
+ .row:last-child { border-bottom:none; }
+ .hint-box { background:${C.surface2}; border-radius:6px; padding:10px 12px; font-size:12px; color:${C.textSec}; margin-bottom:8px; }
+ .cmd-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; padding:6px 8px; background:${C.surface2}; border-radius:6px; }
+ .cmd-label { font-size:11px; color:${C.textSec}; min-width:130px; flex-shrink:0; }
+ .cmd-code { font-family:${C.mono}; font-size:11px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:${C.textPri}; }
+`;
+
+const USERS_INIT = [
+ {id:1,username:"alice", vip:"10.99.0.10",quota:10737418240,used:3221225472, connected:true, last:"2026-06-19 08:12",source:"Android"},
+ {id:2,username:"bob", vip:"10.99.0.11",quota:10737418240,used:9663676416, connected:false,last:"2026-06-18 22:45",source:"Windows"},
+ {id:3,username:"carol", vip:"10.99.0.12",quota:5368709120, used:5100273664, connected:true, last:"2026-06-19 09:01",source:"iOS"},
+ {id:4,username:"dave", vip:"10.99.0.13",quota:10737418240,used:1073741824, connected:false,last:"2026-06-17 14:33",source:"macOS"},
+ {id:5,username:"eve", vip:"10.99.0.14",quota:10737418240,used:0, connected:false,last:"Never", source:"—"},
+];
+const BANS_INIT = [
+ {ip:"192.168.10.18", source:"grafana-brute",last:"2026-06-17 09:42",count:14},
+ {ip:"45.33.32.156", source:"sshd", last:"2026-06-17 07:15",count:6},
+ {ip:"103.146.202.11",source:"strongSwan", last:"2026-06-17 05:30",count:3},
+ {ip:"178.62.199.61", source:"sshd", last:"2026-06-16 22:03",count:8},
+ {ip:"80.82.77.139", source:"sshd", last:"2026-06-16 14:22",count:5},
+];
+const WHITELIST = [
+ {cidr:"192.168.10.0/24",type:"Admin/Local"},{cidr:"192.168.20.0/24",type:"WiFi/Storage"},
+ {cidr:"192.168.30.0/24",type:"CCTV"}, {cidr:"192.168.60.0/24",type:"IoT/HA"},
+ {cidr:"100.64.0.0/10", type:"Tailscale"}, {cidr:"10.99.0.0/24", type:"VPN pool"},
+ {cidr:"127.0.0.1", type:"Loopback"}, {cidr:"102.182.117.43", type:"Public IP (Zun)"},
+ {cidr:"192.168.10.88", type:"Authentik"}, {cidr:"192.168.10.98", type:"LXC 903"},
+];
+
+const fmtGB = b => (b/1073741824).toFixed(2)+" GB";
+const pct = (u,q) => q ? Math.min(100,Math.round(u/q*100)) : 0;
+const barCls = p => p>=95?"bar-red":p>=80?"bar-amber":"bar-green";
+const nextVip= users => { const used=users.map(u=>parseInt(u.vip.split(".").pop())); for(let i=10;i<=30;i++) if(!used.includes(i)) return 10.99.0.${i}; return ""; };function useToasts() {
+ const [list,set] = useState([]);
+ const add = useCallback((msg,type="ok")=>{
+ const id=Date.now(); set(t=>[...t,{id,msg,type}]);
+ setTimeout(()=>set(t=>t.filter(x=>x.id!==id)),3500);
+ },[]);
+ return [list,add];
+}
+
+function Toasts({list}){
+ return <div className="toast-wrap">{list.map(t=><div key={t.id} className={`toast t-${t.type}`}>{t.msg}</div>)}</div>;
+}
+function CopyBtn({text}){
+ const [ok,set]=useState(false);
+ return <button className="copy-btn" onClick={()=>{navigator.clipboard.writeText(text);set(true);setTimeout(()=>set(false),1500)}}>{ok?"✓":"copy"}</button>;
+}
+function UsageBar({used,quota}){
+ const p=pct(used,quota);
+ return <div style={{minWidth:120}}>
+ <div className="bar-wrap"><div className={`bar-fill ${barCls(p)}`} style={{width:p+"%"}}/></div>
+ <div style={{fontSize:11,color:C.textSec,marginTop:3,fontFamily:C.mono}}>{fmtGB(used)} / {fmtGB(quota)} · {p}%</div>
+ </div>;
+}
+function UsageRing({used,quota}){
+ const p=pct(used,quota), r=54, circ=2*Math.PI*r;
+ const stroke=p>=95?C.red:p>=80?C.amber:C.cyan;
+ return <div className="ring-wrap">
+ <svg width={130} height={130} style={{transform:"rotate(-90deg)"}}>
+ <circle cx={65} cy={65} r={r} fill="none" stroke={C.surface2} strokeWidth={10}/>
+ <circle cx={65} cy={65} r={r} fill="none" stroke={stroke} strokeWidth={10}
+ strokeDasharray={circ} strokeDashoffset={circ*(1-p/100)} strokeLinecap="round"
+ style={{transition:"stroke-dashoffset .6s ease"}}/>
+ </svg>
+ <div className="ring-label" style={{color:stroke}}>{p}%</div>
+ <div className="ring-sub">{fmtGB(used)} of {fmtGB(quota)} used</div>
+ </div>;
+}
+
+function Login({onLogin}){
+ const [u,setU]=useState(""), [p,setP]=useState(""), [err,setErr]=useState("");
+ const go=()=>{
+ if(!u||!p){setErr("Enter username and password.");return;}
+ if(u==="admin"&&p==="admin"){onLogin("admin",u);return;}
+ const found=USERS_INIT.find(x=>x.username===u);
+ if(found&&p==="pass"){onLogin("user",u);return;}
+ setErr("Invalid credentials.");
+ };
+ return <div className="login-wrap">
+ <div className="login-box">
+ <div className="login-logo">databyte / vpn-portal</div>
+ <div className="login-sub">Sign in to continue</div>
+ {err&&<div className="login-err">{err}</div>}
+ <div className="form-group" style={{marginBottom:12}}>
+ <label className="form-label">Username</label>
+ <input className="inp inp-mono" value={u} onChange={e=>setU(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="username" autoFocus/>
+ </div>
+ <div className="form-group" style={{marginBottom:20}}>
+ <label className="form-label">Password</label>
+ <input className="inp" type="password" value={p} onChange={e=>setP(e.target.value)} onKeyDown={e=>e.key==="Enter"&&go()} placeholder="••••••••"/>
+ </div>
+ <button className="btn btn-cyan" style={{width:"100%",padding:"9px"}} onClick={go}>Sign in</button>
+ <div style={{marginTop:16,fontSize:11,color:C.textDim,fontFamily:C.mono,textAlign:"center"}}>demo · admin/admin · alice/pass</div>
+ </div>
+ </div>;
+}
+
+function AdminOverview({users,bans,toast}){
+ const connected=users.filter(u=>u.connected).length;
+ const overQ=users.filter(u=>pct(u.used,u.quota)>=95).length;
+ const totalUsed=users.reduce((s,u)=>s+u.used,0);
+ const CMDS=[
+ {label:"ipban status", cmd:"sudo ipban-ctl"},
+ {label:"VPN sessions", cmd:"docker exec strongswan swanctl --list-sas"},
+ {label:"VPN pools", cmd:"docker exec strongswan swanctl --list-pools"},
+ {label:"Quota DB", cmd:"sqlite3 /var/lib/vpn-quota/quota.db 'SELECT username,used_bytes,quota_bytes FROM usage;'"},
+ {label:"nftables stats", cmd:"nft list table inet vpn_accounting"},
+ {label:"Grafana", cmd:"http://192.168.10.212:3000/d/ipban-security"},
+ ];
+ return <>
+ <div className="page-title">Overview</div>
+ <div className="page-sub">LXC 902 · 192.168.10.212 &nbsp;|&nbsp; LXC 903 · 192.168.10.98</div>
+ <div className="grid-4">
+ {[
+ {label:"Connected now", val:connected, sub:`of ${users.length} users`, color:C.cyan},
+ {label:"Over quota (≥95%)",val:overQ, sub:"users", color:overQ?C.red:C.green},
+ {label:"Total data used", val:fmtGB(totalUsed), sub:"this period", color:C.textPri},
+ {label:"Banned IPs", val:bans.length, sub:"IPBan_Block_4", color:bans.length?C.amber:C.green},
+ ].map(m=><div className="card card-sm" key={m.label}>
+ <div className="metric-val" style={{color:m.color,fontSize:22}}>{m.val}</div>
+ <div className="metric-label">{m.label}</div>
+ <div className="metric-sub">{m.sub}</div>
+ </div>)}
+ </div>
+ <div className="grid-2">
+ <div className="card">
+ <div className="card-title">Service status</div>
+ {[
+ {name:"ipBan", host:"LXC 902", ok:true},
+ {name:"strongSwan", host:"LXC 903 Docker",ok:true},
+ {name:"node-exporter", host:"LXC 903 :9101", ok:true},
+ {name:"Prometheus", host:"LXC 902", ok:true},
+ {name:"Grafana", host:"LXC 902 :3000", ok:true},
+ {name:"vpn-status", host:"LXC 902 :8080", ok:true},
+ ].map(s=><div className="row" key={s.name}>
+ <span className={`dot ${s.ok?"dot-green":"dot-red"}`}/>
+ <span style={{fontFamily:C.mono,fontSize:12,flex:1}}>{s.name}</span>
+ <span style={{fontSize:11,color:C.textSec}}>{s.host}</span>
+ </div>)}
+ </div>
+ <div className="card">
+ <div className="card-title">Quick commands</div>
+ {CMDS.map(q=><div className="cmd-row" key={q.label}>
+ <span className="cmd-label">{q.label}</span>
+ <span className="cmd-code">{q.cmd}</span>
+ <CopyBtn text={q.cmd}/>
+ </div>)}
+ </div>
+ </div>
+ </>;
+}
+
+function AdminUsers({users,setUsers,toast}){
+ const [showAdd,setShowAdd]=useState(false);
+ const [confirmOff,setConfirmOff]=useState(null);
+ const [form,setForm]=useState({username:"",vip:"",quota:"10",vpnPass:"",webPass:""});
+
+ const openAdd=()=>{setForm({username:"",vip:nextVip(users),quota:"10",vpnPass:"",webPass:""});setShowAdd(true);};
+ const addUser=()=>{
+ if(!form.username||!form.vip||!form.vpnPass||!form.webPass){toast("Fill all fields.","err");return;}
+ setUsers(u=>[...u,{id:Date.now(),username:form.username,vip:form.vip,quota:parseFloat(form.quota)*1073741824,used:0,connected:false,last:"Never",source:"—"}]);
+ setShowAdd(false);
+ toast(`${form.username} added. Apply to swanctl.conf + user-map.conf + nftables.`,"ok");
+ };
+ const offboard=u=>{
+ setUsers(us=>us.filter(x=>x.id!==u.id));
+ setConfirmOff(null);
+ toast(`${u.username} removed from UI. Complete offboard steps on server.`,"warn");
+ };
+ const resetQ=u=>{
+ setUsers(us=>us.map(x=>x.id===u.id?{...x,used:0}:x));
+ toast(`Quota reset for ${u.username} (UI only). Run sqlite3 command to persist.`,"ok");
+ };
+
+ return <>
+ <div className="sec-hdr">
+ <div><div className="page-title">Users</div><div className="page-sub">{users.length} accounts · {users.filter(u=>u.connected).length} connected</div></div>
+ <button className="btn btn-cyan" onClick={openAdd}>+ Add user</button>
+ </div>
+ <div className="tbl-wrap">
+ <table>
+ <thead><tr><th>Username</th><th>Virtual IP</th><th>Platform</th><th>Status</th><th>Usage</th><th>Last seen</th><th>Actions</th></tr></thead>
+ <tbody>{users.map(u=>{
+ const p=pct(u.used,u.quota);
+ return <tr key={u.id}>
+ <td className="mono">{u.username}</td>
+ <td className="mono">{u.vip}</td>
+ <td style={{fontSize:12,color:C.textSec}}>{u.source}</td><td><span className={`badge ${u.connected?"b-green":"b-dim"}`}>
+ <span className={`dot ${u.connected?"dot-green":"dot-dim"}`}/>
+ {u.connected?"Connected":"Offline"}
+ </span></td>
+ <td style={{minWidth:180}}><UsageBar used={u.used} quota={u.quota}/></td>
+ <td style={{fontSize:12,color:C.textSec}}>{u.last}</td>
+ <td><div className="btn-row">
+ <button className="btn btn-ghost" onClick={()=>resetQ(u)}>Reset quota</button>
+ <button className="btn btn-red" onClick={()=>setConfirmOff(u)}>Remove</button>
+ </div></td>
+ </tr>;
+ })}</tbody>
+ </table>
+ </div>
+
+ {showAdd&&<div className="modal-bg" onClick={()=>setShowAdd(false)}>
+ <div className="modal" onClick={e=>e.stopPropagation()}>
+ <h3>Add user</h3>
+ <div className="form-row">
+ <div className="form-group"><label className="form-label">Username</label><input className="inp inp-mono" value={form.username} onChange={e=>setForm(f=>({...f,username:e.target.value}))} placeholder="alice"/></div>
+ <div className="form-group"><label className="form-label">Virtual IP</label><input className="inp inp-mono" value={form.vip} onChange={e=>setForm(f=>({...f,vip:e.target.value}))} placeholder="10.99.0.x"/></div>
+ </div>
+ <div className="form-row">
+ <div className="form-group"><label className="form-label">Quota (GB)</label><input className="inp" type="number" value={form.quota} onChange={e=>setForm(f=>({...f,quota:e.target.value}))}/></div>
+ </div>
+ <div className="form-row">
+ <div className="form-group"><label className="form-label">VPN password</label><input className="inp" type="password" value={form.vpnPass} onChange={e=>setForm(f=>({...f,vpnPass:e.target.value}))} placeholder="EAP-MSCHAPv2 secret"/></div>
+ <div className="form-group"><label className="form-label">Portal password</label><input className="inp" type="password" value={form.webPass} onChange={e=>setForm(f=>({...f,webPass:e.target.value}))} placeholder="Status page login"/></div>
+ </div>
+ <div className="hint-box">
+ After saving — add to <span style={{fontFamily:C.mono}}>swanctl.conf</span> secrets block, <span style={{fontFamily:C.mono}}>user-map.conf</span>, and <span style={{fontFamily:C.mono}}>nftables-vpn-accounting.conf</span> for {form.vip||"10.99.0.x"}. Then run <span style={{fontFamily:C.mono}}>swanctl --load-creds</span> and reload nftables.
+ </div>
+ <div className="modal-footer">
+ <button className="btn btn-ghost" onClick={()=>setShowAdd(false)}>Cancel</button>
+ <button className="btn btn-cyan" onClick={addUser}>Add user</button>
+ </div>
+ </div>
+ </div>}
+
+ {confirmOff&&<div className="modal-bg" onClick={()=>setConfirmOff(null)}>
+ <div className="modal" onClick={e=>e.stopPropagation()}>
+ <h3>Remove {confirmOff.username}?</h3>
+ <p style={{fontSize:13,color:C.textSec,marginBottom:12}}>Complete all offboard steps on the server after confirming here.</p>
+ <div className="hint-box" style={{marginBottom:8}}>
+ <div style={{fontFamily:C.mono,marginBottom:4,fontSize:12}}>docker exec strongswan swanctl --terminate --ike {confirmOff.username}</div>
+ <CopyBtn text={`docker exec strongswan swanctl --terminate --ike ${confirmOff.username}`}/>
+ </div>
+ <div className="hint-box">Then remove from swanctl.conf · user-map.conf · web-creds.conf · nftables-vpn-accounting.conf · quota.db</div>
+ <div className="modal-footer">
+ <button className="btn btn-ghost" onClick={()=>setConfirmOff(null)}>Cancel</button>
+ <button className="btn btn-red" onClick={()=>offboard(confirmOff)}>Remove user</button>
+ </div>
+ </div>
+ </div>}
+ </>;
+}
+
+function AdminQuotas({users,setUsers,toast}){
+ const [editId,setEditId]=useState(null);
+ const [newQ,setNewQ]=useState("");const saveQ=u=>{
+ const gb=parseFloat(newQ);
+ if(isNaN(gb)||gb<=0){toast("Invalid value.","err");return;}
+ setUsers(us=>us.map(x=>x.id===u.id?{...x,quota:gb*1073741824}:x));
+ setEditId(null);
+ toast(`Quota updated for ${u.username} in UI. Update user-map.conf + quota.db to persist.`,"ok");
+ };
+ const resetAll=()=>{
+ setUsers(us=>us.map(x=>({...x,used:0})));
+ toast("All quotas reset in UI. Run: sqlite3 quota.db UPDATE usage SET used_bytes=0,disconnected=0;","warn");
+ };
+ const resetOne=u=>{
+ setUsers(us=>us.map(x=>x.id===u.id?{...x,used:0}:x));
+ toast(`${u.username} quota reset. Persist: sqlite3 quota.db UPDATE usage SET used_bytes=0,disconnected=0 WHERE username='${u.username}';`,"ok");
+ };
+ return <>
+ <div className="sec-hdr">
+ <div><div className="page-title">Quotas</div><div className="page-sub">Monthly data limits</div></div>
+ <button className="btn btn-amber" onClick={resetAll}>Reset all</button>
+ </div>
+ <div className="tbl-wrap">
+ <table>
+ <thead><tr><th>Username</th><th>Virtual IP</th><th>Quota</th><th>Used</th><th>Usage</th><th>State</th><th>Actions</th></tr></thead>
+ <tbody>{users.map(u=>{
+ const p=pct(u.used,u.quota);
+ return <tr key={u.id}>
+ <td className="mono">{u.username}</td>
+ <td className="mono">{u.vip}</td>
+ <td className="mono">{fmtGB(u.quota)}</td>
+ <td className="mono">{fmtGB(u.used)}</td>
+ <td style={{minWidth:160}}><UsageBar used={u.used} quota={u.quota}/></td>
+ <td><span className={`badge ${p>=95?"b-red":p>=80?"b-amber":"b-green"}`}>{p>=95?"Exceeded":p>=80?"Near limit":"OK"}</span></td>
+ <td><div className="btn-row">
+ <button className="btn btn-ghost" onClick={()=>resetOne(u)}>Reset</button>
+ {editId===u.id
+ ?<><input className="inp inp-mono" value={newQ} onChange={e=>setNewQ(e.target.value)} placeholder="GB" style={{width:64}}/><button className="btn btn-green" onClick={()=>saveQ(u)}>Save</button><button className="btn btn-ghost" onClick={()=>setEditId(null)}>✕</button></>
+ :<button className="btn btn-ghost" onClick={()=>{setEditId(u.id);setNewQ((u.quota/1073741824).toFixed(0));}}>Edit</button>
+ }
+ </div></td>
+ </tr>;
+ })}</tbody>
+ </table>
+ </div>
+ <div className="card">
+ <div className="card-title">Persist to server</div>
+ {[
+ {label:"Reset one user", cmd:"sqlite3 /var/lib/vpn-quota/quota.db \"UPDATE usage SET used_bytes=0,disconnected=0 WHERE username='USERNAME';\""},
+ {label:"Reset all", cmd:"sqlite3 /var/lib/vpn-quota/quota.db \"UPDATE usage SET used_bytes=0,disconnected=0;\""},
+ {label:"Edit quota", cmd:"sqlite3 /var/lib/vpn-quota/quota.db \"UPDATE usage SET quota_bytes=BYTES WHERE username='USERNAME';\""},
+ {label:"View all", cmd:"sqlite3 /var/lib/vpn-quota/quota.db \"SELECT username,vip,used_bytes,quota_bytes FROM usage;\""},
+ ].map(r=><div className="cmd-row" key={r.label}>
+ <span className="cmd-label">{r.label}</span>
+ <span className="cmd-code">{r.cmd}</span>
+ <CopyBtn text={r.cmd}/>
+ </div>)}
+ </div>
+ </>;
+}
+
+function AdminSecurity({bans,setBans,toast}){
+ const [manualIp,setManualIp]=useState("");
+ const [wlIp,setWlIp]=useState("");
+ const [wl,setWl]=useState(WHITELIST);
+
+ const doUnban=ip=>{
+ setBans(b=>b.filter(x=>x.ip!==ip));
+ setManualIp("");
+ toast(`Unban queued for ${ip}. Run: sudo ipban-ctl unban ${ip}`,"ok");
+ };
+ const addWl=()=>{
+ if(!wlIp){return;}
+ setWl(w=>[...w,{cidr:wlIp,type:"Manual"}]);
+ toast(`Whitelist add queued for ${wlIp}. Run: sudo ipban-ctl whitelist add ${wlIp}`,"ok");
+ setWlIp("");
+ };
+
+ return <>
+ <div className="page-title">Security</div>
+ <div className="page-sub">ipBan · LXC 902 · firewalld</div>
+ <div className="grid-2">
+ <div className="card"><div className="card-title">Active bans — {bans.length}</div>
+ {bans.length===0&&<div style={{color:C.textSec,fontSize:13}}>No active bans.</div>}
+ {bans.map(b=><div className="row" key={b.ip}>
+ <span className="mono" style={{flex:1,fontSize:11}}>{b.ip}</span>
+ <span className={`badge ${b.source==="sshd"?"b-cyan":b.source==="strongSwan"?"b-amber":"b-red"}`} style={{marginRight:6}}>{b.source}</span>
+ <span style={{fontSize:11,color:C.textSec,marginRight:8}}>{b.count}×</span>
+ <button className="btn btn-red" style={{padding:"3px 8px",fontSize:11}} onClick={()=>doUnban(b.ip)}>Unban</button>
+ </div>)}
+ <div className="divider"/>
+ <div style={{fontSize:12,color:C.textSec,marginBottom:8}}>Manual unban</div>
+ <div className="form-row" style={{marginBottom:0}}>
+ <input className="inp inp-mono" value={manualIp} onChange={e=>setManualIp(e.target.value)} placeholder="x.x.x.x" style={{flex:1}}/>
+ <button className="btn btn-amber" onClick={()=>manualIp&&doUnban(manualIp)}>Unban</button>
+ </div>
+ </div>
+ <div className="card">
+ <div className="card-title">Whitelist — {wl.length} entries</div>
+ <div style={{maxHeight:220,overflowY:"auto"}}>
+ {wl.map(w=><div className="row" key={w.cidr}>
+ <span className="mono" style={{flex:1,fontSize:11}}>{w.cidr}</span>
+ <span style={{fontSize:11,color:C.textSec}}>{w.type}</span>
+ </div>)}
+ </div>
+ <div className="divider"/>
+ <div className="form-row" style={{marginBottom:0}}>
+ <input className="inp inp-mono" value={wlIp} onChange={e=>setWlIp(e.target.value)} placeholder="IP or CIDR" style={{flex:1}}/>
+ <button className="btn btn-green" onClick={addWl}>Add</button>
+ </div>
+ </div>
+ </div>
+ <div className="card" style={{marginBottom:16}}>
+ <div className="card-title">Deadman switch</div>
+ <p style={{fontSize:13,color:C.textSec,marginBottom:12}}>Auto-disables ipBan 24h after last arm. Lockout recovery fallback. Re-arm after each maintenance window.</p>
+ <div className="btn-row" style={{marginBottom:16}}>
+ {["24","48","72"].map(h=><button key={h} className="btn btn-cyan" onClick={()=>toast(`Run: sudo ipban-ctl deadman extend ${h}`,"ok")}>Extend {h}h</button>)}
+ <button className="btn btn-ghost" onClick={()=>toast("Run: sudo ipban-ctl deadman status","ok")}>Check status</button>
+ <button className="btn btn-red" onClick={()=>toast("Run: sudo ipban-ctl deadman disable","warn")}>Disable</button>
+ </div>
+ <div className="card-title">Lockout recovery</div>
+ {[
+ {label:"Option A — LAN", cmd:"ssh zunaid@192.168.10.212 sudo ipban-ctl unban YOUR_IP"},
+ {label:"Option B — OC host",cmd:"/usr/local/bin/ipban unban YOUR_IP"},
+ {label:"Option C — pve2", cmd:"pct exec 902 -- /usr/local/bin/ipban-ctl unban YOUR_IP"},
+ {label:"Bounce LXC 902", cmd:"ssh root@192.168.10.210 'pct shutdown 902 --forceStop 1 --timeout 30 && pct start 902'"},
+ ].map(r=><div className="cmd-row" key={r.label}>
+ <span className="cmd-label">{r.label}</span>
+ <span className="cmd-code">{r.cmd}</span>
+ <CopyBtn text={r.cmd}/>
+ </div>)}
+ </div>
+ </>;
+}
+
+function UserPortal({username}){
+ const u=USERS_INIT.find(x=>x.username===username)||USERS_INIT[0];
+ const p=pct(u.used,u.quota);
+ const remaining=u.quota-u.used;
+ return <>
+ <div className="page-title">My VPN</div>
+ <div className="page-sub">databyte · {u.username}</div>
+ <div className="grid-3">
+ <div className="card" style={{display:"flex",flexDirection:column,alignItems:"center"}}>
+ <UsageRing used={u.used} quota={u.quota}/>
+ </div>
+ <div className="card">
+ <div className="card-title">Session</div>
+ {[
+ {label:"Status", val:<span className={`badge ${u.connected?"b-green":"b-dim"}`}><span className={`dot ${u.connected?"dot-green":"dot-dim"}`}/>{u.connected?"Connected":"Offline"}</span>},
+ {label:"Virtual IP", val:<span className="mono" style={{fontSize:12}}>{u.vip}</span>},
+ {label:"Last connected",val:<span style={{fontSize:12,color:C.textSec}}>{u.last}</span>},
+ {label:"Client", val:<span style={{fontSize:12,color:C.textSec}}>{u.source}</span>},
+ ].map(r=><div className="row" key={r.label}>
+ <span style={{color:C.textSec,fontSize:13,flex:1}}>{r.label}</span>{r.val}
+ </div>)}
+ </div>
+ <div className="card">
+ <div className="card-title">Usage breakdown</div>
+ {[
+ {label:"Used this period", val:fmtGB(u.used), color:C.textPri},
+ {label:"Remaining", val:fmtGB(remaining), color:remaining<1073741824?C.red:C.textPri},
+ {label:"Total quota", val:fmtGB(u.quota), color:C.textPri},
+ {label:"Quota resets", val:"1st of month", color:C.textSec},
+ ].map(r=><div className="row" key={r.label}>
+ <span style={{color:C.textSec,fontSize:13,flex:1}}>{r.label}</span>
+ <span className="mono" style={{fontSize:12,color:r.color}}>{r.val}</span>
+ </div>)}
+ {p>=95&&<div style={{marginTop:12,padding:"10px 12px",background:C.redDim,border:`1px solid ${C.red}33`,borderRadius:6,fontSize:12,color:C.red}}>Quota exceeded — contact your administrator to restore access.</div>}
+ {p>=80&&p<95&&<div style={{marginTop:12,padding:"10px 12px",background:C.amberDim,border:`1px solid ${C.amber}33`,borderRadius:6,fontSize:12,color:C.amber}}>You have used {p}% of your quota this period.</div>}
+ </div>
+ </div>
+ <div className="card">
+ <div className="card-title">Connection guide</div>
+ <div className="grid-2">
+ {[
+ {platform:"Windows",steps:["Settings → Network & Internet → VPN","Add VPN connection → IKEv2",`Server: vpn.databyte.co.za`,`Username: ${u.username}`,"VPN type: IKEv2 · Auth: Username & password"]},
+ {platform:"Android",steps:["Install strongSwan VPN Client (Play Store / F-Droid)","Add profile → IKEv2 EAP (Username/Password)",`Server: vpn.databyte.co.za`,`Username: ${u.username}`,"CA certificate: Select automatically"]},
+ {platform:"iOS", steps:["Settings → General → VPN & Device Management → VPN","Add VPN Configuration → Type: IKEv2",`Server: vpn.databyte.co.za`,`Remote ID: vpn.databyte.co.za`,`Username: ${u.username}`]},
+ {platform:"macOS", steps:["System Settings → VPN → Add VPN Configuration → IKEv2",`Server: vpn.databyte.co.za`,`Remote ID: vpn.databyte.co.za`,`Username: ${u.username}`,"User Authentication: Username and Password"]},
+ ].map(g=><div key={g.platform} style={{background:C.surface2,borderRadius:8,padding:"12px 14px"}}>
+ <div style={{fontSize:12,fontWeight:600,color:C.cyan,marginBottom:8}}>{g.platform}</div>
+ {g.steps.map((s,i)=><div key={i} style={{fontSize:12,color:C.textSec,marginBottom:4,display:"flex",gap:8}}>
+ <span style={{color:C.textDim,minWidth:16}}>{i+1}.</span><span>{s}</span>
+ </div>)}
+ </div>)}
+ </div>
+ </div>
+ </>;
+}
+
+function App(){
+ const [auth,setAuth]=useState(null);
+ const [tab,setTab]=useState("overview");
+ const [users,setUsers]=useState(USERS_INIT);
+ const [bans,setBans]=useState(BANS_INIT);
+ const [toasts,addToast]=useToasts();
+
+ if(!auth) return <>
+ <style>{G()}</style>
+ <Login onLogin={(role,u)=>setAuth({role,username:u})}/>
+ <Toasts list={toasts}/>
+ </>;
+
+ const isAdmin=auth.role==="admin";
+ const TABS=[{id:"overview",label:"Overview"},{id:"users",label:"Users"},{id:"quotas",label:"Quotas"},{id:"security",label:"Security"}];
+
+ return <>
+ <style>{G()}</style>
+ <div className="app">
+ <nav className="nav">
+ <span className="nav-logo">databyte</span>
+ <span className="nav-sep"/>
+ {isAdmin?TABS.map(t=><button key={t.id} className={`nav-tab ${tab===t.id?"active":""}`} onClick={()=>setTab(t.id)}>{t.label}</button>)
+ :<button className="nav-tab active">My VPN</button>}
+ <div className="nav-right">
+ <span className="nav-user">{auth.username}</span>
+ <span className={`nav-badge ${isAdmin?"badge-admin":"badge-user"}`}>{isAdmin?"admin":"user"}</span>
+ <button className="btn btn-ghost" onClick={()=>{setAuth(null);setTab("overview");}}>Sign out</button>
+ </div>
+ </nav>
+ <main className="main">
+ {isAdmin&&tab==="overview" &&<AdminOverview users={users} bans={bans} toast={addToast}/>}
+ {isAdmin&&tab==="users" &&<AdminUsers users={users} setUsers={setUsers} toast={addToast}/>}
+ {isAdmin&&tab==="quotas" &&<AdminQuotas users={users} setUsers={setUsers} toast={addToast}/>}
+ {isAdmin&&tab==="security" &&<AdminSecurity bans={setBans} toast={addToast}/>}
+ {!isAdmin&&<UserPortal username={auth.username}/>}
+ </main>
+ </div>
+ <Toasts list={toasts}/>
+ </>;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
