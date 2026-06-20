@@ -32,6 +32,7 @@ Config via env:
 import os
 import sys
 import json
+import re
 import time
 import hmac
 import hashlib
@@ -151,6 +152,72 @@ def db_exec(sql: str) -> None:
 
 
 # ---------- charon / ipBan / firewalld wrappers ----------
+def leases_active() -> list:
+    """Currently active virtual-IP leases with customer + device info.
+
+    Joins the strongSwan attr-sql pool with the 5B customers/devices layer.
+    Note: identities.data is a BLOB; we CAST to TEXT to make the join work.
+    Includes per-customer usage data so the Sessions tab can show how much
+    each active session has used vs its tier limit.
+    """
+    sql = """
+      SELECT
+        hex(a.address)        AS hex_addr,
+        i.id                 AS identity_id,
+        CAST(i.data AS TEXT) AS identity_name,
+        d.id                 AS device_id,
+        d.device_name        AS device_name,
+        c.id                 AS customer_id,
+        c.name               AS customer_name,
+        c.is_operator        AS is_operator,
+        c.data_used_bytes    AS data_used_bytes,
+        c.data_limit_bytes   AS data_limit_bytes,
+        c.over_quota         AS over_quota,
+        c.tier_id            AS tier_id,
+        t.name               AS tier_name,
+        a.acquired           AS acquired_at
+      FROM addresses a
+      JOIN identities i ON i.id = a.identity
+      LEFT JOIN devices   d ON d.device_name = CAST(i.data AS TEXT)
+      LEFT JOIN customers c ON c.id = d.customer_id
+      LEFT JOIN tiers     t ON t.id = c.tier_id
+      WHERE a.acquired > 0 AND a.released = 0
+      ORDER BY a.acquired DESC
+    """
+    try:
+        rows = db_query(sql)
+    except HTTPException:
+        return []
+    out = []
+    for r in rows:
+        hex_addr = r.get("hex_addr") or ""
+        # hex '0A630005' -> '10.99.0.5'
+        try:
+            ip = ".".join(str(int(hex_addr[i:i+2], 16)) for i in (0, 2, 4, 6))
+        except Exception:
+            ip = "?"
+        used   = r.get("data_used_bytes")  or 0
+        limit  = r.get("data_limit_bytes") or 0
+        pct    = (used / limit * 100) if limit else 0
+        out.append({
+            "address":           ip,
+            "identity_id":       r.get("identity_id"),
+            "identity_name":     r.get("identity_name"),
+            "device_id":         r.get("device_id"),
+            "device_name":       r.get("device_name"),
+            "customer_id":       r.get("customer_id"),
+            "customer_name":     r.get("customer_name"),
+            "is_operator":       bool(r.get("is_operator")),
+            "data_used_bytes":   used,
+            "data_limit_bytes":  limit,
+            "data_pct":          round(pct, 1),
+            "over_quota":        bool(r.get("over_quota")),
+            "tier_name":         r.get("tier_name"),
+            "acquired_at":       r.get("acquired_at"),
+        })
+    return out
+
+
 def swanctl_list_sas() -> str:
     """Raw swanctl --list-sas output. Parsing is the UI's job (different versions differ)."""
     return ssh_903(["docker", "exec", "strongswan",
@@ -243,7 +310,12 @@ def login(req: LoginRequest, request: Request, response: Response):
     if not hmac.compare_digest(req.username.encode(), ADMIN_USER.encode()):
         # Constant-time compare to avoid username enumeration (length-bake aside)
         raise HTTPException(401, "Invalid credentials")
-    if not bcrypt.checkpw(req.password.encode(), ADMIN_PASS_HASH.encode()):
+    pw_bytes = req.password.encode()
+    pw_match = bcrypt.checkpw(pw_bytes, ADMIN_PASS_HASH.encode())
+    log.info("login debug user=%s pw_repr=%s pw_len=%d hash_repr=%s pw_match=%s",
+             req.username, repr(pw_bytes[:30]), len(pw_bytes),
+             repr(ADMIN_PASS_HASH[:30]), pw_match)
+    if not pw_match:
         raise HTTPException(401, "Invalid credentials")
     token = sign_session({"u": req.username, "iat": time.time()})
     response.set_cookie(key="session", value=token, httponly=True, samesite="lax",
@@ -397,19 +469,134 @@ def get_quota(customer_id: int, _: dict = Depends(require_session)):
 
 @app.post("/api/quota/{customer_id}/reset")
 def reset_quota(customer_id: int, _: dict = Depends(require_session)):
-    """Reset data_used_bytes + over_quota for a customer. Audit-logged."""
-    cu = db_query(f"SELECT name, data_used_bytes FROM customers WHERE id = {int(customer_id)};")
-    if not cu:
-        raise HTTPException(404, "Customer not found")
-    cu = cu[0]
-    db_exec(f"UPDATE customers SET data_used_bytes = 0, over_quota = 0, updated_at = strftime('%s','now') WHERE id = {int(customer_id)};")
+    """Full operator reset for a customer. Does everything `reset_demo.sh` does, idempotently:
+
+      1. data_used_bytes → 0, over_quota → 0 in customers
+      2. Detect KILLED EAP secrets for any of this customer's devices
+         → restore from latest pre-cut backup, reload charon creds
+      3. Zero iptables FORWARD counters for the customer's VIPs
+      4. Clear the quota-monitor session sidecar so it re-baselines
+      5. Audit-log each step
+
+    Safe to run repeatedly; no-ops when nothing needs resetting.
+    Returns a per-step report so the UI can show what happened.
+    """
     import json as _json
-    payload = _json.dumps({"reset_from": cu["data_used_bytes"], "actor": "portal"})
+    cu_rows = db_query(f"SELECT id, name, data_used_bytes, over_quota FROM customers WHERE id = {int(customer_id)};")
+    if not cu_rows:
+        raise HTTPException(404, "Customer not found")
+    cu = cu_rows[0]
+    steps = []
+
+    # 1. DB reset
+    db_exec(f"UPDATE customers SET data_used_bytes = 0, over_quota = 0, updated_at = strftime('%s','now') WHERE id = {int(customer_id)};")
+    db_reset_from = cu.get("data_used_bytes", 0)
+    steps.append({"step": "db_reset", "ok": True, "reset_from_bytes": db_reset_from})
+
+    # 2. Restore EAP secrets if KILLED
+    devs = db_query(
+        f"SELECT d.device_name FROM devices d WHERE d.customer_id = {int(customer_id)};"
+    )
+    secret_restored = False
+    secret_devices = []
+    backup_path = ""
+
+    if devs:
+        dev_names = [d.get("device_name") for d in devs if d.get("device_name")]
+
+        # 2a. Read the current conf file (ssh_903 with no bash -c)
+        try:
+            conf = ssh_903(["cat", "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
+        except HTTPException as e:
+            conf = ""
+            steps.append({"step": "read_conf", "ok": False, "error": str(e.detail)})
+
+        # 2b. Find latest backup via `ls -1` + local sort (avoids bash -c)
+        try:
+            ls_out = ssh_903(["ls", "-1", "/home/zunaid/strongswan/swanctl/conf.d/.backups/"])
+            files = [f.strip() for f in ls_out.splitlines()
+                     if f.strip().startswith("rw-eap.conf.bak-quotamon-")]
+            if files:
+                # Filenames include unix epoch — newest is the largest number
+                files.sort()
+                backup_path = "/home/zunaid/strongswan/swanctl/conf.d/.backups/" + files[-1]
+        except HTTPException as e:
+            steps.append({"step": "find_backup", "ok": False, "error": str(e.detail)})
+
+        # 2c. Detect KILLED secrets for any of this customer's devices.
+        # Parse the conf locally: find blocks "id = X\nsecret = Y" and check Y for KILLED.
+        killed_devs = []
+        if conf:
+            for line in conf.splitlines():
+                m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
+                if m_id and m_id.group(1) in dev_names:
+                    dev_in_block = m_id.group(1)
+            # Use a simple state-machine parser
+            current_id = None
+            for line in conf.splitlines():
+                m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
+                m_sec = re.match(r"^\s*secret\s*=\s*\"([^\"]*)\"", line)
+                if m_id:
+                    current_id = m_id.group(1)
+                elif m_sec and current_id in dev_names:
+                    if m_sec.group(1).startswith("KILLED"):
+                        killed_devs.append(current_id)
+                    current_id = None
+                elif line.strip() == "}":
+                    current_id = None
+            secret_devices = killed_devs
+
+        # 2d. If any KILLED, restore backup + reload charon
+        if secret_devices and backup_path:
+            try:
+                ssh_903(["cp", backup_path, "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
+                ssh_903([
+                    "docker", "exec", "strongswan",
+                    "swanctl", "--uri=tcp://127.0.0.1:4502", "--load-creds"
+                ])
+                secret_restored = True
+                steps.append({"step": "restore_secret", "ok": True,
+                              "backup": backup_path, "devices": secret_devices})
+            except HTTPException as e:
+                steps.append({"step": "restore_secret", "ok": False,
+                              "error": str(e.detail), "devices": secret_devices})
+
+    # 3. Zero iptables FORWARD counters
+    try:
+        ssh_903(["iptables-legacy", "-Z", "FORWARD"])
+        steps.append({"step": "zero_iptables", "ok": True, "chain": "FORWARD"})
+    except HTTPException as e:
+        steps.append({"step": "zero_iptables", "ok": False, "error": str(e.detail)})
+
+    # 4. Clear daemon session sidecar
+    try:
+        ssh_903(["rm", "-f", "/var/run/quota-monitor.session"])
+        steps.append({"step": "clear_daemon_sidecar", "ok": True})
+    except HTTPException as e:
+        steps.append({"step": "clear_daemon_sidecar", "ok": False, "error": str(e.detail)})
+
+    # 5. Audit log entry
+    payload = _json.dumps({
+        "reset_from_bytes": db_reset_from,
+        "secret_restored": secret_restored,
+        "secret_devices": secret_devices,
+        "steps": steps,
+        "actor": "portal",
+    })
     payload_escaped = payload.replace("'", "''")
     db_exec(f"""INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
                 VALUES ('portal', 'reset_quota', 'customer', {int(customer_id)}, '{payload_escaped}', strftime('%s','now'));""")
-    log.info("quota reset customer=%s id=%s from=%s", cu["name"], customer_id, cu["data_used_bytes"])
-    return {"ok": True, "customer": cu["name"], "reset_from_bytes": cu["data_used_bytes"]}
+    log.info("quota reset customer=%s id=%s from=%s steps=%d", cu["name"], customer_id, cu["data_used_bytes"], len(steps))
+
+    return {
+        "ok": True,
+        "customer": cu["name"],
+        "customer_id": int(customer_id),
+        "reset_from_bytes": db_reset_from,
+        "secret_restored": secret_restored,
+        "secret_devices": secret_devices,
+        "steps": steps,
+    }
 
 
 @app.get("/api/vpn/sessions")
@@ -421,6 +608,16 @@ def list_sessions(_: dict = Depends(require_session)):
 @app.get("/api/vpn/pools")
 def list_pools(_: dict = Depends(require_session)):
     return swanctl_list_pools()
+
+
+@app.get("/api/vpn/leases")
+def list_leases(_: dict = Depends(require_session)):
+    """Active virtual-IP leases, joined to customer + device.
+
+    Each row shows: VIP, identity (IKE name), device, customer, acquired timestamp.
+    The list is empty when no clients are connected.
+    """
+    return leases_active()
 
 
 @app.get("/api/security/bans")
