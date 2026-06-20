@@ -462,6 +462,135 @@ class WhitelistAddRequest(BaseModel):
     cidr: str = Field(..., pattern=r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$")
 
 
+# ---------- v1.2.7 — Operator client onboarding ----------
+# Cherry-picked from v1.2.5 (reflog a09a478). Tested primitives:
+#   - NTLM hash computation
+#   - read / atomic write / reload charon creds for rw-eap.conf
+#   - append new EAP block (idempotent on identity)
+#   - replace existing EAP block's secret (used by rotate, not in this PR)
+
+DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")
+SLUG_RE        = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$")  # customers.name + users.name
+EMAIL_RE       = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")          # RFC 5322 lite
+RW_EAP_CONF    = "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"
+BACKUP_DIR     = "/home/zunaid/strongswan/swanctl/conf.d/.backups"
+ALLOWED_DEVICE_TYPES = {"iOS", "Android", "Windows", "macOS", "Linux", "Other"}
+
+
+def ntlm_hash_bytes(pw: str) -> bytes:
+    """NTLM = MD4(UTF-16-LE(password)) — 16 raw bytes, what charon expects in users.password."""
+    pw_utf16 = pw.encode("utf-16-le")
+    r = subprocess.run(
+        ["openssl", "dgst", "-md4", "-provider", "legacy", "-binary"],
+        input=pw_utf16, capture_output=True, check=True,
+    )
+    return r.stdout
+
+
+def read_rw_eap_conf() -> str:
+    """Read rw-eap.conf from LXC 903. Returns empty string on failure."""
+    try:
+        return ssh_903(["cat", RW_EAP_CONF])
+    except HTTPException:
+        return ""
+
+
+def write_rw_eap_conf(content: str) -> None:
+    """Atomic write: backup first, then write."""
+    ts = int(time.time())
+    backup_path = f"{BACKUP_DIR}/rw-eap.conf.bak-portal-{ts}"
+    ssh_903(["mkdir", "-p", BACKUP_DIR])
+    ssh_903(["cp", RW_EAP_CONF, backup_path])
+    # Write via stdin over SSH (no shell escaping issues)
+    r = subprocess.run(
+        ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
+         "-o", "StrictHostKeyChecking=accept-new",
+         f"root@{VPN_HOST}", "cat > " + RW_EAP_CONF],
+        input=content.encode(), capture_output=True, timeout=SSH_TIMEOUT,
+    )
+    if r.returncode != 0:
+        raise HTTPException(502, f"write conf failed: {r.stderr.decode(errors='replace')[:200]}")
+
+
+def reload_charon_creds() -> None:
+    """swanctl --load-creds inside the strongSwan container."""
+    ssh_903(["docker", "exec", "strongswan", "swanctl",
+             "--uri=tcp://127.0.0.1:4502", "--load-creds"])
+
+
+def append_eap_block(identity: str, password: str) -> None:
+    """Append a new EAP block to rw-eap.conf if not present (idempotent on id)."""
+    conf = read_rw_eap_conf()
+    block_id = f"eap-{identity}"
+    if re.search(rf"^\s*{re.escape(block_id)}\s*\{{", conf, re.MULTILINE):
+        raise HTTPException(409, f"EAP block '{block_id}' already exists in rw-eap.conf")
+    addition = (
+        f"\n  {block_id} {{\n"
+        f"    id     = {identity}\n"
+        f'    secret = "{password}"\n'
+        f"  }}\n"
+    )
+    if not conf.rstrip().endswith("}"):
+        raise HTTPException(500, "rw-eap.conf has unexpected shape (no trailing '}')")
+    new_conf = conf.rstrip()[:-1].rstrip() + addition + "}\n"
+    write_rw_eap_conf(new_conf)
+
+
+def eap_block_exists(identity: str) -> bool:
+    conf = read_rw_eap_conf()
+    block_id = f"eap-{identity}"
+    return bool(re.search(rf"^\s*{re.escape(block_id)}\s*\{{", conf, re.MULTILINE))
+
+
+def ensure_tier(name: str, display_name: str, data_limit_bytes: int) -> int:
+    """Look up tier by name; if missing, create it. Return tier_id.
+
+    Used by POST /api/customers when the operator picks a custom cap on the fly.
+    Tier name is auto-generated (custom_<N>mb_<ts>) to avoid collisions.
+    """
+    rows = db_query(f"SELECT id, is_active FROM tiers WHERE name = {_q(name)};")
+    if rows:
+        if not rows[0].get("is_active"):
+            raise HTTPException(400, f"tier '{name}' is archived (is_active=0); pick another")
+        return rows[0]["id"]
+    ts = int(time.time())
+    db_exec(
+        f"INSERT INTO tiers (name, display_name, data_limit_bytes, price_zar, is_active, created_at, notes) "
+        f"VALUES ({_q(name)}, {_q(display_name)}, {int(data_limit_bytes)}, NULL, 1, {ts}, "
+        f"{_q('auto-created by v1.2.7 portal onboarding')});"
+    )
+    new = db_query(f"SELECT id FROM tiers WHERE name = {_q(name)};")
+    return new[0]["id"]
+
+
+def slugify(s: str) -> str:
+    """Best-effort slug for customers.name from a display name. Operator can override."""
+    s = s.strip().lower()
+    s = re.sub(r"[^a-z0-9_-]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return s[:32] or "client"
+
+
+# ---------- v1.2.7 Pydantic models ----------
+class ClientCreate(BaseModel):
+    # Customer
+    name:             Optional[str] = Field(None, min_length=1, max_length=32,
+                                           description="URL-safe slug; auto-derived from display_name if omitted")
+    display_name:     str           = Field(..., min_length=1, max_length=128)
+    billing_id:       Optional[str] = Field(None, max_length=128)
+    email:            Optional[str] = Field(None, max_length=128)
+    telegram_username: Optional[str] = Field(None, max_length=64)
+    notes:            Optional[str] = Field(None, max_length=1024)
+    # Tier — either existing tier_name OR 'custom' with custom_cap_mb
+    tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_3gb') OR 'custom'")
+    custom_cap_mb:    Optional[int] = Field(None, ge=1, le=1024*1024,
+                                           description="Cap in MiB. Required iff tier_name=='custom'")
+    # Device (1 creds = 1 device, per v1.2.6 model)
+    device_name:      str           = Field(..., min_length=1, max_length=32)
+    device_type:      str           = Field(..., description="iOS/Android/Windows/macOS/Linux/Other")
+    os_version:       Optional[str] = Field(None, max_length=32)
+
+
 # ---------- Routes ----------
 @app.get("/api/health")
 def health():
@@ -525,7 +654,8 @@ def list_customers(_: dict = Depends(require_session)):
     rows = db_query("""
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
-               c.over_quota, t.name AS tier_name, t.display_name AS tier_display,
+               c.over_quota, c.billing_id, c.email,
+               t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
         LEFT JOIN tiers t ON c.tier_id = t.id
@@ -547,13 +677,205 @@ def list_customers(_: dict = Depends(require_session)):
             "is_active": bool(r["is_active"]),
             "status": r["status"],
             "tier": r["tier_name"],
-            "tier_display": r["tier_display"],
+            "tier_display": r.get("tier_display"),
+            "billing_id": r.get("billing_id"),
+            "email": r.get("email"),
             "used_bytes": used,
             "quota_bytes": quota,
             "pct": round(used / quota * 100, 1) if quota else 0,
             "over_quota": bool(r["over_quota"]),
         })
     return out
+
+
+# ---------- v1.2.7 — POST /api/customers (operator creates a new client) ----------
+@app.post("/api/customers")
+def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
+    """Operator-only: create a new customer + their single device + creds.
+
+    One-shot transaction:
+      1. Validate inputs (name shape, email, tier, device_type).
+      2. Resolve tier — either existing by name OR auto-create a new tier from
+         custom_cap_mb (binary MiB, 1..1M).
+      3. Generate password (secrets.token_urlsafe(16)) + NTLM hash.
+      4. INSERT customers row (with billing_id, email, telegram_username,
+         max_devices=1 per v1.2.6 model).
+      5. INSERT users row (EAP identity = '{customer.name}-{device_name}').
+      6. INSERT devices row (links customer ↔ user, device_type, os_version).
+      7. Append EAP block to rw-eap.conf.
+      8. Reload charon creds.
+      9. Audit log.
+     10. Return {customer, device, password} — password is shown ONCE in the
+         portal modal; never logged, never returned again.
+
+    409 on duplicate customers.name or users.name, 400 on invalid inputs,
+    502 on rw-eap.conf write failure (rolled back by charon not seeing block).
+    """
+    # 1. Validate
+    if req.tier_name == "custom":
+        if req.custom_cap_mb is None:
+            raise HTTPException(400, "custom_cap_mb is required when tier_name='custom'")
+        if req.custom_cap_mb < 1:
+            raise HTTPException(400, "custom_cap_mb must be >= 1 MiB")
+    elif req.custom_cap_mb is not None:
+        raise HTTPException(400, "custom_cap_mb must be omitted when tier_name is an existing tier")
+
+    if req.email and not EMAIL_RE.match(req.email):
+        raise HTTPException(400, f"email '{req.email}' is not a valid address")
+
+    if req.device_type not in ALLOWED_DEVICE_TYPES:
+        raise HTTPException(400, f"device_type must be one of {sorted(ALLOWED_DEVICE_TYPES)}")
+
+    if not DEVICE_NAME_RE.match(req.device_name):
+        raise HTTPException(400, "device_name must be alphanumeric + dash, 1-32 chars, no leading dash")
+    if ".." in req.device_name or "/" in req.device_name:
+        raise HTTPException(400, "device_name cannot contain '..' or '/'")
+
+    # customers.name — explicit or derived from display_name
+    cust_name = req.name.strip() if req.name else slugify(req.display_name)
+    if not SLUG_RE.match(cust_name):
+        raise HTTPException(400, f"customer name '{cust_name}' must be alphanumeric + dash/underscore, 1-32 chars, no leading dash")
+
+    eap_identity = f"{cust_name}-{req.device_name}"
+    if not SLUG_RE.match(eap_identity):
+        raise HTTPException(400, f"derived EAP identity '{eap_identity}' is too long (max 32)")
+
+    # 2. Resolve tier
+    if req.tier_name == "custom":
+        ts = int(time.time())
+        tier_name = f"custom_{req.custom_cap_mb}mb_{ts}"
+        tier_display = f"Custom {req.custom_cap_mb} MiB"
+        data_limit = req.custom_cap_mb * 1024 * 1024  # binary MiB
+        tier_id = ensure_tier(tier_name, tier_display, data_limit)
+    else:
+        rows = db_query(f"SELECT id, data_limit_bytes, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+        if not rows:
+            raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
+        if not rows[0].get("is_active"):
+            raise HTTPException(400, f"tier '{req.tier_name}' is archived")
+        tier_id = rows[0]["id"]
+        data_limit = rows[0]["data_limit_bytes"]
+        tier_name = req.tier_name
+        tier_display = None
+
+    # 3. Uniqueness
+    if db_query(f"SELECT id FROM customers WHERE name = {_q(cust_name)};"):
+        raise HTTPException(409, f"customer '{cust_name}' already exists")
+    if db_query(f"SELECT id FROM users WHERE name = {_q(eap_identity)};"):
+        raise HTTPException(409, f"EAP identity '{eap_identity}' already exists in users")
+    if eap_block_exists(eap_identity):
+        raise HTTPException(409, f"EAP block 'eap-{eap_identity}' already exists in rw-eap.conf")
+
+    # 4-6. Generate + insert
+    password = secrets.token_urlsafe(16)
+    ntlm = ntlm_hash_bytes(password)
+    now = int(time.time())
+
+    # We insert customers + users + devices; on failure of 7-8, we need to roll
+    # back DB rows. SQLite here is just files via SSH; we have no transaction
+    # support over the boundary. Compensate by deleting in reverse on later
+    # failure (best-effort).
+    cust_id = None
+    user_id = None
+    dev_id  = None
+    try:
+        db_exec(
+            f"INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
+            f"over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
+            f"created_at, updated_at, notes, billing_id, email) VALUES "
+            f"({_q(cust_name)}, {_q(req.display_name)}, {_q(req.telegram_username)}, 0, 1, "
+            f"0, {int(data_limit)}, 0, {int(tier_id)}, 'active', 1, "
+            f"{now}, {now}, {_q(req.notes)}, {_q(req.billing_id)}, {_q(req.email)});"
+        )
+        cust_id = db_query(f"SELECT id FROM customers WHERE name = {_q(cust_name)};")[0]["id"]
+
+        db_exec(
+            f"INSERT INTO users (name, password) VALUES ({_q(eap_identity)}, X'{ntlm.hex().upper()}');"
+        )
+        user_id = db_query(f"SELECT id FROM users WHERE name = {_q(eap_identity)};")[0]["id"]
+
+        db_exec(
+            f"INSERT INTO devices (customer_id, strongswan_user_id, device_name, device_type, "
+            f"os_version, notes, is_active, created_at, updated_at) VALUES "
+            f"({int(cust_id)}, {int(user_id)}, {_q(req.device_name)}, {_q(req.device_type)}, "
+            f"{_q(req.os_version)}, {_q(req.notes)}, 1, {now}, {now});"
+        )
+        dev_id = db_query(f"SELECT id FROM devices WHERE device_name = {_q(req.device_name)} "
+                          f"AND customer_id = {int(cust_id)};")[0]["id"]
+
+        # 7. EAP block
+        append_eap_block(eap_identity, password)
+
+        # 8. Reload charon
+        reload_charon_creds()
+    except Exception as e:
+        # Best-effort rollback
+        log.error(f"v1.2.7 create_client failed at sub-step; rolling back: {e}")
+        if dev_id:  db_exec(f"DELETE FROM devices WHERE id = {int(dev_id)};")
+        if user_id: db_exec(f"DELETE FROM users   WHERE id = {int(user_id)};")
+        if cust_id: db_exec(f"DELETE FROM customers WHERE id = {int(cust_id)};")
+        # If we already appended the EAP block, try to remove it (best-effort)
+        if eap_block_exists(eap_identity):
+            try:
+                conf = read_rw_eap_conf()
+                pat = re.compile(
+                    rf"\n?\s*eap-{re.escape(eap_identity)}\s*\{{[^{{}}]*?\}}\n?",
+                    re.DOTALL,
+                )
+                write_rw_eap_conf(pat.sub("", conf, count=1))
+            except Exception:
+                pass
+        raise
+
+    # 9. Audit
+    _audit("zun", "create_client", {
+        "_target_type": "customer",
+        "_target_id":   cust_id,
+        "customer_name": cust_name,
+        "display_name":  req.display_name,
+        "billing_id":    req.billing_id,
+        "email":         req.email,
+        "tier":          tier_name,
+        "device_name":   req.device_name,
+        "device_type":   req.device_type,
+        "os_version":    req.os_version,
+        "eap_identity":  eap_identity,
+    })
+
+    # 10. Return one-shot response
+    return {
+        "customer": {
+            "id":             cust_id,
+            "name":           cust_name,
+            "display_name":   req.display_name,
+            "billing_id":     req.billing_id,
+            "email":          req.email,
+            "telegram_username": req.telegram_username,
+            "tier":           tier_name,
+            "tier_display":   tier_display,
+            "is_active":      True,
+            "is_operator":    False,
+            "max_devices":    1,
+            "status":         "active",
+            "data_used_bytes": 0,
+            "data_limit_bytes": data_limit,
+            "notes":          req.notes,
+            "created_at":     now,
+            "updated_at":     now,
+        },
+        "device": {
+            "id":          dev_id,
+            "customer_id": cust_id,
+            "device_name": req.device_name,
+            "device_type": req.device_type,
+            "os_version":  req.os_version,
+            "is_active":   True,
+            "created_at":  now,
+            "updated_at":  now,
+        },
+        "eap_identity": eap_identity,
+        "password":     password,   # ONE-SHOT — never returned again
+    }
 
 
 @app.get("/api/customers/{customer_id}")
@@ -563,6 +885,7 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
         SELECT c.id, c.name, c.display_name, c.telegram_id, c.telegram_username,
                c.is_operator, c.is_active, c.status, c.data_used_bytes,
                c.data_limit_bytes, c.over_quota, c.notes, c.created_at, c.updated_at,
+               c.billing_id, c.email,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -597,6 +920,29 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
     custom_add = (cust.get("data_limit_bytes") or 0) - tier_limit
     quota = tier_limit + max(custom_add, 0)
     used = cust.get("data_used_bytes") or 0
+
+    # v1.2.7 — current_session: server-side join of active leases for this customer
+    current_session = None
+    try:
+        leases = leases_active()
+        for lease in leases:
+            if lease.get("customer_id") == int(customer_id):
+                current_session = {
+                    "public_ip":  lease.get("public_ip"),
+                    "remote_port": lease.get("remote_port"),
+                    "vip":        lease.get("address"),
+                    "device":     lease.get("device_name"),
+                    "since":      lease.get("acquired_at"),
+                    "ike":        lease.get("ike_proposal"),
+                    "sa_state":   lease.get("sa_state"),
+                    "bytes_in":   lease.get("sa_bytes_in"),
+                    "bytes_out":  lease.get("sa_bytes_out"),
+                    "established_secs": lease.get("sa_established_secs"),
+                }
+                break
+    except Exception:
+        pass  # non-fatal; just no live session
+
     return {
         **{k: v for k, v in cust.items() if k not in ("tier_limit",)},
         "tier": cust.get("tier_name"),
@@ -607,6 +953,9 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
         "is_operator": bool(cust["is_operator"]),
         "is_active": bool(cust["is_active"]),
         "over_quota": bool(cust["over_quota"]),
+        "billing_id": cust.get("billing_id"),
+        "email":      cust.get("email"),
+        "current_session": current_session,
         "devices": devices,
         "alerts": alerts,
         "purchases": purchases,
@@ -939,12 +1288,21 @@ def _q(s: str) -> str:
 
 
 def _audit(actor: str, action: str, payload: dict) -> None:
-    """Write to audit_log on LXC 903."""
+    """Write to audit_log on LXC 903.
+
+    Schema: actor TEXT, action TEXT, target_type TEXT, target_id INTEGER,
+    payload TEXT, created_at INTEGER.
+    """
     import json as _json
     raw = _json.dumps(payload, separators=(",", ":"))
+    target_type = payload.pop("_target_type", None) if isinstance(payload, dict) else None
+    target_id   = payload.pop("_target_id",   None) if isinstance(payload, dict) else None
     sql = (
-        f"INSERT INTO audit_log (actor, action, payload, at) "
-        f"VALUES ({_q(actor)}, {_q(action)}, {_q(raw)}, strftime('%s','now'));"
+        f"INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
+        f"VALUES ({_q(actor)}, {_q(action)}, "
+        f"{_q(target_type) if target_type is not None else 'NULL'}, "
+        f"{int(target_id) if target_id is not None else 'NULL'}, "
+        f"{_q(raw)}, strftime('%s','now'));"
     )
     try:
         db_exec(sql)
