@@ -46,3 +46,7 @@ docker/.env
 # rclone config with S3 credentials
 rclone.conf
 .rclone.conf
+
+# Python bytecode
+__pycache__/
+*.pyc
