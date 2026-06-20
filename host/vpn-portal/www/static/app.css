@@ -512,3 +512,53 @@ tr:last-child td { border-bottom: none; }
   .vp-row-actions { text-align: right; }
   .vp-row-actions .vp-btn-icon { width: 36px; height: 36px; }
 }
+
+/* ─── Modal (device editor) ─── */
+.vp-modal-bg {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999;
+  padding: 20px;
+}
+.vp-modal {
+  background: var(--vp-s1);
+  border: 1px solid var(--vp-border);
+  border-radius: 10px;
+  padding: 24px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+}
+.vp-modal-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--vp-text);
+}
+.vp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.vp-field > span {
+  font-size: 12px;
+  color: var(--vp-text2);
+  font-weight: 600;
+}
+.vp-field input,
+.vp-field textarea {
+  background: var(--vp-s2);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--vp-font);
+  font-size: 13px;
+  color: var(--vp-text);
+}
+.vp-field input:focus,
+.vp-field textarea:focus {
+  outline: none;
+  border-color: var(--cyan);
+}

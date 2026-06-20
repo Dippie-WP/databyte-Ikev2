@@ -14,7 +14,11 @@ Endpoints:
   GET  /api/quota/{customer_id}        live used/quota + cap state
   POST /api/quota/{customer_id}/reset  sqlite UPDATE, returns reset_from_bytes
   GET  /api/vpn/sessions               docker exec swanctl --list-sas (raw)
+  GET  /api/vpn/sessions/parsed         structured parse: VIP, public_ip, algos, fingerprint
   GET  /api/vpn/pools                  docker exec swanctl --list-pools (parsed)
+  GET  /api/devices                    list all devices with metadata
+  GET  /api/devices/{id}               single device metadata
+  PUT  /api/devices/{id}               update device_type, hostname, os_version, notes, is_active
   GET  /api/security/bans              ipban-ctl list (parsed)
   GET  /api/security/whitelist         firewalld trusted zone sources
   POST /api/security/unban             ipban-ctl unban {ip}
@@ -159,6 +163,10 @@ def leases_active() -> list:
     Note: identities.data is a BLOB; we CAST to TEXT to make the join work.
     Includes per-customer usage data so the Sessions tab can show how much
     each active session has used vs its tier limit.
+
+    Also enriches each lease with live SA data from swanctl --list-sas:
+    public_ip, remote_port, ike_proposal, device_type (inferred from algo).
+    Device hostname + OS version come from the devices table if set.
     """
     sql = """
       SELECT
@@ -167,6 +175,9 @@ def leases_active() -> list:
         CAST(i.data AS TEXT) AS identity_name,
         d.id                 AS device_id,
         d.device_name        AS device_name,
+        d.device_type        AS device_type_meta,
+        d.os_version         AS os_version_meta,
+        d.hostname           AS hostname_meta,
         c.id                 AS customer_id,
         c.name               AS customer_name,
         c.is_operator        AS is_operator,
@@ -188,6 +199,12 @@ def leases_active() -> list:
         rows = db_query(sql)
     except HTTPException:
         return []
+    # Parse live SAs once — keyed by VIP
+    sas_by_vip = {}
+    for sa in swanctl_parse_sas():
+        if sa.get("vip"):
+            sas_by_vip[sa["vip"]] = sa
+
     out = []
     for r in rows:
         hex_addr = r.get("hex_addr") or ""
@@ -199,12 +216,28 @@ def leases_active() -> list:
         used   = r.get("data_used_bytes")  or 0
         limit  = r.get("data_limit_bytes") or 0
         pct    = (used / limit * 100) if limit else 0
+
+        sa = sas_by_vip.get(ip, {})
+        algo  = sa.get("algo")
+        algo_fp = sa.get("algo_fingerprint") or fingerprint_device(algo or "")
+        # Prefer manually-set device_type; fall back to inferred
+        manual_type = r.get("device_type_meta")
+        if manual_type:
+            device_type = {"label": manual_type, "confidence": 1.0, "source": "manual"}
+        elif algo_fp.get("label"):
+            device_type = algo_fp
+        else:
+            device_type = {"label": None, "confidence": 0, "source": None}
+
         out.append({
             "address":           ip,
             "identity_id":       r.get("identity_id"),
             "identity_name":     r.get("identity_name"),
             "device_id":         r.get("device_id"),
             "device_name":       r.get("device_name"),
+            "device_type":       device_type,
+            "os_version":        r.get("os_version_meta"),
+            "hostname":          r.get("hostname_meta"),
             "customer_id":       r.get("customer_id"),
             "customer_name":     r.get("customer_name"),
             "is_operator":       bool(r.get("is_operator")),
@@ -214,6 +247,14 @@ def leases_active() -> list:
             "over_quota":        bool(r.get("over_quota")),
             "tier_name":         r.get("tier_name"),
             "acquired_at":       r.get("acquired_at"),
+            "public_ip":         sa.get("remote_ip"),
+            "remote_port":       sa.get("remote_port"),
+            "ike_proposal":      algo,
+            "sa_state":          sa.get("state"),
+            "sa_established_secs": sa.get("established_secs"),
+            "sa_bytes_in":       sa.get("bytes_in"),
+            "sa_bytes_out":      sa.get("bytes_out"),
+            "sa_uniqueid":       sa.get("uniqueid"),
         })
     return out
 
@@ -222,6 +263,152 @@ def swanctl_list_sas() -> str:
     """Raw swanctl --list-sas output. Parsing is the UI's job (different versions differ)."""
     return ssh_903(["docker", "exec", "strongswan",
                     "swanctl", "--uri=tcp://127.0.0.1:4502", "--list-sas"])
+
+
+# IKE proposal fingerprints for OS/device detection.
+# Based on observed client behavior + strongSwan/Android source code signatures.
+# NOT authoritative — use as "inferred" badge only, never as primary auth signal.
+_IKE_FINGERPRINTS = [
+    # (algo_substring, label, confidence)
+    # iOS / macOS native IKEv2 client (also strongSwan Apple clients)
+    ("AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048", "iOS/macOS", 0.85),
+    ("AES_CBC-128/HMAC_SHA1_96/PRF_HMAC_SHA1/MODP_1024",          "iOS/macOS (legacy)", 0.70),
+    ("AES_GCM_16-256/PRF_HMAC_SHA2_384/MODP_2048",                "iOS/macOS (modern)", 0.80),
+    # Windows 10/11 native IKEv2 (AgileVPN)
+    ("AES_GCM_16-256/HMAC_SHA2_384_192/PRF_HMAC_SHA2_384/MODP_2048", "Windows 10/11", 0.90),
+    ("AES_GCM_16-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048", "Windows 10/11", 0.85),
+    ("AES_CBC-256/HMAC_SHA1_96/PRF_HMAC_SHA1/MODP_2048",          "Windows (legacy)", 0.60),
+    # strongSwan Android app (uses charon-cmd by default)
+    ("AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_256",   "strongSwan Android", 0.90),
+    ("AES_GCM_16-256/PRF_HMAC_SHA2_256/ECP_256",                  "strongSwan Android", 0.85),
+    # strongSwan desktop client (Linux/macOS/Windows)
+    ("AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048",  "strongSwan desktop", 0.75),
+    # Linux NetworkManager-strongswan
+    ("AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_1536",  "NetworkManager",     0.70),
+]
+
+
+def fingerprint_device(algo_str: str) -> dict:
+    """Heuristic device-type detection from IKE proposal string.
+
+    Returns {label, confidence, source: "inferred"|null}.
+    """
+    if not algo_str:
+        return {"label": None, "confidence": 0, "source": None}
+    for needle, label, conf in _IKE_FINGERPRINTS:
+        if needle == algo_str or needle in algo_str:
+            return {"label": label, "confidence": conf, "source": "inferred"}
+    return {"label": None, "confidence": 0, "source": None}
+
+
+# swanctl --list-sas parser — extracts structured data for the UI.
+# Format (strongSwan 6.x):
+#   rw-eap: #22, ESTABLISHED, IKEv2, spi_i spi_r*
+#     local  'vpn.homelab.local' @ 192.168.10.98[4500]
+#     remote 'demo-phone' @ 105.174.188.166[51234] [10.99.0.5]
+#     AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
+#     established 614s ago, rekeying in 79344s, reauth in 78406s
+#     net: #3, reqid 1, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-256/HMAC_SHA2_256_128
+#       installed 614s ago, rekeying in 2648s, expires in 3346s
+#       in  cbe261ee, 4199276 bytes, 52155 packets,     0s ago
+#       out 040b08d2, 128451591 bytes, 105627 packets,     0s ago
+#       local  0.0.0.0/0
+#       remote 10.99.0.5/32
+_SA_HEADER_RE = re.compile(
+    r"^(?P<conn>\S+):\s+#(?P<id>\d+),\s+(?P<state>\S+),\s+(?P<version>\S+),\s+"
+    r"(?P<spi_i>[0-9a-f]+)\s+(?P<spi_r>[0-9a-f]+)"
+)
+_SA_LOCAL_RE  = re.compile(
+    r"local\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
+)
+_SA_REMOTE_RE = re.compile(
+    r"remote\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
+    r"(?:\s+\[(?P<vip>\d+\.\d+\.\d+\.\d+)\])?"
+)
+_SA_ALGO_RE   = re.compile(r"^\s*([A-Z][A-Z0-9_/-]+(?:/[A-Z0-9_]+)+)\s*$")
+_SA_ESTAB_RE  = re.compile(r"established\s+(\d+)s")
+_SA_INOUT_RE  = re.compile(
+    r"^\s+(?P<dir>in|out)\s+(?P<spi>[0-9a-f]+),\s+"
+    r"(?P<bytes>\d+)\s+bytes,\s+(?P<pkts>\d+)\s+packets"
+)
+
+
+def swanctl_parse_sas() -> list:
+    """Parse swanctl --list-sas output into structured records keyed by VIP.
+
+    Returns list of dicts: {uniqueid, conn, state, version, local_id, local_ip,
+    local_port, remote_id, remote_ip, remote_port, vip, algo, algo_fingerprint,
+    established_secs, bytes_in, bytes_out, pkts_in, pkts_out}.
+    """
+    raw = ""
+    try:
+        raw = swanctl_list_sas()
+    except Exception:
+        return []
+    sas = []
+    cur = None
+    in_child = False
+    for line in raw.splitlines():
+        m = _SA_HEADER_RE.match(line)
+        if m:
+            cur = {
+                "uniqueid":         int(m.group("id")),
+                "conn":             m.group("conn"),
+                "state":            m.group("state"),
+                "version":          m.group("version"),
+                "local_id":         None, "local_ip": None, "local_port": None,
+                "remote_id":        None, "remote_ip": None, "remote_port": None,
+                "vip":              None,
+                "algo":             None, "algo_fingerprint": None,
+                "established_secs": None,
+                "bytes_in": 0, "bytes_out": 0, "pkts_in": 0, "pkts_out": 0,
+            }
+            in_child = False
+            sas.append(cur)
+            continue
+        if not cur:
+            continue
+        m = _SA_LOCAL_RE.search(line)
+        if m:
+            cur["local_id"]   = m.group("id")
+            cur["local_ip"]   = m.group("ip")
+            cur["local_port"] = int(m.group("port"))
+            continue
+        m = _SA_REMOTE_RE.search(line)
+        if m:
+            cur["remote_id"]   = m.group("id")
+            cur["remote_ip"]   = m.group("ip")
+            cur["remote_port"] = int(m.group("port"))
+            if m.group("vip"):
+                cur["vip"] = m.group("vip")
+            continue
+        # Algorithm line — bare token list, not preceded by 'in'/'out'/'local'/'remote'
+        if not in_child:
+            stripped = line.strip()
+            if stripped and not stripped.startswith(("net:", "local", "remote",
+                                                      "in ", "out ", "installed",
+                                                      "established", "rekeying",
+                                                      "reauth", "expires")):
+                if "/" in stripped and " " not in stripped:
+                    cur["algo"] = stripped
+                    cur["algo_fingerprint"] = fingerprint_device(stripped)
+                    continue
+        m = _SA_ESTAB_RE.search(line)
+        if m:
+            cur["established_secs"] = int(m.group(1))
+            continue
+        if line.strip().startswith("net:"):
+            in_child = True
+            continue
+        m = _SA_INOUT_RE.match(line)
+        if m:
+            if m.group("dir") == "in":
+                cur["bytes_in"]  = int(m.group("bytes"))
+                cur["pkts_in"]   = int(m.group("pkts"))
+            else:
+                cur["bytes_out"] = int(m.group("bytes"))
+                cur["pkts_out"]  = int(m.group("pkts"))
+    return sas
 
 
 def swanctl_list_pools() -> list:
@@ -384,7 +571,8 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
         raise HTTPException(404, "Customer not found")
     cust = cust[0]
     devices = db_query(f"""
-        SELECT id, device_name, is_active, last_seen_v4, last_seen_at
+        SELECT id, device_name, device_type, os_version, hostname,
+               is_active, last_seen_v4, last_seen_at, notes
         FROM devices WHERE customer_id = {int(customer_id)}
         ORDER BY last_seen_at DESC NULLS LAST, device_name;
     """)
@@ -605,6 +793,12 @@ def list_sessions(_: dict = Depends(require_session)):
     return {"raw": swanctl_list_sas()}
 
 
+@app.get("/api/vpn/sessions/parsed")
+def list_sessions_parsed(_: dict = Depends(require_session)):
+    """Active IKE SAs as structured JSON, keyed by VIP where available."""
+    return swanctl_parse_sas()
+
+
 @app.get("/api/vpn/pools")
 def list_pools(_: dict = Depends(require_session)):
     return swanctl_list_pools()
@@ -612,7 +806,7 @@ def list_pools(_: dict = Depends(require_session)):
 
 @app.get("/api/vpn/leases")
 def list_leases(_: dict = Depends(require_session)):
-    """Active virtual-IP leases, joined to customer + device.
+    """Active virtual-IP leases, joined to customer + device + live SA data.
 
     Each row shows: VIP, identity (IKE name), device, customer, acquired timestamp.
     The list is empty when no clients are connected.
@@ -652,6 +846,108 @@ def whitelist_add(req: WhitelistAddRequest, _: dict = Depends(require_session)):
     ssh_903(["sudo", "firewall-cmd", "--zone=trusted", "--add-source", req.cidr])
     log.info("whitelist add cidr=%s", req.cidr)
     return {"ok": True, "cidr": req.cidr}
+
+
+# ---------- Devices (metadata admin) ----------
+class DeviceUpdate(BaseModel):
+    device_name: Optional[str] = None
+    device_type: Optional[str] = None       # e.g. "iPhone 14 Pro", "Windows 11 laptop"
+    os_version:  Optional[str] = None       # e.g. "iOS 18.5", "Windows 11 23H2"
+    hostname:    Optional[str] = None       # device hostname (manual entry)
+    notes:       Optional[str] = None
+    is_active:   Optional[int] = None       # 0 or 1
+
+
+@app.get("/api/devices")
+def list_devices(_: dict = Depends(require_session)):
+    """All devices with customer + metadata. For the admin Devices view."""
+    sql = """
+      SELECT d.id, d.customer_id, d.device_name, d.device_type, d.os_version,
+             d.hostname, d.is_active, d.last_seen_v4, d.last_seen_at,
+             d.created_at, d.updated_at, d.notes,
+             c.name AS customer_name
+      FROM devices d
+      LEFT JOIN customers c ON c.id = d.customer_id
+      ORDER BY c.name, d.device_name;
+    """
+    try:
+        rows = db_query(sql)
+    except HTTPException:
+        return []
+    return rows
+
+
+@app.get("/api/devices/{device_id}")
+def get_device(device_id: int, _: dict = Depends(require_session)):
+    rows = db_query(f"""
+      SELECT d.id, d.customer_id, d.device_name, d.device_type, d.os_version,
+             d.hostname, d.is_active, d.last_seen_v4, d.last_seen_at,
+             d.created_at, d.updated_at, d.notes,
+             c.name AS customer_name
+      FROM devices d
+      LEFT JOIN customers c ON c.id = d.customer_id
+      WHERE d.id = {int(device_id)};
+    """)
+    if not rows:
+        raise HTTPException(404, "device not found")
+    return rows[0]
+
+
+@app.put("/api/devices/{device_id}")
+def update_device(device_id: int, req: DeviceUpdate,
+                  _: dict = Depends(require_session)):
+    """Update device metadata (manual entry for hostname, OS, type, notes).
+
+    Only updates fields that are explicitly provided (non-None). NULL clears.
+    """
+    fields = []
+    if req.device_name is not None:
+        fields.append(f"device_name = {_q(req.device_name)}")
+    if req.device_type is not None:
+        fields.append(f"device_type = {_q(req.device_type)}")
+    if req.os_version is not None:
+        fields.append(f"os_version = {_q(req.os_version)}")
+    if req.hostname is not None:
+        fields.append(f"hostname = {_q(req.hostname)}")
+    if req.notes is not None:
+        fields.append(f"notes = {_q(req.notes)}")
+    if req.is_active is not None:
+        fields.append(f"is_active = {int(req.is_active)}")
+    if not fields:
+        raise HTTPException(400, "no fields to update")
+    fields.append("updated_at = strftime('%s','now')")
+    sql = f"UPDATE devices SET {', '.join(fields)} WHERE id = {int(device_id)};"
+    try:
+        db_exec(sql)
+    except HTTPException as e:
+        raise HTTPException(500, f"db error: {e.detail}")
+    # audit
+    actor = "portal"
+    try:
+        _audit(actor, "device_update",
+               {"device_id": device_id, "fields": list(req.model_dump(exclude_none=True).keys())})
+    except Exception:
+        pass
+    return get_device(device_id, _={})  # type: ignore
+
+
+def _q(s: str) -> str:
+    """SQLite single-quote escape."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _audit(actor: str, action: str, payload: dict) -> None:
+    """Write to audit_log on LXC 903."""
+    import json as _json
+    raw = _json.dumps(payload, separators=(",", ":"))
+    sql = (
+        f"INSERT INTO audit_log (actor, action, payload, at) "
+        f"VALUES ({_q(actor)}, {_q(action)}, {_q(raw)}, strftime('%s','now'));"
+    )
+    try:
+        db_exec(sql)
+    except HTTPException:
+        pass
 
 
 @app.get("/api/security/deadman")
