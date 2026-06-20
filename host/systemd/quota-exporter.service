@@ -1,0 +1,29 @@
+[Unit]
+Description=Prometheus exporter for 5B quota layer (5C.3)
+Documentation=file:///root/projects/strongswan-vpn-gateway/host/systemd/README.md
+After=quota-monitor.service docker.service
+Wants=quota-monitor.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/zunaid/strongswan/quota/quota-exporter.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/home/zunaid/strongswan/quota/quota-exporter.py
+ReadOnlyPaths=/var/lib/strongswan/ipsec.db
+
+# We need /usr/sbin/iptables-legacy (binary) and /usr/bin/docker (for swanctl)
+# so we can't ProtectSystem=strict without allowlists. Drop the strict mode.
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
