@@ -622,20 +622,35 @@
         el('dt', {}, 'Updated'),  el('dd', { cls: 'vp-mono' }, fmtTime(c.updated_at)),
         c.notes ? [el('dt', {}, 'Notes'), el('dd', {}, c.notes)] : [],
       ),
-      // Devices
+      // Devices (with metadata + edit)
       c.devices && c.devices.length ? [
         el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Devices (' + c.devices.length + ')'),
         el('div', { cls: 'vp-tbl-wrap' },
           el('table', {},
             el('thead', {}, el('tr', {},
-              el('th', {}, 'Name'), el('th', {}, 'VIP'), el('th', {}, 'Last seen'), el('th', {}, ''),
+              el('th', {}, 'Name'),
+              el('th', {}, 'Type'),
+              el('th', {}, 'OS'),
+              el('th', {}, 'Hostname'),
+              el('th', {}, 'VIP'),
+              el('th', {}, 'Last seen'),
+              el('th', {}, ''),
             )),
             el('tbody', {},
               ...c.devices.map(d => el('tr', {},
                 el('td', { cls: 'vp-mono', 'data-label': 'Name' }, d.device_name),
+                el('td', { 'data-label': 'Type' }, d.device_type ? spanBadge(d.device_type, 'cyan') : el('span', { cls: 'dim' }, '—')),
+                el('td', { cls: 'vp-mono', 'data-label': 'OS' }, d.os_version || '—'),
+                el('td', { cls: 'vp-mono', 'data-label': 'Hostname' }, d.hostname || '—'),
                 el('td', { cls: 'vp-mono', 'data-label': 'VIP' }, d.last_seen_v4 || '—'),
                 el('td', { cls: 'vp-mono', 'data-label': 'Last seen' }, fmtTime(d.last_seen_at)),
-                el('td', { 'data-label': 'Status' }, d.is_active ? spanBadge('active','green') : spanBadge('disabled','red')),
+                el('td', { 'data-label': '' },
+                  el('button', {
+                    cls: 'vp-btn-icon',
+                    title: 'Edit device metadata',
+                    onclick: () => openDeviceEditor(c.id, d),
+                  }, '✎'),
+                ),
               ))
             ),
           ),
@@ -662,6 +677,86 @@
       // Audit log
       renderAuditLog(c.audit_log || []),
     );
+  }
+
+  // ─── Device metadata editor ────────────
+  // Inline modal — replaces the device row with editable fields, then PUTs /api/devices/{id}.
+  function openDeviceEditor(customerId, d) {
+    const modal = el('div', {
+      cls: 'vp-modal-bg',
+      onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
+    },
+      el('div', { cls: 'vp-modal' },
+        el('div', { cls: 'vp-modal-title' },
+          'Edit device: ', el('span', { cls: 'vp-mono' }, d.device_name)),
+        // device_type
+        el('label', { cls: 'vp-field' },
+          el('span', {}, 'Device type'),
+          el('input', { id: 'dev-type', type: 'text', value: d.device_type || '',
+                        placeholder: 'e.g. iPhone 15 Pro, Windows 11 laptop' }),
+        ),
+        // os_version
+        el('label', { cls: 'vp-field' },
+          el('span', {}, 'OS version'),
+          el('input', { id: 'dev-os', type: 'text', value: d.os_version || '',
+                        placeholder: 'e.g. iOS 18.5, Windows 11 23H2, Ubuntu 24.04' }),
+        ),
+        // hostname
+        el('label', { cls: 'vp-field' },
+          el('span', {}, 'Hostname'),
+          el('input', { id: 'dev-host', type: 'text', value: d.hostname || '',
+                        placeholder: 'device hostname or human label' }),
+        ),
+        // notes
+        el('label', { cls: 'vp-field' },
+          el('span', {}, 'Notes'),
+          el('textarea', { id: 'dev-notes', rows: '2', placeholder: 'admin notes' },
+            d.notes || ''),
+        ),
+        el('div', { cls: 'vp-btn-row', style: 'margin-top:14px' },
+          el('button', { cls: 'vp-btn', onclick: closeModal }, 'Cancel'),
+          el('button', {
+            cls: 'vp-btn vp-btn-primary',
+            onclick: async () => {
+              const payload = {};
+              const t = document.getElementById('dev-type').value.trim();
+              const o = document.getElementById('dev-os').value.trim();
+              const h = document.getElementById('dev-host').value.trim();
+              const n = document.getElementById('dev-notes').value.trim();
+              if (t) payload.device_type = t;
+              if (o) payload.os_version = o;
+              if (h) payload.hostname = h;
+              payload.notes = n; // empty string allowed (clears notes)
+              try {
+                await api(`/api/devices/${d.id}`, {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload),
+                });
+                closeModal();
+                // refresh customer detail
+                await loadCustomers();
+                if (S.selectedId === customerId) {
+                  const fresh = (S.customers || []).find(x => x.id === customerId);
+                  if (fresh) { S.detail = fresh; render(); }
+                } else {
+                  selectCustomer(customerId);
+                }
+                showBanner('Device metadata saved', 'green');
+              } catch (e) {
+                showBanner('Save failed: ' + (e && e.message || e), 'red');
+              }
+            },
+          }, '💾 Save'),
+        ),
+      ),
+    );
+    document.body.appendChild(modal);
+  }
+
+  function closeModal() {
+    const m = document.querySelector('.vp-modal-bg');
+    if (m) m.remove();
   }
 
   // ─── Audit log renderer ────────────────────────────────
@@ -825,7 +920,7 @@
                 }))
               : emptyState('⊘', 'No pools', 'swanctl returned no virtual-IP pools.'))
       ),
-      // Active leases with customer + device
+      // Active leases with customer + device + live SA enrichment
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' },
           'Active leases (' + (S.leases && S.leases.length || 0) + ')'),
@@ -838,13 +933,23 @@
                       el('th', {}, 'VIP'),
                       el('th', {}, 'Customer'),
                       el('th', {}, 'Device'),
-                      el('th', { cls: 'vp-tbl-lease-hide-sm' }, 'Identity'),
+                      el('th', {}, 'Type'),
+                      el('th', {}, 'OS'),
+                      el('th', {}, 'Hostname'),
+                      el('th', { cls: 'vp-tbl-lease-hide-sm' }, 'Public IP'),
                       el('th', {}, 'Used'),
                       el('th', {}, 'Acquired'),
                     )),
                     el('tbody', {},
-                      ...S.leases.map(lease =>
-                        el('tr', {},
+                      ...S.leases.map(lease => {
+                        const dt = lease.device_type || {};
+                        const typeLabel = dt.label || '—';
+                        const typeBadge = dt.source === 'inferred'
+                          ? spanBadge(typeLabel, 'amber')
+                          : dt.source === 'manual'
+                          ? spanBadge(typeLabel, 'cyan')
+                          : el('span', { cls: 'dim' }, '—');
+                        return el('tr', {},
                           el('td', { cls: 'vp-mono', 'data-label': 'VIP' }, lease.address),
                           el('td', { 'data-label': 'Customer' },
                             lease.customer_name
@@ -854,12 +959,15 @@
                                   style: 'color: var(--cyan); text-decoration: none',
                                 }, lease.customer_name)
                               : el('span', { cls: 'dim' }, '—')),
-                          el('td', { cls: 'vp-mono vp-tbl-lease-hide-sm', 'data-label': 'Device' }, lease.device_name || '—'),
-                          el('td', { cls: 'vp-mono vp-tbl-lease-hide-sm', 'data-label': 'Identity' }, lease.identity_name || '—'),
+                          el('td', { cls: 'vp-mono', 'data-label': 'Device' }, lease.device_name || '—'),
+                          el('td', { 'data-label': 'Type' }, typeBadge),
+                          el('td', { cls: 'vp-mono', 'data-label': 'OS' }, lease.os_version || '—'),
+                          el('td', { cls: 'vp-mono', 'data-label': 'Hostname' }, lease.hostname || '—'),
+                          el('td', { cls: 'vp-mono vp-tbl-lease-hide-sm', 'data-label': 'Public IP' }, lease.public_ip || '—'),
                           el('td', { 'data-label': 'Used' }, usageBar(lease.data_used_bytes, lease.data_limit_bytes, lease.data_pct, lease.over_quota, lease.is_operator)),
                           el('td', { cls: 'vp-mono', 'data-label': 'Acquired' }, fmtTime(lease.acquired_at)),
-                        )
-                      )
+                        );
+                      })
                     ),
                   ),
                 )
