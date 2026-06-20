@@ -2,6 +2,36 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
+## Current state (live 2026-06-20 12:35 UTC)
+
+**Latest tag: v1.2.4** — active session device info on UI + CHANGELOG.md.
+
+**Phase status:**
+| Phase | Description | Status |
+|---|---|---|
+| 5A | Foundation (lock-in, certs, attr-sql, MSS clamp, exporter) | ✅ DONE — both gates green 2026-06-18 |
+| 5B | Quota layer (DB + iptables + monitor + cut) | ✅ DONE — both gates green 2026-06-19 23:30 UTC, v1.1.0 |
+| 5C.1+5C.2 | Self-service portal (FastAPI + vanilla JS) | ✅ DONE — v1.2 |
+| 5C.3 | Grafana `strongswan-quota` integration | ✅ DONE — v1.2.2 |
+| 5C.4 | ~~RustFS daily backup verify~~ | ⛔ CANCELLED — PBS full-LXC replaces |
+| v1.2.1 | Reboot fixes (two-charons, docker cold-boot) | ✅ DONE |
+| v1.2.3 | VICI parser hardening | ✅ DONE |
+| v1.2.4 | Device info UI + CHANGELOG.md | ✅ DONE |
+| **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
+| 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
+| v1.3 | iOS native EAP fixes, cert rotation, MTU/PMTUD, nftables migration | 🔒 SHELVED — backlog, no scheduled work |
+
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4 (7 total).
+
+**Active development branches:** none. All merged to main.
+
+**Live infra (verified 12:35 UTC):**
+- LXC 902 (myservices, 192.168.10.212): 12 Docker containers running (grafana, prometheus, dockhand, paperless, node-exporter, truenas-exporter, snmp-exporter, ipsec-exporter, strongswan-exporter, vpn-quota-exporter, etc.)
+- LXC 903 (vpn-gateway, 192.168.10.98): charon PID 668 bound UDP 500/4500, 508 iptables per-VIP rules, all systemd services enabled + active
+- Active SAs: 0 (Zun's connection ended 12:30 UTC)
+- demo-customer: 23.4 MB / 100 MB used, over_quota=0
+- zun-operator: 0 bytes, operator bypass
+
 ## 5A — Foundation (lock-in) — ✅ GREEN (both gates, 2026-06-18)
 
 **Goal:** Self-hosted IKEv2 EAP-MSCHAPv2 + per-user sticky VIP. Public-path tested.
@@ -81,7 +111,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 **Backups:** `ipsec.db.bak-5B1-20260619-132059` retained on LXC 903. Kill-conf backups at `/home/zunaid/strongswan/swanctl/conf.d/.backups/rw-eap.conf.bak-quotamon-*` (one per cut event).
 
-## 5C — Surface — 🔄 5C.1/5C.2 DONE (v1.2), 5C.3 DONE (v1.2.2), 5C.4 CANCELLED
+## 5C — Surface — ✅ DONE (v1.2.4 latest, 5C.1/5C.2 v1.2, 5C.3 v1.2.2, 5C.4 CANCELLED)
 
 **Goal:** Operator dashboard + monitoring integration.
 
@@ -89,7 +119,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 |---|---|---|
 | 5C.1 | Customer/operator web page (FastAPI + bcrypt + rate-limit) | ✅ DONE — v1.2 (5C.1+5C.2 combined) |
 | 5C.2 | Admin web page (`/admin`, customer mgmt + credential gen + quota extension) | ✅ DONE — v1.2 |
-| 5C.3 | Grafana `vpn-quota` dashboard (per-customer view, audit, alerts) | ✅ DONE — v1.2.2 (this commit) |
+| 5C.3 | Grafana `vpn-quota` dashboard (per-customer view, audit, alerts) | ✅ DONE — v1.2.2 |
 | 5C.4 | ~~Backup verify (RustFS)~~ — **CANCELLED 2026-06-20** | ⛔ Replaced by PBS full-LXC backup (Zun direction) |
 
 **5C.3 deliverable details (tagged v1.2.2):**
@@ -97,6 +127,19 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - `host/systemd/quota-exporter.service` — long-running daemon
 - `host/grafana/dashboards/strongswan-quota.json` — 11-panel dashboard
 - `host/grafana/README.md` — folder-level docs
+
+**v1.2.1 (reboot fixes):** `host/docker/daemon.json` + disable `strongswan-starter`. Two-charons bug.
+
+**v1.2.3 (VICI parser hardening):** Recursive descent parser replaces regex in `quota-exporter.py`. 8 fixtures pass.
+
+**v1.2.4 (device info UI + CHANGELOG):**
+- `CHANGELOG.md` (new) — Keep-a-Changelog 1.1.0 format. Tracks all 7 versions.
+- Sessions page lease table: + Type (fingerprint-inferred or manual badge), OS, Hostname, Public IP columns.
+- Customer detail Devices table: + Type, OS, Hostname columns, inline ✎ modal editor.
+- New endpoints: `GET /api/vpn/sessions/parsed`, `GET /api/devices`, `GET /api/devices/{id}`, `PUT /api/devices/{id}`.
+- `swanctl_parse_sas()` — structured parse (replaces raw text). Bug fix: regex matched SPI role markers (`_i`, `_r*`).
+- `fingerprint_device(algo_str)` — heuristic OS detection from IKE proposal (10 patterns).
+- Schema migration: `devices` table adds `device_type/os_version/hostname TEXT`.
 
 ## 5D — Commercial — 🔒 Shelved (out of scope, customer-facing bits moved to 5C)
 
