@@ -303,7 +303,7 @@ def fingerprint_device(algo_str: str) -> dict:
 
 # swanctl --list-sas parser — extracts structured data for the UI.
 # Format (strongSwan 6.x):
-#   rw-eap: #22, ESTABLISHED, IKEv2, spi_i spi_r*
+#   rw-eap: #22, ESTABLISHED, IKEv2, <spi_i>_i <spi_r>_r*
 #     local  'vpn.homelab.local' @ 192.168.10.98[4500]
 #     remote 'demo-phone' @ 105.174.188.166[51234] [10.99.0.5]
 #     AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
@@ -314,9 +314,11 @@ def fingerprint_device(algo_str: str) -> dict:
 #       out 040b08d2, 128451591 bytes, 105627 packets,     0s ago
 #       local  0.0.0.0/0
 #       remote 10.99.0.5/32
+# SPIs end with _i / _r role markers; responder SPI also gets a trailing *
 _SA_HEADER_RE = re.compile(
     r"^(?P<conn>\S+):\s+#(?P<id>\d+),\s+(?P<state>\S+),\s+(?P<version>\S+),\s+"
-    r"(?P<spi_i>[0-9a-f]+)\s+(?P<spi_r>[0-9a-f]+)"
+    r"(?P<spi_i>[0-9a-f]+)_i\s+"
+    r"(?P<spi_r>[0-9a-f]+)_r\*?\s*$"
 )
 _SA_LOCAL_RE  = re.compile(
     r"local\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
