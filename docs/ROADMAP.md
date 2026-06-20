@@ -14,6 +14,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | 5C.1+5C.2 | Self-service portal (FastAPI + vanilla JS) | ✅ DONE — v1.2 |
 | 5C.3 | Grafana `strongswan-quota` integration | ✅ DONE — v1.2.2 |
 | 5C.4 | ~~RustFS daily backup verify~~ | ⛔ CANCELLED — PBS full-LXC replaces |
+| **5C.5** | **Self-service device management (operator adds/removes/rotates device creds via portal)** | **⏳ PLANNED (2026-06-20) — awaiting Zun "go"** |
 | v1.2.1 | Reboot fixes (two-charons, docker cold-boot) | ✅ DONE |
 | v1.2.3 | VICI parser hardening | ✅ DONE |
 | v1.2.4 | Device info UI + CHANGELOG.md | ✅ DONE |
@@ -140,6 +141,37 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - `swanctl_parse_sas()` — structured parse (replaces raw text). Bug fix: regex matched SPI role markers (`_i`, `_r*`).
 - `fingerprint_device(algo_str)` — heuristic OS detection from IKE proposal (10 patterns).
 - Schema migration: `devices` table adds `device_type/os_version/hostname TEXT`.
+
+## 5C.5 — Self-service device management — ⏳ PLANNED (2026-06-20), NOT STARTED
+
+**Goal:** Operator adds, removes, and rotates device credentials for any customer via the portal, end-to-end (UI → API → DB → charon creds reload → audit log). Today it's a 4-step manual bash + SQL operation; this phase makes it a button.
+
+**Why:** Friend just hit this gap manually. Each new device takes ~2 min of bash + SQL + charon reload, with no audit trail beyond a hand-written `audit_log` row. Wrong layer for a homelab MSP.
+
+**Locked decisions (Zun, 2026-06-20 15:15 UTC):**
+- **Operator-only portal** — no Telegram DM to customer, no customer self-add. Operator (Zun) is the only person who creates accounts and issues credentials.
+- **Max 2 devices per customer** (NOT the default 5). Enforced server-side, 409 on third device add. Configurable per-customer via new `customers.max_devices` column.
+- **No actual work started** — phase is planned and documented. Zun will say "go" when ready.
+
+| Step | What | Status |
+|---|---|---|
+| 5C.5.1 | Backend `POST /api/customers/{id}/devices` — accepts `device_name`, `device_type`, `os_version`, `notes`. Auto-generates password (`secrets.token_urlsafe(16)`), NTLM-hashes it, inserts `users` + `devices` rows, writes `audit_log`, returns the password **once** in the response. 409 on duplicate name. Enforce `max_devices` cap with 409. | ⏳ |
+| 5C.5.2 | Backend `DELETE /api/devices/{id}` — soft delete (`is_active=0`). Keeps the EAP block in `rw-eap.conf` (audit + post-mortem; no charon disruption). Writes `audit_log`. | ⏳ |
+| 5C.5.3 | Backend `POST /api/devices/{id}/rotate` — generates new password, regex-replaces the EAP block in `rw-eap.conf` (idempotent, matches by `id = <name>`), reloads charon creds via `swanctl --load-creds` over VICI URI, returns new password once. | ⏳ |
+| 5C.5.4 | Backend `GET /api/customers/{id}/devices` — list with last-seen VIP + is_active. Already partially exists; wire 5C.5.1/2/3 results into it. | ⏳ |
+| 5C.5.5 | Frontend: "+ Add device" button on customer detail page. Modal: friendly name (alphanumeric + dash, max 32, reject `..` / `/` / leading dash) + type select (iOS/macOS/Android/Windows/Linux/Other) + optional OS version + notes. On submit: show new password in copy-to-clipboard panel with "this is shown once" warning. | ⏳ |
+| 5C.5.6 | Frontend: per-row ↻ (rotate) and ⊘ (deactivate) buttons. Rotate → same one-shot password panel. Deactivate → confirm dialog. | ⏳ |
+| 5C.5.7 | Schema migration: `ALTER TABLE customers ADD COLUMN max_devices INTEGER NOT NULL DEFAULT 2`. | ⏳ |
+| 5C.5.8 | End-to-end live test: create `friend-laptop2` via portal → charon picks up new creds → live SA appears in Sessions → 5C.5.2 deactivate → SA terminated on next reconnect, EAP block retained. | ⏳ |
+
+**Out of scope (explicit):**
+- Customer self-add (operator-only model)
+- Telegram DM delivery of new passwords (operator hands off manually)
+- Bulk device add (5D commercial scope)
+- EAP block wipe on deactivation (soft delete only, retain block for audit)
+- Per-customer rate-limiting on add (operator is the only caller)
+
+**Current manual operation (the gap):** 3-step bash + SQL sequence — (1) insert EAP block in `rw-eap.conf`, (2) insert `users` row with NTLM hash, (3) insert `devices` row, (4) `swanctl --load-creds`. ~2 min per device. Last performed live for `friend-phone` (id=20) and `friend-laptop` (id=21) on 2026-06-20 14:09 + 14:59 UTC respectively.
 
 ## 5D — Commercial — 🔒 Shelved (out of scope, customer-facing bits moved to 5C)
 
