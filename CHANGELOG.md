@@ -6,7 +6,13 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### v1.2.4 — 2026-06-20 (in review)
+(nothing in flight — all changes captured in next released version)
+
+## [Released]
+
+### v1.2.4 — 2026-06-20
+
+Active session device info on UI + CHANGELOG.md.
 
 Sessions page and customer detail UI now show real-time device + connection
 metadata for each active IKE_SA.
