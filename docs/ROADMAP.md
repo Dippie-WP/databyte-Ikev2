@@ -81,15 +81,22 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 **Backups:** `ipsec.db.bak-5B1-20260619-132059` retained on LXC 903. Kill-conf backups at `/home/zunaid/strongswan/swanctl/conf.d/.backups/rw-eap.conf.bak-quotamon-*` (one per cut event).
 
-## 5C — Surface — ⏳ Gated on 5B green
+## 5C — Surface — 🔄 5C.1/5C.2 DONE (v1.2), 5C.3 DONE (v1.2.2), 5C.4 CANCELLED
 
 **Goal:** Operator dashboard + monitoring integration.
 
-| Step | What |
-|---|---|
-| 5C.1 | Status FastAPI app (bcrypt + rate-limit + itsdangerous) |
-| 5C.2 | Grafana `vpn-quota` dashboard |
-| 5C.3 | Backup verify (RustFS) |
+| Step | What | Status |
+|---|---|---|
+| 5C.1 | Customer/operator web page (FastAPI + bcrypt + rate-limit) | ✅ DONE — v1.2 (5C.1+5C.2 combined) |
+| 5C.2 | Admin web page (`/admin`, customer mgmt + credential gen + quota extension) | ✅ DONE — v1.2 |
+| 5C.3 | Grafana `vpn-quota` dashboard (per-customer view, audit, alerts) | ✅ DONE — v1.2.2 (this commit) |
+| 5C.4 | ~~Backup verify (RustFS)~~ — **CANCELLED 2026-06-20** | ⛔ Replaced by PBS full-LXC backup (Zun direction) |
+
+**5C.3 deliverable details (tagged v1.2.2):**
+- `quota/quota-exporter.py` (421 lines) — Prometheus exporter on LXC 903:9102
+- `host/systemd/quota-exporter.service` — long-running daemon
+- `host/grafana/dashboards/strongswan-quota.json` — 11-panel dashboard
+- `host/grafana/README.md` — folder-level docs
 
 ## 5D — Commercial — 🔒 Shelved (out of scope, customer-facing bits moved to 5C)
 
@@ -115,5 +122,11 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - **Cloudflare bot detection** — ifconfig.me may give `ERR_CONNECTION_CLOSED` because shared MASQ IP looks bot-like
 - **5G MTU/PMTUD** — server-side MSS clamp at 1260 fixes (5A.7). May need carrier-specific tuning
 - **5G CGNAT stability** — iOS SAs die in 4-30 min on cellular. Try lower fragment_size (1100), raise `ikesa_max_halfopen` to 10, install_virtual_ip=yes test
-- **5H — HA + LB** — 2x v1.1 + keepalived VRRP active/passive, shared DB, ~5s failover. Tier 1 for homelab SLA.
+- **5H — HA + LB** — 2x v1.2 + keepalived VRRP active/passive, shared DB, ~5s failover. Tier 1 for homelab SLA. **Last-last phase (Zun, 2026-06-20 10:45 UTC)**.
 - **iptables → nftables migration** — nftables named counters persist across rule reloads. Would prevent future 5B.6-style bugs. ~2-3h work, low priority since 5B.6 fix is in place.
+
+## Backup strategy (Zun 2026-06-20 10:48 UTC)
+
+- **5C.4 (RustFS daily DB+configs backup verify) — CANCELLED**
+- **Replacement:** PBS (Proxmox Backup Server, already running at 192.168.10.84) backs up the entire LXC 903 + LXC 902 containers. No need for separate RustFS target.
+- The daily `/usr/local/bin/strongswan-configs-backup.sh` job (5A.8) can remain as a quick-restore convenience but is no longer the primary backup.
