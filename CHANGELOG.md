@@ -8,6 +8,82 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.6 — 2026-06-20
+
+Revert 5C.5 self-service device management, lock model to **1 (creds pair) =
+1 device**. 5C.6 multi-device-per-customer SHELVED (strongSwan's 1-identity-1-VIP
+design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
+
+**Changed**
+
+- `customers.max_devices` default changed from `2` to `1` (schema migration +
+  all existing customer rows updated).
+- Branches `v1.2.5-self-service-devices` and tag `v1.2.5` **deleted** (local
+  + remote). The 5C.5 work is dead code under the new model.
+- Live data cleanup: deactivated all but 1 active device per customer (canonical
+  = lowest device id). Audit logged.
+- 2-demo-account topology: `demo-customer` (100 MiB, tier `demo_100mb`) +
+  `friend-customer` (500 MB, tier `friend_500mb`) are the 2 demo accounts;
+  `zun-operator` is the single operator account (unlimited).
+
+**Removed**
+
+- `+ Add device` UI affordance and per-row device management actions (rotate,
+  deactivate) are no longer present in the dashboard (LXC 902 reverted to the
+  v1.2.4 code that predates 5C.5).
+- `POST /api/customers/{id}/devices`, `DELETE /api/devices/{id}`,
+  `POST /api/devices/{id}/rotate`, `GET /api/customers/{id}/devices` —
+  endpoints from 5C.5 that have no caller under the 1-device-per-customer
+  model.
+- `quota/migrate_5C5_add_max_devices.sh` (column default 2; superseded by
+  `quota/migrate_v126_max_devices_one.sh`).
+
+**Added**
+
+- `quota/migrate_v126_max_devices_one.sh` — idempotent migration: schema
+  change (max_devices DEFAULT 1) + data cleanup (deactivate extras) + audit log
+  entry per deactivation. Safe to re-run.
+- `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md` (Rev 2) — research + decision log
+  for the shelved 5C.6 phase. Retained as historical record.
+- Note in `docs/ROADMAP.md` flagging 5C.5 as **REVERTED** and 5C.6 as
+  **SHELVED** with rationale.
+
+**Fixed**
+
+- (No code fix in this release — `audit_log` `at` vs `created_at` bug from
+  5C.5 still exists in 5C.5-era code, but that code is reverted. Live
+  v1.2.6 = v1.2.4 + schema tweak, so the bug is not present in the running
+  portal.)
+
+**Operator action items (run once after upgrade)**
+
+- Run `quota/migrate_v126_max_devices_one.sh` on LXC 903.
+- Verify `rw-eap.conf` on LXC 903 — deactivated devices still have EAP
+  blocks loaded. To make auth fail at EAP rather than just succeed-and-replace,
+  set their `secret = "BLOCKED-<hex>"` (do this via a follow-up `update_rw_eap_conf.py`
+  pass if needed).
+- Reissue credentials for `friend-customer` (500 MB demo) if you want to test
+  it — the canonical device for that customer is the lowest-id active device
+  (see migration output).
+
+**Backlog (NOT auto-promoted)**
+
+- 5C.6 (multi-device-per-customer) — SHELVED. If revisited, the only clean
+  path is **Option 4** (per-device client certs / EAP-TLS) — much bigger
+  build (CA, cert generation, cert distribution, iOS/Android cert install UX).
+  Do NOT restart from the 5C.5 / 5C.6 EAP-MSCHAPv2 work.
+- Runtime SA-cap monitor — would let us *reject* (instead of *replace*) the
+  2nd device using the same creds. Today charon's default `uniqueids=yes`
+  makes the 2nd device take over. Different semantics from "reject."
+
+**Migration from v1.2.5 (if you were on the 5C.5 branch)**
+
+- DO NOT deploy the v1.2.5 code on a fresh install. The 5C.5 work has been
+  thrown away. Deploy v1.2.6 (= v1.2.4 + schema migration) instead.
+- If you already ran the 5C.5 migration (`migrate_5C5_add_max_devices.sh`),
+  the v1.2.6 migration handles the column change (DEFAULT 2 → DEFAULT 1)
+  and the data cleanup. Safe to run on top of a 5C.5-already-applied DB.
+
 ## [Released]
 
 ### v1.2.4 — 2026-06-20

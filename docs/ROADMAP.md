@@ -2,9 +2,9 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
-## Current state (live 2026-06-20 12:35 UTC)
+## Current state (live 2026-06-20 19:30 UTC)
 
-**Latest tag: v1.2.4** — active session device info on UI + CHANGELOG.md.
+**Latest tag: v1.2.6** — 5C.5 reverted, model locked to 1 creds = 1 device.
 
 **Phase status:**
 | Phase | Description | Status |
@@ -14,15 +14,17 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | 5C.1+5C.2 | Self-service portal (FastAPI + vanilla JS) | ✅ DONE — v1.2 |
 | 5C.3 | Grafana `strongswan-quota` integration | ✅ DONE — v1.2.2 |
 | 5C.4 | ~~RustFS daily backup verify~~ | ⛔ CANCELLED — PBS full-LXC replaces |
-| **5C.5** | **Self-service device management (operator adds/removes/rotates device creds via portal)** | **⏳ PLANNED (2026-06-20) — awaiting Zun "go"** |
+| **5C.5** | **~~Self-service device management~~** | **⛔ REVERTED (v1.2.6)** — model locked to 1 creds = 1 device. Branch + tag deleted. |
+| **5C.6** | **~~Multi-device-per-customer with shared creds~~** | **🔒 SHELVED (2026-06-20)** — strongSwan's 1-identity-1-VIP design blocks per-device tracking under EAP-MSCHAPv2. If revisited, only clean path is Option 4 (per-device client certs / EAP-TLS). Do NOT restart from 5C.5/5C.6 EAP-MSCHAPv2 work. Plan retained at `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md` Rev 2 for historical record. |
 | v1.2.1 | Reboot fixes (two-charons, docker cold-boot) | ✅ DONE |
 | v1.2.3 | VICI parser hardening | ✅ DONE |
 | v1.2.4 | Device info UI + CHANGELOG.md | ✅ DONE |
+| **v1.2.6** | **5C.5 revert + 1-device-per-customer model lock** | **✅ DONE — 2026-06-20 19:30 UTC** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
 | v1.3 | iOS native EAP fixes, cert rotation, MTU/PMTUD, nftables migration | 🔒 SHELVED — backlog, no scheduled work |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4 (7 total).
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4, v1.2.6 (8 total). **v1.2.5 deleted.**
 
 **Active development branches:** none. All merged to main.
 
@@ -142,7 +144,13 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - `fingerprint_device(algo_str)` — heuristic OS detection from IKE proposal (10 patterns).
 - Schema migration: `devices` table adds `device_type/os_version/hostname TEXT`.
 
-## 5C.5 — Self-service device management — ⏳ PLANNED (2026-06-20), NOT STARTED
+## 5C.5 — ~~Self-service device management~~ — ⛔ REVERTED (v1.2.6, 2026-06-20)
+
+**Reverted by operator decision (Zun, 2026-06-20 19:25 UTC).** Model lock: **1 (username, password) = 1 device**. Same creds on a 2nd device will be kicked by charon default `uniqueids=yes` (2nd takes over, 1st drops). To get strict "reject the 2nd" semantics, a runtime SA-cap monitor is needed (backlog, not started).
+
+**Why reverted:** the work allowed multiple device slots per customer (1:N customer→devices), which was over-scope for the 1:1 model the operator actually wants. The 5C.5 branch + tag have been deleted; the live LXC 902 portal has been reverted to the v1.2.4-base code that predates 5C.5. The schema migration `migrate_5C5_add_max_devices.sh` has been superseded by `migrate_v126_max_devices_one.sh`.
+
+**Historical 5C.5 sub-step record (not executed in main, retained for context):**
 
 **Goal:** Operator adds, removes, and rotates device credentials for any customer via the portal, end-to-end (UI → API → DB → charon creds reload → audit log). Today it's a 4-step manual bash + SQL operation; this phase makes it a button.
 
