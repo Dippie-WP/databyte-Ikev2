@@ -8,6 +8,110 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.7 — 2026-06-20
+
+Operator client onboarding — first-class UI + endpoint for creating a new
+client (customer + their single device + credentials) from the portal.
+Allows both existing-tier pick AND custom-cap tier auto-creation.
+
+**Added**
+
+- Backend `POST /api/customers` — single transaction: validates, resolves
+  tier (existing OR auto-creates `custom_<N>mb_<ts>`), generates 16-byte
+  URL-safe password, computes NTLM hash, inserts `customers` + `users` +
+  `devices` rows, appends EAP block to `rw-eap.conf`, reloads charon,
+  audit logs, returns the password ONE-SHOT in the response.
+- `quota/migrate_v127_billing_email.sh` — idempotent migration adding
+  `billing_id TEXT` (nullable) + `email TEXT` (nullable) to `customers`.
+- `GET /api/customers` and `GET /api/customers/{id}` extended to include
+  `billing_id`, `email`, and a `current_session` block
+  (public_ip, remote_port, vip, device, since, IKE proposal, bytes_in,
+  bytes_out, sa_state, established_secs) joined server-side from
+  active leases.
+- Frontend `+ New client` button on the Customers page head.
+- Frontend modal form with 11 fields: client name (slug), display name,
+  billing ID (optional), email (optional), Telegram (optional), notes
+  (optional), tier dropdown (existing tiers + "Custom (MiB)…"), custom
+  cap input, device name, device type (6 options), OS version (optional).
+  Live preview of the would-be new tier name when "Custom" is picked.
+  Auto-derives the client name slug from the display name if blank.
+- Frontend one-shot panel after successful create: copy-to-clipboard for
+  Server / Remote ID / Local ID / Username / Password, plus per-OS setup
+  step-by-step cards (iOS, Android, Windows, macOS, Linux NetworkManager).
+- Frontend customer detail view shows `billing_id` + `email` rows + a
+  "Current session" block (with 30s auto-refresh while detail is open).
+  Active session shows public IP, VIP, device, connection time, IKE
+  proposal, this-session bytes in/out. No-session state shows a dim
+  "no active session" line.
+- Fixed: `_audit()` was writing to `at` (the column was renamed to
+  `created_at` in the 5B era). Audit log has been silently failing since
+  v1.2. Also added `target_type` + `target_id` columns that were unused
+  but present in the schema — now properly populated.
+
+**Changed**
+
+- `GET /api/customers` SELECT extended with `billing_id, email`.
+- `GET /api/customers/{id}` SELECT extended; `current_session` block
+  added to response (None when no active SA).
+- `app.py` grew +363 LOC (helpers + ClientCreate model + POST endpoint
+  + extended GETs + audit fix).
+- `app.js` grew +625 LOC (modal form, one-shot panel, per-OS cards,
+  current_session block, live refresh).
+- `app.css` grew +178 LOC (vp-page-head, vp-modal-lg, vp-form-grid,
+  vp-oneshot-warn, vp-os-card, vp-cs-grid + responsive).
+
+**Operator flow (one client at a time)**
+
+1. Portal → Customers → `+ New client`
+2. Fill 8 required + 3 optional fields. Tier: pick existing OR "Custom
+   (MiB)…" and type a cap (e.g. 1500 for 1.5 GiB).
+3. Click `Create client`. Server creates customer + device + EAP block
+   in charon, reloads charon, audit-logs.
+4. Modal flips to a one-shot panel: copy the 5 fields (Server, Remote ID,
+   Local ID, Username, Password) or send the client the per-OS setup
+   card that matches their device.
+5. Close the modal. The customer is now in the list, with the password
+   only ever visible in that one-shot panel.
+
+**Behavior reminders**
+
+- 1 customer = 1 device (per v1.2.6). Adding a second device for the
+  same customer requires the (shelved) 5C.6 work — not in this PR.
+- 5C.6 is still SHELVED. Do NOT auto-resurrect.
+- The operator is the only credential issuer. No client self-service,
+  no email/SMTP integration, no Telegram bot.
+- If the operator needs to edit `billing_id` or `email` after the fact,
+  raw SQL is the only path in this PR (no PATCH endpoint).
+
+**Out of scope (backlog, not in this PR)**
+
+- PATCH /api/customers/{id} — edit billing_id/email/notes
+- DELETE /api/customers/{id} — soft/hard offboard via portal
+- Mobileconfig generation (.mobileconfig) for one-tap iOS install
+- Email integration (SMTP) for sending creds automatically
+- Tier management UI (today: SQLite-only)
+- Bulk import / CSV upload of customers
+
+**Test coverage**
+
+- POST /api/customers: existing tier (test-co) — 200
+- POST /api/customers: custom cap 1500 MiB (acme-demo) — 200,
+  tier `custom_1500mb_<ts>` auto-created
+- POST /api/customers: existing tier with full data (beta-test-client) — 200
+- POST /api/customers: bad email — 400
+- POST /api/customers: bad device_type — 400
+- POST /api/customers: missing custom_cap_mb when tier=custom — 400
+- POST /api/customers: duplicate name — 409
+- POST /api/customers: not authenticated — 401
+- GET /api/customers: includes billing_id + email for all rows
+- GET /api/customers/6 (test-co): includes devices[], current_session
+  (None — test-co hasn't connected)
+- Migration: idempotent re-run on LXC 903 (no-op)
+- charon reloaded after each create (EAP block visible in `swanctl
+  --load-creds` output)
+
+(nothing in flight — all changes captured in next released version)
+
 ### v1.2.6 — 2026-06-20
 
 Revert 5C.5 self-service device management, lock model to **1 (creds pair) =

@@ -20,6 +20,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | v1.2.3 | VICI parser hardening | ✅ DONE |
 | v1.2.4 | Device info UI + CHANGELOG.md | ✅ DONE |
 | **v1.2.6** | **5C.5 revert + 1-device-per-customer model lock** | **✅ DONE — 2026-06-20 19:30 UTC** |
+| **v1.2.7** | **Operator client onboarding (POST /api/customers + portal form + current_session + billing/email)** | **✅ DONE — 2026-06-20 20:36 UTC** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
 | v1.3 | iOS native EAP fixes, cert rotation, MTU/PMTUD, nftables migration | 🔒 SHELVED — backlog, no scheduled work |
