@@ -154,3 +154,45 @@ sudo systemctl restart quota-monitor
 ```
 
 Or use the helper script: `bash /home/zunaid/strongswan/quota/reset_demo.sh`
+
+## ⚠️ strongswan-starter.service — MUST be DISABLED (v1.2.1 fix)
+
+The Debian strongSwan package installs a `strongswan-starter.service` that
+starts a *host* charon process (`/usr/lib/ipsec/charon`). This host charon
+binds to UDP 500/4500 during LXC boot, which then prevents the
+**container** charon (the one we actually configure) from binding those
+ports. Result: container charon boots with "no socket implementation
+registered" and rejects all incoming IKE_SA_INIT with N(NO_PROP).
+
+We never use the host charon — we run our own charon inside the
+strongSwan Docker container. The fix is to disable (not mask) the host
+starter so it can never start, but other `systemctl` operations are
+unaffected.
+
+```bash
+sudo systemctl stop strongswan-starter
+sudo systemctl disable strongswan-starter
+sudo systemctl is-enabled strongswan-starter   # → disabled
+sudo systemctl is-active strongswan-starter    # → inactive
+```
+
+**Verify the fix:**
+
+```bash
+ps -ef | grep -E "charon|ipsec" | grep -v grep
+# should show ONLY ./charon (the container's) — NOT /usr/lib/ipsec/charon
+
+ss -ulnp | grep -E ":500|:4500"
+# should show the container charon's PID, not 252
+```
+
+**Why this is in v1.2.1:**
+
+The first post-reboot test (2026-06-20 09:55) showed host charon (PID 252)
+rejecting all connection attempts with N(NO_PROP) for 14 minutes while
+the container charon couldn't bind. iPhone backed off after repeated
+failures and wouldn't reconnect. Once the host charon was stopped and
+the container charon rebound, the iPhone reconnected in 6 seconds.
+
+If you ever see `unable to bind socket: Address already in use` in
+`/var/log/charon-log` inside the container, check this first.
