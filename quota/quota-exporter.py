@@ -223,12 +223,145 @@ def iptables_counters() -> dict:
     return counters
 
 
+def vici_parse(text: str) -> dict:
+    """
+    Parse VICI dump output (--raw or -P) into a nested dict.
+
+    Authoritative source: charon src/libcharon/plugins/vici/vici_message.c:556
+    METHOD(vici_message_t, dump, ...). Compact form uses assign="=", separ=" ",
+    term="" (no newlines), indent=0. Pretty form uses assign=" = ", separ="",
+    term="\\n", indent=2. Both produce the same logical tree.
+
+    Returns {"label": <str>, "body": <dict-or-list>}.
+
+    Handles:
+      - Compact and pretty forms interchangeably
+      - Arbitrarily nested sections `{ name { ... } }`
+      - Lists `[ item1 item2 ]`
+      - Empty sections `{ }` and empty leases blocks
+      - Multiple top-level pools in one envelope
+
+    Tested against: charon 6.0.7, `swanctl --list-pools [--raw|-P] [-l]`.
+    """
+    text = text.strip()
+    m = re.match(r"^(\S(?:[\S\s]*?\S)?)\s*\{", text)
+    if not m:
+        raise ValueError(f"no VICI envelope in: {text!r}")
+    label = m.group(1).strip()
+    body, _ = _vici_section(text, m.end())
+    return {"label": label, "body": body}
+
+
+# A name in VICI is "an ASCII string" per the protocol spec. In practice it's
+# always [A-Za-z0-9_.-]+ for our queries. We use a permissive-but-safe pattern
+# that excludes the structural chars: whitespace, '=', '{', '}', '[', ']'.
+_VICI_NAME = r"[^\s={}\[\]]+"
+
+
+def _vici_section(text: str, pos: int) -> tuple:
+    """Parse `{ ... }` starting one past the '{'. Returns (value, new_pos)."""
+    assert text[pos - 1] == "{", f"expected '{{' at pos {pos-1}, got {text[pos-1]!r}"
+    result = {}
+    pending_key = None
+    while pos < len(text):
+        c = text[pos]
+        if c == "}":
+            return result, pos + 1
+        if c == "]":
+            return result, pos + 1
+        if c in " \t\n":
+            pos += 1
+            continue
+        if c == "=":
+            # KEY_VALUE continuation: read value
+            pos += 1
+            while pos < len(text) and text[pos] in " \t":
+                pos += 1
+            value, pos = _vici_value(text, pos)
+            if pending_key is None:
+                raise ValueError(f"stray '=' at pos {pos}")
+            result[pending_key] = value
+            pending_key = None
+            continue
+        if c == "{":
+            pos += 1
+            inner, pos = _vici_section(text, pos)
+            if pending_key is None:
+                raise ValueError(f"stray '{{' at pos {pos}")
+            result[pending_key] = inner
+            pending_key = None
+            continue
+        if c == "[":
+            pos += 1
+            items = []
+            while pos < len(text) and text[pos] != "]":
+                if text[pos] in " \t\n":
+                    pos += 1
+                    continue
+                item, pos = _vici_value(text, pos)
+                items.append(item)
+            if pos < len(text):
+                pos += 1  # consume ']'
+            if pending_key is None:
+                raise ValueError(f"stray '[' at pos {pos}")
+            result[pending_key] = items
+            pending_key = None
+            continue
+        # Otherwise: it's a name (key, section header, list item, or bare value)
+        m = re.match(_VICI_NAME, text[pos:])
+        if not m:
+            raise ValueError(f"unexpected char {c!r} at pos {pos}")
+        name = m.group(0)
+        pos += len(name)
+        while pos < len(text) and text[pos] in " \t\n":
+            pos += 1
+        if pos < len(text) and text[pos] in "{=[":
+            # Section header or list header — name is the key
+            pending_key = name
+        elif pos < len(text) and text[pos] == "=":
+            # KEY_VALUE — name is the key, value follows
+            pending_key = name
+        else:
+            # Bare trailing token (unusual)
+            result[name] = None
+    raise ValueError(f"unterminated section: {text!r}")
+
+
+def _vici_value(text: str, pos: int) -> tuple:
+    """Parse a value: bare string, section, or list. Returns (value, new_pos)."""
+    if pos >= len(text):
+        return "", pos
+    c = text[pos]
+    if c == "{":
+        pos += 1
+        return _vici_section(text, pos)
+    if c == "[":
+        pos += 1
+        items = []
+        while pos < len(text) and text[pos] != "]":
+            if text[pos] in " \t\n":
+                pos += 1
+                continue
+            item, pos = _vici_value(text, pos)
+            items.append(item)
+        if pos < len(text):
+            pos += 1
+        return items, pos
+    m = re.match(_VICI_NAME, text[pos:])
+    if m:
+        return m.group(0), pos + len(m.group(0))
+    return "", pos
+
+
 def swanctl_pools() -> list[dict]:
     """
     Run `docker exec strongswan swanctl --list-pools --raw` and parse.
 
-    VICI raw format: `rw-pool {base=10.99.0.1 size=254 online=0 offline=0}`
     Returns [{"name": str, "base": str, "size": int, "online": int, "offline": int}, ...]
+
+    Works for both compact (`--raw`) and pretty (`-P`) swanctl output. The
+    underlying wire format is the same; only whitespace differs. The parser
+    is shared (see vici_parse above).
     """
     try:
         out = subprocess.run(
@@ -240,22 +373,32 @@ def swanctl_pools() -> list[dict]:
         log.warning("swanctl --list-pools failed: %s", e)
         return []
 
+    try:
+        parsed = vici_parse(out.stdout)
+    except ValueError as e:
+        log.warning("vici_parse failed on swanctl output: %s", e)
+        log.debug("raw output: %r", out.stdout[:500])
+        return []
+
     pools = []
-    # VICI envelope: `get-pools reply {rw-pool {base=10.99.0.1 size=254 online=0 offline=0}}`
-    # The inner pool block always starts with `base=` — use that as the sentinel.
-    # Match exactly one level of nesting: `name {base=... size=... ...}`.
-    for block in re.finditer(r"\{(\S+)\s+\{(base=[^}]+)\}\}", out.stdout):
-        name = block.group(1)
-        kv_text = block.group(2)
-        kv = dict(re.findall(r"(\w+)=(\S+)", kv_text))
-        if "base" in kv and "size" in kv:
-            pools.append({
-                "name": name,
-                "base": kv["base"],
-                "size": int(kv["size"]),
-                "online": int(kv.get("online", 0)),
-                "offline": int(kv.get("offline", 0)),
-            })
+    # The response body is the implicit root section; each pool is a key
+    # whose value is a sub-section with base/size/online/offline.
+    body = parsed["body"]
+    if not isinstance(body, dict):
+        return []
+    for name, section in body.items():
+        if not isinstance(section, dict):
+            continue
+        kv = {k: str(v) for k, v in section.items() if isinstance(v, (str, int, float))}
+        if "base" not in kv or "size" not in kv:
+            continue
+        pools.append({
+            "name": name,
+            "base": kv["base"],
+            "size": int(kv["size"]),
+            "online": int(kv.get("online", 0)),
+            "offline": int(kv.get("offline", 0)),
+        })
     return pools
 
 
