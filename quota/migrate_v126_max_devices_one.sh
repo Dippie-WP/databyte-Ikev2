@@ -116,18 +116,20 @@ SQL
 
 echo
 echo "=== STEP 4: Audit log of deactivations ==="
-# Log every deactivation to audit_log so we have a paper trail
+# Log every deactivation to audit_log so we have a paper trail.
+# audit_log schema: actor, action, target_type, target_id, payload, created_at
 sqlite3 "$DB" <<SQL
-INSERT INTO audit_log (event_type, customer_id, device_id, detail, created_at)
-SELECT 'device_deactivated',
-       d.customer_id,
+INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
+SELECT 'system',
+       'device_deactivated',
+       'device',
        d.id,
-       'v1.2.6 cleanup: model reverted to 1 creds = 1 device; this device was deactivated, lowest-id device kept as canonical',
+       json_object('customer_id', d.customer_id, 'reason', 'v1.2.6 cleanup: model reverted to 1 creds = 1 device; this device was deactivated, lowest-id device kept as canonical'),
        $TS
   FROM devices d
  WHERE d.is_active = 0
    AND d.updated_at = $TS
-   AND d.id NOT IN (SELECT device_id FROM audit_log WHERE event_type = 'device_deactivated' AND created_at = $TS);
+   AND d.id NOT IN (SELECT target_id FROM audit_log WHERE action = 'device_deactivated' AND created_at = $TS AND target_type = 'device');
 SQL
 
 echo
