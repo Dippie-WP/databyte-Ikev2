@@ -44,6 +44,8 @@ from typing import Optional
 
 import bcrypt
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 # ---------- Config ----------
@@ -63,6 +65,15 @@ log = logging.getLogger("vpn-portal")
 
 # ---------- App ----------
 app = FastAPI(title="databyte vpn-portal", version="0.1.0")
+
+# Serve frontend (static assets + SPA index)
+WWW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
+if os.path.isdir(WWW_DIR):
+    app.mount("/static", StaticFiles(directory=os.path.join(WWW_DIR, "static")), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def root_index():
+        return FileResponse(os.path.join(WWW_DIR, "index.html"))
 
 # ---------- Rate limit (in-memory, per-IP) ----------
 _login_attempts: dict[str, list[float]] = defaultdict(list)
