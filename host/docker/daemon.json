@@ -1,0 +1,5 @@
+{
+  "iptables": false,
+  "ip-forward": false,
+  "bridge": "none"
+}
