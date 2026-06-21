@@ -17,16 +17,23 @@
  * On success, screenshots are written too (for visual confirmation in CI artifacts).
  */
 
-// v1.2.11: prefer puppeteer-core for local dev (uses system chromium),
-// but allow full puppeteer (downloads chromium) for CI environments where
-// system chromium isn't installed.
+// v1.2.11: package.json has BOTH puppeteer (devDep, downloads chromium)
+// and puppeteer-core (dep, uses system chromium). Prefer puppeteer when
+// both are installed (full CI setup). Fall back to puppeteer-core (local dev).
+// Skip gracefully if neither loads.
 let puppeteer;
 let isFullPuppeteer = false;
 try {
-  puppeteer = require('puppeteer-core');
-} catch {
   puppeteer = require('puppeteer');
   isFullPuppeteer = true;
+} catch {
+  try {
+    puppeteer = require('puppeteer-core');
+  } catch {
+    console.error('FATAL: neither puppeteer nor puppeteer-core installed.');
+    console.error('Run: npm install (in tools/)');
+    process.exit(2);
+  }
 }
 const fs        = require('fs');
 const path      = require('path');
