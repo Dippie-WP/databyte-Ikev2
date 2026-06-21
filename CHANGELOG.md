@@ -8,6 +8,74 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.9 — 2026-06-21
+
+**CI hook for the portal smoke test.** New `.github/workflows/portal-smoke.yml`
+runs the v1.2.8 headless-browser test on every push to `main` (and on PRs),
+gates future portal releases. The workflow is **not yet enabled** — it
+needs a staging portal URL the runner can reach (see `docs/CI.md` for
+three options: public staging tunnel, self-hosted runner on LXC 902, or
+WireGuard tunnel). For now, manual local runs against LXC 903
+(`PORTAL_URL=http://192.168.10.98:8080 node tools/portal-smoke.js`) are
+the verification path before tagging.
+
+**Also fixed (caught by v1.2.8 smoke test + manual investigation)**
+
+- `host/vpn-portal/www/static/app.js` `renderCustomers()` (~line 574):
+  v1.2.7.3 only fixed `usageBar()` and the customer detail `Quota` card
+  but missed the customers-list `Usage` cell, which still rendered
+  `fmtBytes(used) + ' / ' + fmtBytes(quota)` directly. For operator
+  accounts the row still showed `"0 B / 0 B"` and `"0.0%"` — the
+  opposite of the v1.2.7.3 fix's intent. Now the row uses `usageBar()`
+  (consistent with sessions table + detail), so operators get
+  `<bytes> · [NO CAP]` and the `%` column shows `—` instead of `0.0%`.
+  Tagged as v1.2.7.4.
+
+**LXC 903 network correction**
+
+- Reverted LXC 903 from static (`192.168.10.98/24`) back to DHCP.
+  Zun's rule: "Keep it dhcp. If you put static it will loose network."
+  Verified post-reboot: same IP (`192.168.10.98`), `scope global
+  dynamic eth0`, portal health `{"status":"ok"}`. Logged in
+  `~/self-improving/corrections.md`.
+
+**Demo-phone secret reset**
+
+- `eap-demo-phone` secret was `BLOCKED-6100b6929f585411` (KILLED during
+  a quota test) — iPhone demo-customer auth was failing because of
+  this. Restored original secret `E6fkfBK6DvUHkG1jcipJrQ` from latest
+  pre-cut backup. Charon reloaded. DB was already pristine
+  (`data_used_bytes=0`, `over_quota=0`). Zun's iPhone should now
+  reconnect cleanly.
+
+**Added**
+
+- `.github/workflows/portal-smoke.yml` (~150 LOC) — runs on push to
+  main / v1.2.7.x / v1.2.8 / v1.2.9 / master + PRs + manual
+  dispatch. Installs Chromium + puppeteer-core, patches config with
+  GitHub secrets (`PORTAL_URL`, `PORTAL_ADMIN_USER`, `PORTAL_ADMIN_PASS`),
+  runs the smoke test, uploads screenshots as artifacts (3-day
+  retention on success, 14-day on failure). Concurrency: same-branch
+  runs cancel in-flight.
+- `docs/CI.md` — what the workflow does, how to wire up the staging
+  portal (3 options), required secrets, local-usage parallel.
+
+**Bugs caught by the smoke test (and now fixed in v1.2.7.4)**
+
+- v1.2.7.3 incomplete: `usageBar()` was patched but the customers-list
+  row didn't use it. The smoke test's check #7
+  (`Operator row shows "no cap" pill`) caught it on the very first
+  run.
+
+**Verified**
+
+- Smoke test: 8/8 passing in 14.4s against live LXC 903
+  (`http://192.168.10.98:8080`).
+- LXC 903 reachable on `192.168.10.98` after revert + reboot
+  (07:35 UTC).
+- demo-phone secret restored, charon loaded, no active SAs (waiting
+  for iPhone reconnect).
+
 ### v1.2.8 — 2026-06-21
 
 **Headless-browser smoke test for the portal.** New `tools/portal-smoke.js`
