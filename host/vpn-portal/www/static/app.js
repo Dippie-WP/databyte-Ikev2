@@ -574,14 +574,20 @@
                       ? S.customers.map(c => {
                           const pct = c.pct || 0;
                           const state = c.over_quota ? ['CUT','red'] : pct >= 80 ? ['NEAR','amber'] : ['OK','green'];
+                          // v1.2.7.3 — for operators, drop the "%" column value (always 0 by
+                          // definition) and surface real used_bytes + "no cap" instead of
+                          // "0 B / 0 B". The Usage cell now uses usageBar() for consistency
+                          // with the sessions table + customer detail.
+                          const isOp = c.is_operator || !c.quota_bytes;
                           return el('tr', {
                             cls: 'vp-tr' + (S.selectedId === c.id ? ' vp-tr-sel' : ''),
                             onclick: () => selectCustomer(c.id),
                           },
                             el('td', { cls: 'vp-mono', 'data-label': 'Name' }, c.display_name || c.name),
                             el('td', { 'data-label': 'Tier' }, spanBadge(c.is_operator ? 'operator' : (c.tier_display || '—'), 'dim')),
-                            el('td', { cls: 'vp-mono', 'data-label': 'Usage' }, fmtBytes(c.used_bytes) + ' / ' + fmtBytes(c.quota_bytes)),
-                            el('td', { cls: 'vp-mono', 'data-label': '%' }, fmtPct(pct)),
+                            el('td', { 'data-label': 'Usage' },
+                              usageBar(c.used_bytes, c.quota_bytes, pct, c.over_quota, c.is_operator)),
+                            el('td', { cls: 'vp-mono', 'data-label': '%' }, isOp ? '—' : fmtPct(pct)),
                             el('td', { 'data-label': 'State' }, spanBadge(state[0], state[1])),
                             el('td', { 'data-label': 'Actions', cls: 'vp-row-actions' },
                               el('button', {
