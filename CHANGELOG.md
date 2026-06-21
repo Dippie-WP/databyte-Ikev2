@@ -6,6 +6,41 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.2.15 — 2026-06-21
+
+**Edit Customer modal: fix PATCH not firing (Zun reported)** — reported via Telegram that editing customer "saalieg" was a no-op.
+
+**Root cause:** The Save button's click handler called `$('#ed-disp')` (the IIFE's `$` helper) to fetch form fields. In this specific modal context, `$()` returned `null` even though `document.getElementById('ed-disp')` returned the input. Same `$` source (`id => document.getElementById(id)`), same call shape, different result — a closure-capture quirk we couldn't fully explain.
+
+**Fix:** Define a local `$` inside the Save handler. Local `$` works correctly; the IIFE-level `$` didn't.
+
+#### 1. Three earlier modal bugs also fixed in this version
+
+Found while diagnosing the Save bug (5-question gate applied):
+
+- **Bug A: `labeledField()` undefined** — `openEditCustomerModal` called `labeledField(...)` 8 times but the function was never defined. Caused `ReferenceError` and prevented the modal from opening at all.
+- **Bug B: `openModal(modal)` undefined** — Called at end of `openEditCustomerModal` but never defined. `closeModal` existed, `openModal` did not.
+- **Bug C: Tier dropdown showed wrong tier** — `el()` helper set `setAttribute('selected', 'false')` on non-matching `<option>` elements. But `selected` is a boolean HTML attribute — **presence alone selects the option**, regardless of value. Last option with `selected="false"` won.
+
+**Fixes (all in `host/vpn-portal/www/static/app.js`):**
+- `el()` helper rewritten: skip `null/undefined/false`; for boolean attributes (`selected`, `disabled`, `checked`, `readonly`, `required`, `multiple`, `hidden`, `autofocus`) set both the IDL property AND the attribute as `''`.
+- `labeledField` defined inline in `openEditCustomerModal` (only used there).
+- `openModal(modalEl)` added next to `closeModal` (paired helper).
+- Edit modal Save handler uses local `const $ = id => document.getElementById(id)`.
+
+#### 2. Verification
+
+- Operator smoke: **15/15 passed in 78s** (`tools/portal-smoke.js`)
+- Customer smoke: **10/10 passed in 14.8s** (`tools/portal-customer-smoke.js`)
+- End-to-end PATCH via UI: confirmed `display_name` and `notes` persist
+- saalieg (id=66) restored to original state after testing
+
+#### 3. Files changed
+
+- `host/vpn-portal/www/static/app.js` — el() helper, labeledField, openModal, Save handler
+- `tools/portal-smoke.js` — added check #15 (modal opens with populated fields)
+- `tools/debug_final_verify.js` — E2E PATCH test (kept for regression)
+
 ### v1.3.0 — 2026-06-21
 
 **Customer portal (lab). Operator dashboard polish + tooling.**

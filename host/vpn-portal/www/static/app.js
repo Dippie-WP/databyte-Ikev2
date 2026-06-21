@@ -178,7 +178,19 @@
       if (k === 'cls') e.className = v;
       else if (k === 'html') e.innerHTML = v;
       else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
-      else if (v != null) e.setAttribute(k, v);
+      else if (v === false || v == null) {
+        // skip — null/undefined means absent; false means absent for boolean attrs
+        // (e.g. `selected: false` should NOT set selected="false" on an option)
+        continue;
+      } else if (k === 'selected' || k === 'disabled' || k === 'checked' || k === 'readonly' || k === 'required' || k === 'multiple' || k === 'hidden' || k === 'autofocus') {
+        // Boolean attributes: set the IDL property to ensure correct behavior on
+        // form controls (option.selected, input.checked, etc.). The HTML attribute
+        // is also set so the markup round-trips.
+        try { e[k] = true; } catch {}
+        e.setAttribute(k, '');
+      } else {
+        e.setAttribute(k, v);
+      }
     }
     // Flatten children — arrays passed as a single child arg (e.g. el('div', {}, [a, b]))
     // are also valid; the function should render their elements inline.
@@ -1558,6 +1570,14 @@
       if (isCustom && c.tier) {
         allTiers.push({ name: c.tier, display_name: c.tier_display || c.tier });
       }
+      // Helper: render a labeled form field.
+      // Signature: labeledField(label, inputEl, fullWidth?)
+      // Used in the Edit modal below.
+      const labeledField = (label, inputEl, full) => el('div',
+        { cls: 'vp-field' + (full ? ' vp-field-full' : '') },
+        el('label', { cls: 'vp-label' }, label),
+        inputEl,
+      );
       const modal = el('div', {
         cls: 'vp-modal-bg',
         onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
@@ -1589,17 +1609,27 @@
             el('button', {
               cls: 'vp-btn vp-btn-primary',
               onclick: async () => {
+                // Use document.getElementById directly to avoid any
+                // `$` closure-capture quirks in nested modal contexts.
+                const $ = id => document.getElementById(id);
+                const $d = $('ed-disp'), $tg = $('ed-tg'), $em = $('ed-email'),
+                      $bi = $('ed-bill'), $md = $('ed-mdev'), $ti = $('ed-tier'),
+                      $cm = $('ed-custom-mb'), $nt = $('ed-notes');
+                if (!$d || !$tg || !$em || !$bi || !$md || !$ti) {
+                  toast('Edit form is broken — fields missing. Reload the page.', 'err');
+                  return;
+                }
                 const body = {
-                  display_name: $('#ed-disp').value.trim() || null,
-                  telegram_username: $('#ed-tg').value.trim() || null,
-                  email: $('#ed-email').value.trim() || null,
-                  billing_id: $('#ed-bill').value.trim() || null,
-                  max_devices: parseInt($('#ed-mdev').value || '1', 10),
-                  tier_name: $('#ed-tier').value,
-                  notes: $('#ed-notes').value.trim() || null,
+                  display_name: $d.value.trim() || null,
+                  telegram_username: $tg.value.trim() || null,
+                  email: $em.value.trim() || null,
+                  billing_id: $bi.value.trim() || null,
+                  max_devices: parseInt($md.value || '1', 10),
+                  tier_name: $ti.value,
+                  notes: $nt.value.trim() || null,
                 };
                 if (body.tier_name === 'custom') {
-                  const mb = parseInt($('#ed-custom-mb').value || '0', 10);
+                  const mb = parseInt($cm.value || '0', 10);
                   if (mb < 1) { toast('Custom cap must be ≥ 1 MiB', 'err'); return; }
                   body.custom_cap_mb = mb;
                 }
@@ -1659,6 +1689,14 @@
 
   function _modalEscListener(e) {
     if (e.key === 'Escape') closeModal();
+  }
+
+  // v1.3.0.1 — openModal helper (paired with closeModal). Was called by the Edit
+  // customer modal but never defined. Same shape as the inline code in
+  // openNewClientModal: append to body, register ESC listener.
+  function openModal(modalEl) {
+    document.body.appendChild(modalEl);
+    document.addEventListener('keydown', _modalEscListener);
   }
 
   function closeModal() {

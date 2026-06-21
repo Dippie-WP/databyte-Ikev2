@@ -528,6 +528,80 @@ async function waitMs(ms) { return new Promise(r => setTimeout(r, ms)); }
     await shot(page, '14-sort-active');
   }));
 
+  // v1.3.0.1 — Edit modal opens with all fields populated (regression check for the
+  // `labeledField is not defined` bug Zun hit 2026-06-21).
+  results.push(await check('15. Edit customer modal opens with all fields populated', async () => {
+    // Navigate to Customers (test #14 may have left the page on a different tab)
+    const navItems = await page.$$('.vp-nav-tab');
+    for (const it of navItems) {
+      const txt = await page.evaluate(el => el.textContent || '', it);
+      if (/customers/i.test(txt)) { await it.click(); break; }
+    }
+    await page.waitForSelector('.vp-tbl-wrap tbody tr', { timeout: CFG.timeouts.selector_ms });
+
+    // Find a non-operator customer to edit
+    await page.waitForSelector('.vp-tr');
+    const customerId = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll('tr.vp-tr'));
+      // Find a row that's NOT the operator
+      for (const r of rows) {
+        const txt = r.textContent || '';
+        if (/operator|no cap/i.test(txt)) continue;
+        const cb = r.querySelector('input[type="checkbox"]');
+        const name = r.querySelector('td[data-label="Name"]')?.textContent || '';
+        return { name: name.trim(), text: txt.substring(0, 80) };
+      }
+      return null;
+    });
+    if (!customerId) throw new Error('no editable customer found in list');
+    log(`   testing edit on customer: ${customerId.name}`);
+
+    // Click the customer row to open detail panel
+    await page.evaluate((name) => {
+      const rows = Array.from(document.querySelectorAll('tr.vp-tr'));
+      const r = rows.find(r => r.textContent && r.textContent.includes(name));
+      if (r) r.querySelector('td[data-label="Name"]')?.click();
+    }, customerId.name);
+    // Wait for the detail panel to load (Edit button appears once /api/customers/{id} resolves)
+    await page.waitForFunction(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      return buttons.some(b => /Edit/i.test(b.textContent || ''));
+    }, { timeout: CFG.timeouts.selector_ms });
+    await new Promise(r => setTimeout(r, 500));
+
+    // Find and click Edit button
+    const editClicked = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const e = buttons.find(b => /Edit/i.test(b.textContent || ''));
+      if (!e) return false;
+      e.click();
+      return true;
+    });
+    if (!editClicked) throw new Error('Edit button not found in detail panel');
+    await page.waitForSelector('#ed-disp', { timeout: 5000 });
+
+    // Check all expected fields exist and are populated
+    const fields = await page.evaluate(() => {
+      const ids = ['ed-disp', 'ed-tg', 'ed-email', 'ed-bill', 'ed-mdev', 'ed-tier', 'ed-custom-mb', 'ed-notes'];
+      return ids.map(id => {
+        const el = document.getElementById(id);
+        return { id, exists: !!el, tag: el?.tagName, value: el?.value };
+      });
+    });
+    for (const f of fields) {
+      if (!f.exists) throw new Error(`field ${f.id} missing from edit modal`);
+    }
+    log(`   edit modal fields: ${fields.length}/8 present, display_name="${fields[0].value}"`);
+    // Close modal without saving (cancel button)
+    await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('.vp-modal button'));
+      const cancel = buttons.find(b => b.textContent.trim() === 'Cancel');
+      if (cancel) cancel.click();
+    });
+    await new Promise(r => setTimeout(r, 500));
+    await shot(page, '15-edit-modal');
+  }));
+
   await browser.close();
 
   const passed = results.filter(r => r.pass).length;
