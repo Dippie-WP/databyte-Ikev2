@@ -62,15 +62,23 @@ jobs:
     steps:
       - name: Skip if PORTAL_URL secret not configured
         id: check
+        # v1.2.11: also accept workflow_dispatch input as fallback for ad-hoc testing
+        # without setting a repo secret. secrets.PORTAL_URL takes precedence.
+        env:
+          WD_PORTAL_URL: ${{ inputs.portal_url }}
         run: |
-          if [ -z "${PORTAL_URL:-}" ]; then
-            echo "::warning::PORTAL_URL secret is not set. Skipping portal smoke."
+          EFFECTIVE_URL="${PORTAL_URL:-${WD_PORTAL_URL:-}}"
+          if [ -z "${EFFECTIVE_URL:-}" ]; then
+            echo "::warning::PORTAL_URL not set (no secret, no workflow_dispatch input). Skipping portal smoke."
             echo "Set PORTAL_URL, PORTAL_ADMIN_USER, PORTAL_ADMIN_PASS in repo settings to enable."
+            echo "Or trigger workflow_dispatch with portal_url input for ad-hoc testing."
             echo "See docs/CI.md for instructions."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "PORTAL_URL set: $PORTAL_URL"
+            echo "PORTAL_URL effective: $EFFECTIVE_URL (source: $([ -n "${PORTAL_URL:-}" ] && echo secret || echo workflow_dispatch))"
+            # Override env so downstream steps use the effective URL
+            echo "PORTAL_URL=$EFFECTIVE_URL" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout
