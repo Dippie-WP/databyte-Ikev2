@@ -143,9 +143,12 @@
       else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
       else if (v != null) e.setAttribute(k, v);
     }
-    for (const c of children) {
+    // Flatten children — arrays passed as a single child arg (e.g. el('div', {}, [a, b]))
+    // are also valid; the function should render their elements inline.
+    // `sub ? ... : null` ternary returns null (skipped) or an array (flattened).
+    const flat = children.flat(Infinity);
+    for (const c of flat) {
       if (c == null) continue;
-      if (Array.isArray(c)) continue;  // placeholder for absent children (e.g. [] when sub is missing)
       if (c instanceof Node) { e.appendChild(c); continue; }
       e.appendChild(document.createTextNode(String(c)));
     }
