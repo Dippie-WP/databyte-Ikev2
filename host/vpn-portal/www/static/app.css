@@ -165,6 +165,37 @@ body {
 .vp-btn-link { background: none; border: none; color: var(--vp-dim); cursor: pointer; padding: 4px 8px; font-size: 12px; text-decoration: underline; }
 .vp-btn-link:hover { color: var(--vp-text); }
 
+/* v1.2.14 — sortable column headers + active-session dot */
+.vp-th-sort { cursor: pointer; user-select: none; transition: color 0.12s; }
+.vp-th-sort:hover { color: var(--vp-accent, #4f8cff); }
+.vp-th-sort-on { color: var(--vp-accent, #4f8cff); }
+.vp-td-active { text-align: center; width: 60px; }
+.vp-active-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: rgba(46, 160, 67, 0.18);
+  color: var(--green, #2ea043);
+  font-weight: 600;
+  font-size: 11px;
+  font-family: var(--vp-mono, 'JetBrains Mono', monospace);
+}
+.vp-active-dot::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green, #2ea043);
+  margin-right: 4px;
+  box-shadow: 0 0 4px var(--green, #2ea043);
+}
+.vp-active-dot-off { color: var(--vp-dim); opacity: 0.4; font-size: 14px; }
+
 
 /* Theme toggle */
 .vp-theme-btn {

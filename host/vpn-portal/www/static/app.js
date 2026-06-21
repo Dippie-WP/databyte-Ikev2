@@ -40,6 +40,10 @@
     bulkSelected: new Set(),
     // v1.2.13 — when filter/search changes, drop selection of vanished rows
     bulkAnchor: null,  // shift-click anchor for range select
+    // v1.2.14 — column sort {by, dir}. Default: name asc.
+    custSort: { by: 'name', dir: 'asc' },
+    // v1.2.14 — live active-session counts {customer_id: count} from swanctl
+    activeSessions: {},
     tiers: [],
     pools: [],
     sessions: '',
@@ -308,11 +312,25 @@
   // Single source of truth for which page-load function maps to which page name.
   const LOADERS = {
     dashboard: loadDashboard,
-    customers: loadCustomers,
+    customers: async () => { await loadCustomers(); await loadActiveSessions(); },
     tiers:     loadTiers,
     sessions:  loadSessions,
     security:  loadSecurity,
   };
+
+  // v1.2.14 — periodic active-sessions refresh (30s) while on customers page.
+  // Started/stopped with the page so we don't hammer the API when on other tabs.
+  let _activeSessTimer = null;
+  function startActiveSessAutoRefresh() {
+    stopActiveSessAutoRefresh();
+    _activeSessTimer = setInterval(() => {
+      if (S.page !== 'customers') return;
+      loadActiveSessions().then(render).catch(() => {});
+    }, 30000);
+  }
+  function stopActiveSessAutoRefresh() {
+    if (_activeSessTimer) { clearInterval(_activeSessTimer); _activeSessTimer = null; }
+  }
 
   async function switchPage(p) {
     if (!LOADERS[p]) return;
@@ -321,6 +339,9 @@
     if (S.page === 'sessions' && p !== 'sessions') stopSessionsAutoRefresh();
     // Stop customer-detail auto-refresh if leaving customers
     if (S.page === 'customers' && p !== 'customers') stopCustDetailAutoRefresh();
+    // v1.2.14 — start/stop active-sessions poll when entering/leaving customers
+    if (p === 'customers' && S.page !== 'customers') startActiveSessAutoRefresh();
+    else if (p !== 'customers' && S.page === 'customers') stopActiveSessAutoRefresh();
     S.page = p;
     // Re-render first so the user sees the skeleton for the new page immediately.
     render();
@@ -363,8 +384,14 @@
     S.loading.customers = true;
     S.loadError.customers = null;
     try {
+      const params = new URLSearchParams();
+      if (S.custSort && S.custSort.by) {
+        params.set('sort_by', S.custSort.by);
+        params.set('sort_dir', S.custSort.dir || 'asc');
+      }
+      const url = '/api/customers' + (params.toString() ? '?' + params.toString() : '');
       const [cust, tiers] = await Promise.all([
-        get('/api/customers'),
+        get(url),
         get('/api/tiers'),
       ]);
       S.customers = cust;
@@ -373,6 +400,17 @@
       S.loadError.customers = e.message || 'Failed to load customers';
     } finally {
       S.loading.customers = false;
+    }
+  }
+
+  // v1.2.14 — load active session counts from live swanctl --list-sas
+  async function loadActiveSessions() {
+    try {
+      const r = await get('/api/customers/active-sessions');
+      S.activeSessions = r.counts || {};
+    } catch (e) {
+      // Don't fail the whole page on this — just leave stale data
+      log('active-sessions load failed:', e.message);
     }
   }
 
@@ -560,11 +598,14 @@
 
     function skelRow() {
       return el('tr', {},
+        el('td', {}, skelLine('20%')),
         el('td', {}, skelLine('80%')),
         el('td', {}, skelLine('50%')),
         el('td', {}, skelLine('90%')),
         el('td', {}, skelLine('40%')),
+        el('td', {}, skelLine('20%')),
         el('td', {}, skelLine('40%')),
+        el('td', {}, skelLine('20%')),
       );
     }
 
@@ -680,8 +721,12 @@
                     });
                   })()
                 ),
-                el('th', {}, 'Name'), el('th', {}, 'Tier'),
-                el('th', {}, 'Usage'), el('th', {}, '%'), el('th', {}, 'State'),
+                sortHeader('Name',    'name',    S.custSort),
+                sortHeader('Tier',    'tier',    S.custSort),
+                sortHeader('Usage',   'usage',   S.custSort),
+                el('th', {}, '%'),
+                el('th', {}, 'Active'),
+                el('th', {}, 'State'),
                 el('th', {}, ''),
               )),
               el('tbody', {},
@@ -718,6 +763,15 @@
                             el('td', { 'data-label': 'Usage' },
                               usageBar(c.used_bytes, c.quota_bytes, pct, c.over_quota, c.is_operator)),
                             el('td', { cls: 'vp-mono', 'data-label': '%' }, isOp ? '—' : fmtPct(pct)),
+                            // v1.2.14 — Active column: live green dot when ≥1 SA is connected
+                            (() => {
+                              const count = S.activeSessions[c.id] || 0;
+                              return el('td', { 'data-label': 'Active', cls: 'vp-td-active' },
+                                count > 0
+                                  ? el('span', { cls: 'vp-active-dot', title: `${count} active session${count === 1 ? '' : 's'}` }, count)
+                                  : el('span', { cls: 'vp-active-dot-off', title: 'No active sessions' }, '·'),
+                              );
+                            })(),
                             el('td', { 'data-label': 'State' }, spanBadge(state[0], state[1])),
                             el('td', { 'data-label': 'Actions', cls: 'vp-row-actions' },
                               el('button', {
@@ -728,7 +782,7 @@
                             ),
                           );
                         })
-                      : [el('tr', {}, el('td', { colspan: 6, style: 'padding:0' },
+                      : [el('tr', {}, el('td', { colspan: 8, style: 'padding:0' },
                             emptyState('∅',
                               S.custSearch || S.custFilter !== 'all'
                                 ? 'No customers match this filter'
@@ -1307,6 +1361,27 @@
       'data-pill': value,
       onclick: onClick,
     }, label);
+  }
+
+  // v1.2.14 — Clickable column header with ▲▼ indicator. Click cycles asc → desc → no-sort.
+  function sortHeader(label, field, currentSort) {
+    const isActive = currentSort.by === field;
+    const indicator = isActive ? (currentSort.dir === 'asc' ? ' ▲' : ' ▼') : '';
+    return el('th', {
+      cls: 'vp-th-sort' + (isActive ? ' vp-th-sort-on' : ''),
+      'data-sort-field': field,
+      onclick: () => {
+        if (!isActive) {
+          S.custSort = { by: field, dir: 'asc' };
+        } else if (currentSort.dir === 'asc') {
+          S.custSort = { by: field, dir: 'desc' };
+        } else {
+          // Toggle off — return to name asc
+          S.custSort = { by: 'name', dir: 'asc' };
+        }
+        loadCustomers().then(render).catch(() => {});
+      },
+    }, label + indicator);
   }
 
   // v1.2.12 — Archive / Unarchive / Delete / Edit handlers
