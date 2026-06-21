@@ -1,0 +1,135 @@
+# v1.2.8 — databyte VPN portal headless-browser smoke test
+#
+# Runs tools/portal-smoke.js against a live portal instance. Catches the
+# v1.2.7.1 class of bug (API works, UI renders empty DOM) by driving a
+# real Chromium against the portal and verifying 8 DOM-layer invariants.
+#
+# Triggers:
+#   - On every push to main, v1.2.7.x, v1.2.8, master
+#   - On every PR against main
+#   - Manual workflow_dispatch
+#
+# Portal URL:
+#   - Push to main: smoke against staging portal (set in repo secrets)
+#   - PR: smoke against staging portal (same)
+#   - Manual: any URL via workflow_dispatch input
+#
+# Required secrets:
+#   - PORTAL_URL: staging portal URL, e.g. http://staging.vpn.homelab.local:8080
+#   - PORTAL_ADMIN_USER: admin username
+#   - PORTAL_ADMIN_PASS: admin password
+#
+# Optional:
+#   - PORTAL_SMOKE_TIMEOUT_MS: per-check timeout override (default 20000)
+
+name: portal-smoke
+
+on:
+  push:
+    branches: [main, v1.2.7.*, v1.2.8, v1.2.9, master]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      portal_url:
+        description: 'Portal URL to smoke against (overrides secret)'
+        required: false
+        type: string
+      extra_args:
+        description: 'Extra args to portal-smoke.js (e.g. --no-screenshots)'
+        required: false
+        type: string
+        default: ''
+
+# Cancel in-progress runs for the same branch on new push
+concurrency:
+  group: portal-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: portal smoke (Chromium DOM-layer checks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      # Staging portal — secret-backed so we don't burn the prod URL in PR logs.
+      PORTAL_URL: ${{ secrets.PORTAL_URL }}
+      PORTAL_ADMIN_USER: ${{ secrets.PORTAL_ADMIN_USER }}
+      PORTAL_ADMIN_PASS: ${{ secrets.PORTAL_ADMIN_PASS }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Chromium
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            chromium chromium-driver fonts-liberation libnss3 \
+            libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2
+          chromium --version
+
+      - name: Install puppeteer-core
+        working-directory: tools
+        run: npm install --no-audit --no-fund --omit=dev
+
+      - name: Patch config with secrets
+        working-directory: tools
+        run: |
+          # portal-smoke.config.json has placeholders. Patch in secrets.
+          # Use a Node one-liner so we don't need jq.
+          node -e "
+            const fs = require('fs');
+            const cfg = JSON.parse(fs.readFileSync('portal-smoke.config.json', 'utf8'));
+            cfg.base_url = process.env.PORTAL_URL;
+            cfg.username = process.env.PORTAL_ADMIN_USER;
+            cfg.password = process.env.PORTAL_ADMIN_PASS;
+            if (process.env.PORTAL_SMOKE_TIMEOUT_MS) {
+              cfg.timeouts.selector_ms = parseInt(process.env.PORTAL_SMOKE_TIMEOUT_MS, 10);
+            }
+            fs.writeFileSync('portal-smoke.config.json', JSON.stringify(cfg, null, 2) + '\n');
+          "
+          # Sanity check (don't leak the password into the log)
+          node -e "
+            const cfg = require('./portal-smoke.config.json');
+            if (!cfg.base_url) { console.error('missing base_url'); process.exit(1); }
+            if (!cfg.username) { console.error('missing username'); process.exit(1); }
+            if (!cfg.password) { console.error('missing password'); process.exit(1); }
+            console.log('config: base_url=' + cfg.base_url + ' user=' + cfg.username);
+          "
+
+      - name: Run portal smoke
+        working-directory: tools
+        env:
+          PORTAL_URL: ${{ env.PORTAL_URL }}
+        run: |
+          EXTRA="${{ github.event.inputs.extra_args }}"
+          if [ -n "$EXTRA" ]; then
+            node portal-smoke.js $EXTRA
+          else
+            node portal-smoke.js
+          fi
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portal-smoke-screenshots
+          path: tools/screenshots/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload screenshots on success
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portal-smoke-screenshots-success
+          path: tools/screenshots/
+          if-no-files-found: ignore
+          retention-days: 3
