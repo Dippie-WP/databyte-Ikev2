@@ -8,6 +8,105 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.8 — 2026-06-21
+
+**Headless-browser smoke test for the portal.** New `tools/portal-smoke.js`
+drives a real Chromium against the portal UI and verifies 8 DOM-layer
+invariants that API-only testing misses. Specifically designed to catch
+the failure mode that bit v1.2.7.1 (the `el()` flatten bug — API worked,
+UI rendered empty DOM, sat broken for ~36h).
+
+**Added**
+
+- `tools/portal-smoke.js` (260 LOC) — Puppeteer-core driver running 8 checks
+  with screenshot capture on every step (success + failure)
+- `tools/portal-smoke.config.json` — base URL, credentials, Chromium path,
+  timeouts. Admin password is plaintext because the portal's admin
+  account is an internal test credential (see `TOOLS.md`).
+- `tools/package.json` + `tools/.gitignore` — `npm install` → `npm run smoke`
+  workflow. Uses puppeteer-core (no Chromium download — uses system
+  `/usr/bin/chromium`)
+- `tools/README.md` — usage docs + how to add a new check
+- `tools/example-screenshots/` — 4 reference screenshots from a real
+  passing run (login, dashboard, modal, operator "no cap" row)
+
+**The 8 checks**
+
+1. `/` renders login form (username + password inputs present)
+2. POST `/api/login` → 200 + dashboard cards appear
+3. Dashboard metric cards have non-empty values (not just skeletons)
+4. Customers page has ≥1 row in table
+5. `+ New client` modal opens with ≥11 fields
+6. Collision warning fires for `Zayd` / `Zayd-iphone` + submit disabled
+7. Operator row shows "no cap" pill (v1.2.7.3 + v1.2.7.4 regression guard)
+8. Operator customer detail `Used` card shows byte string + "no cap / tracking" subtitle
+
+**Run**
+
+```bash
+cd tools && npm install                                  # ~30s, downloads puppeteer-core only
+PORTAL_URL=http://192.168.10.98:8080 node portal-smoke.js
+# or: npm run smoke:live --prefix tools
+```
+
+**Verified**
+
+- 8/8 passing in 14.4s against live `http://192.168.10.98:8080` (LXC 903,
+  v1.2.7.4 deployed)
+- Catches the v1.2.7.1 class of bug (DOM render regression that API
+  tests can't see)
+- Exit code 0 = all pass, 1 = at least one fail, 2 = fatal
+
+**Bugs found + fixed while building this**
+
+- v1.2.7.4 — customers-list row used `fmtBytes()` directly instead of
+  `usageBar()`, so operators saw `"0 B / 0 B"` and `"0.0%"` instead of
+  the v1.2.7.3-intented `<bytes> · [NO CAP]` pill. Fixed + tagged as
+  v1.2.7.4.
+- Config-file password masking issue (smoke test sent literal `***` as
+  the password, got 401). Lesson: don't write masked values to config
+  files expecting the test to magically resolve them.
+
+### v1.2.7.4 — 2026-06-21
+
+**Operator usage visibility — list row follow-up.** v1.2.7.3 fixed the
+Usage column in `usageBar()` (sessions table + detail Quota card) but
+**missed the customers-list row** (~line 574 of `app.js`), which rendered
+`fmtBytes(c.used_bytes) + ' / ' + fmtBytes(c.quota_bytes)` directly. For
+operator accounts the row still showed `"0 B / 0 B"` and `"0.0%"` — the
+opposite of the v1.2.7.3 fix's intent. Discovered while writing the
+v1.2.8 headless-browser smoke test (check #7) which specifically asserts
+that operator rows show the "no cap" pill.
+
+**Fixed**
+
+- `host/vpn-portal/www/static/app.js` `renderCustomers()` (~line 574):
+  the Usage cell now calls `usageBar(used, quota, pct, over_quota,
+  is_operator)` (consistent with sessions table + detail), so operators
+  get `<bytes> · [NO CAP]` and the `%` column shows `—` instead of `0.0%`.
+
+### v1.2.7.3 — 2026-06-21
+
+**Operator usage visibility.** The portal was hiding all data usage
+numbers for operator accounts — `usageBar()` returned the literal
+text `"unlimited"` and the customer detail `Quota` card subtitle read
+`"operator (bypass)"` with no number. Operator bypasses still apply
+(no cut, no over_quota), but visibility is independent of that.
+
+**Changed**
+
+- `host/vpn-portal/www/static/app.js` `usageBar()`: for `is_operator=1`
+  OR `!limit`, now renders `<bytes> · <no cap|no quota>` instead of just
+  `"unlimited"`. Tooltip explains "Operator account — bypasses quota
+  (no cap, but usage is still tracked)".
+- `host/vpn-portal/www/static/app.js` `renderCustomerDetail()`:
+  when no cap applies, the progress bar is hidden entirely (no 0% green
+  bar clutter), the `Used` card subtitle reads `"no cap · usage tracked"`,
+  and the `Quota` card shows `"no cap"` with `"bypass"` subtitle. Color
+  is neutral (`dim`).
+- `host/vpn-portal/www/static/app.css`: added `.vp-usage-tag` (small
+  uppercase pill) and `.vp-bar-dim` (neutral bar background).
+
 ### v1.2.7.2 — 2026-06-21
 
 **Bug fix + share controls.** Two improvements driven by operator feedback:
