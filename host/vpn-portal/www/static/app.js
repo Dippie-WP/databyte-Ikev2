@@ -111,10 +111,24 @@
   function fmtPct(p) { return p != null ? p.toFixed(1) + '%' : '—'; }
 
   // Visual usage bar used in the leases table.
-  // For operators (no limit) shows "—" instead of a bar.
+  // v1.2.7.3 — show real used_bytes for operators too, just label "no cap"
+// next to it. Previously the bar hid all numbers for operators, which
+// made Zun's own usage invisible. Quota monitoring still bypasses for
+// operators (no cut, no over_quota), but visibility is independent of that.
   function usageBar(used, limit, pct, over_quota, is_operator) {
     if (is_operator || !limit) {
-      return el('span', { cls: 'vp-usage-text vp-mono', title: 'Operator account — bypasses quota' }, 'unlimited');
+      const tag = el('span', {
+        cls: 'vp-usage-tag',
+        title: is_operator
+          ? 'Operator account — bypasses quota (no cap, but usage is still tracked)'
+          : 'No data cap set for this customer',
+      }, is_operator ? 'no cap' : 'no quota');
+      return el('div', { cls: 'vp-usage' },
+        el('div', { cls: 'vp-usage-text vp-mono' },
+          fmtBytes(used) + ' \u00b7 ',
+          tag,
+        ),
+      );
     }
     const barColor = over_quota ? 'var(--red)' : (pct >= 80 ? 'var(--amber)' : 'var(--green)');
     return el('div', { cls: 'vp-usage' },
@@ -615,15 +629,22 @@
     const c = S.detail;
     if (!c) return el('div', {});
     const pct = c.pct || 0;
-    const barColor = c.over_quota ? 'red' : pct >= 80 ? 'amber' : 'green';
+    // v1.2.7.3 — for operators, force neutral color + hide the bar.
+    // Operators have no cap so pct is meaningless (would always be 0 or undefined);
+    // showing a 0% bar adds nothing. The "Used" card already shows real bytes.
+    const noCap = c.is_operator || !c.quota_bytes;
+    const barColor = noCap ? 'dim' : (c.over_quota ? 'red' : pct >= 80 ? 'amber' : 'green');
+    const usedSub = noCap
+      ? (c.is_operator ? 'no cap · usage tracked' : 'no quota set')
+      : fmtPct(pct);
 
     return el('div', { cls: 'vp-card' },
       el('div', { cls: 'vp-card-title' }, (c.display_name || c.name) + '  ·  ' + (c.tier_display || 'no tier')),
       el('div', { cls: 'vp-row' },
-        mCard('Used', fmtBytes(c.used_bytes), fmtPct(pct), c.over_quota ? 'red' : pct >= 80 ? 'amber' : 'green'),
-        mCard('Quota', fmtBytes(c.quota_bytes), c.is_operator ? 'operator (bypass)' : 'effective limit'),
+        mCard('Used', fmtBytes(c.used_bytes), usedSub, noCap ? 'dim' : (c.over_quota ? 'red' : pct >= 80 ? 'amber' : 'green')),
+        mCard('Quota', noCap ? (c.is_operator ? 'no cap' : 'no quota') : fmtBytes(c.quota_bytes), noCap ? (c.is_operator ? 'bypass' : 'unset') : 'effective limit'),
       ),
-      el('div', { cls: 'vp-bar-wrap' },
+      noCap ? null : el('div', { cls: 'vp-bar-wrap' },
         el('div', { cls: 'vp-bar-fill vp-bar-' + barColor, style: 'width:' + Math.min(100, pct) + '%' }),
       ),
       el('div', { cls: 'vp-btn-row' },
