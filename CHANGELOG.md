@@ -8,6 +8,92 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.7.2 — 2026-06-21
+
+**Bug fix + share controls.** Two improvements driven by operator feedback:
+(a) the `Zayd-Zayd-iphone` EAP-identity collision is now blocked at both
+server and browser layer, and (b) the one-shot password panel gets a
+Web Share API button so operators can hand the config to a client via
+WhatsApp / Telegram / SMS / email with one tap.
+
+**Added**
+
+- `host/vpn-portal/www/static/app.js` — `buildShareText()` builds a
+  multi-line plain-text config (server, remote ID, local ID, username,
+  password, per-OS setup steps, "save this — shown once" warning).
+- `renderShareControls()` on the one-shot panel:
+  - Mobile (Android Chrome, iOS Safari, …): Web Share API button
+    "↗ Share to WhatsApp / Telegram / etc." opens the native share sheet.
+    `navigator.canShare({text})` is checked first (iOS Safari requires
+    it; without it, share can throw).
+  - Desktop + iOS < 13 fallback: "⧉ Copy all" copies the same text via
+    Clipboard API, with `document.execCommand('copy')` last-resort for
+    very old browsers.
+- `host/vpn-portal/www/static/app.css` — `.vp-field-warn` (red text +
+  red-tinted border) and `.vp-inp-bad` (red input border) styles for
+  the collision warning.
+- Live device-name collision warning in the new-client form: as the
+  operator types the customer slug + device name, a red warning appears
+  below the device field if either condition is detected. Submit button
+  is disabled while the warning is shown.
+
+**Fixed**
+
+- `host/vpn-portal/app.py` `POST /api/customers` — collision guard:
+  rejects `device_name` that **equals** `customer.name` (case-insensitive)
+  OR **starts with** `{customer.name}-` (case-insensitive). Both cases
+  produce ugly / unusable EAP identities like `Zayd-Zayd-iphone`. Error
+  message tells the operator exactly what to rename it to (e.g. "use
+  'iphone' instead of 'Zayd-iphone'"). 400 with a precise message
+  (no DB write, no EAP block created).
+- The hint text under the device name field now reads "Friendly name.
+  EAP identity will be '{customer-name}-{device-name}'." (was: "Friendly
+  name. EAP identity = client-name-device-name" — cryptic).
+
+**Live data cleanup (one-shot, not in code)**
+
+- Customer `Zayd` (id=10) device `Zayd-iphone` (id=22) — created today
+  with device_name `Zayd-iphone` while customer slug was `Zayd`, producing
+  EAP identity `Zayd-Zayd-iphone`. **Never used**: `last_seen_at=NULL`,
+  no live SA, only audit entry was the original `create_client`. Safe
+  to rename in place.
+  - Renamed device → `iphone` (id=22, active=1)
+  - Renamed user row → `Zayd-iphone` (id=31)
+  - Renamed EAP block → `eap-Zayd-iphone { id = Zayd-iphone; secret = … }`
+  - Rotated password (computed via `openssl dgst -md4 -provider legacy`
+    on LXC 903 — Python `hashlib.md4` is unavailable on this OpenSSL
+    build, portal uses `openssl` subprocess for the same reason)
+  - Audit log: `zayd_device_rename` + `zayd_device_secret_fix` entries
+- New password delivered to operator via Telegram.
+
+**Verified**
+
+- POST /api/customers with `name=Zayd, device_name=Zayd` → 400 "device_name
+  duplicates the customer name 'Zayd' (would yield EAP identity 'Zayd-Zayd').
+  Use a different device name (e.g. 'iphone', 'laptop', 'pixel9')."
+- POST /api/customers with `name=Zayd, device_name=Zayd-iphone` → 400
+  "device_name 'Zayd-iphone' starts with the customer name 'Zayd-' …"
+- POST /api/customers with `name=acme-corp, device_name=ACME-CORP-laptop`
+  → 400 (case-insensitive)
+- POST /api/customers with `name=test-collision-1272, device_name=pixel9`
+  → 200 (legit; created + cleaned up)
+- Browser form: typing "Zayd" into customer slug then "Zayd" or "Zayd-iphone"
+  into device name triggers the red warning + disables submit
+- `charon --load-creds` picks up the renamed `eap-Zayd-iphone` block
+  (was `eap-Zayd-Zayd-iphone`)
+- Portal `/api/customers/10` shows device id=22, name="iphone", active=1
+
+**Out of scope (still backlog)**
+
+- Per-customer portal (clients see their own usage)
+- PATCH / DELETE customer endpoints
+- Mobileconfig generation (planned for v1.3 — operator types the URL into
+  iOS profiles via the share-text instructions)
+- Email integration (SMTP)
+- Tier management UI
+- POST /api/customers/{id}/devices (add another device to an existing
+  customer; v1.2.6 1-device-per-customer model keeps this gated)
+
 ### v1.2.7.1 — 2026-06-21
 
 **Critical UI fix.** Pre-existing bug since 5C.2 — the portal's `el()`

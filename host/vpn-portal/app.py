@@ -737,6 +737,28 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         raise HTTPException(400, f"customer name '{cust_name}' must be alphanumeric + dash/underscore, 1-32 chars, no leading dash")
 
     eap_identity = f"{cust_name}-{req.device_name}"
+
+    # v1.2.7.2 — collision guard. The EAP identity is f"{cust_name}-{device_name}".
+    # If device_name equals cust_name, EAP identity becomes "X-X" (useless, ugly).
+    # If device_name starts with "{cust_name}-", EAP identity becomes "X-X-..."
+    # (duplicates the customer stem). Both cases are user mistakes, not intent —
+    # reject with a clear message. (Real-world bug: Zun typed "Zayd-iphone" while
+    # customer slug was "Zayd" → EAP identity "Zayd-Zayd-iphone".)
+    if req.device_name.lower() == cust_name.lower():
+        raise HTTPException(
+            400,
+            f"device_name '{req.device_name}' duplicates the customer name '{cust_name}' "
+            f"(would yield EAP identity '{cust_name}-{req.device_name}'). "
+            f"Use a different device name (e.g. 'iphone', 'laptop', 'pixel9')."
+        )
+    if req.device_name.lower().startswith(cust_name.lower() + "-"):
+        raise HTTPException(
+            400,
+            f"device_name '{req.device_name}' starts with the customer name '{cust_name}-' "
+            f"(would yield EAP identity '{cust_name}-{req.device_name}' with a duplicated prefix). "
+            f"Drop the '{cust_name}-' prefix (e.g. use 'iphone' instead of '{req.device_name}')."
+        )
+
     if not SLUG_RE.match(eap_identity):
         raise HTTPException(400, f"derived EAP identity '{eap_identity}' is too long (max 32)")
 

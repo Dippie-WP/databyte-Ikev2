@@ -603,6 +603,14 @@ tr:last-child td { border-bottom: none; }
 .vp-form-grid .vp-field { display: flex; flex-direction: column; gap: 4px; }
 .vp-optional { font-weight: 400; color: var(--vp-text2); font-size: 11px; }
 .vp-hint { font-size: 11px; color: var(--vp-text2); }
+/* v1.2.7.2 — live collision warning under device name field */
+.vp-field-warn {
+  font-size: 11px; color: var(--red, #d04848);
+  background: rgba(208, 72, 72, 0.10);
+  border: 1px solid rgba(208, 72, 72, 0.35);
+  border-radius: 4px; padding: 6px 8px; margin-top: 4px;
+}
+.vp-inp-bad { border-color: var(--red, #d04848) !important; box-shadow: 0 0 0 1px rgba(208,72,72,0.35); }
 .vp-form-err {
   margin-top: 12px; padding: 8px 10px;
   background: rgba(255, 80, 80, 0.12);
