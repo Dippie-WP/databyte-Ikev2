@@ -47,7 +47,11 @@ concurrency:
 jobs:
   smoke:
     name: portal smoke (Chromium DOM-layer checks)
-    runs-on: ubuntu-latest
+    # v1.2.11 — self-hosted runner on LXC 903 (VPN gateway LXC).
+    # Per Zun's rule (2026-06-21): CI tooling belongs on the VPN LXC,
+    # not 902 (monitoring) or a separate LXC.
+    # Labels: [self-hosted, Linux, X64, lxc-903, vpn]
+    runs-on: [self-hosted, lxc-903, vpn]
     timeout-minutes: 5
 
     env:
@@ -157,3 +161,10 @@ jobs:
         run: |
           # Don't store 280MB Chromium cache on the runner after the run
           rm -rf ~/.cache/puppeteer 2>/dev/null || true
+
+      - name: Report runner
+        if: always()
+        run: |
+          echo "Runner: $(hostname) ($(uname -a))"
+          echo "Portal URL: ${PORTAL_URL}"
+          echo "Date: $(date -u)"
