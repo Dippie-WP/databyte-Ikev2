@@ -652,15 +652,41 @@ def logout(response: Response):
 
 
 @app.get("/api/customers")
-def list_customers(include_archived: bool = False, _: dict = Depends(require_session)):
+def list_customers(
+    include_archived: bool = False,
+    sort_by: str = "name",
+    sort_dir: str = "asc",
+    _: dict = Depends(require_session),
+):
     """List customers with current usage and tier. VIPs are per-device, not per-customer.
 
     v1.2.12 — ?include_archived=1 shows archived customers too (default: active only).
     Archived = status='archived'. Operators always shown regardless.
+
+    v1.2.14 — ?sort_by=name|usage|tier|created, ?sort_dir=asc|desc. Default: name asc.
+    sort_by whitelist enforced server-side (never raw user input into SQL).
+    Operators always pinned first regardless of sort, then by the chosen column.
     """
     where = ""
     if not include_archived:
         where = "WHERE c.status = 'active' OR c.is_operator = 1"
+
+    # v1.2.14 — whitelisted ORDER BY. The first ORDER BY is the stable tiebreaker.
+    # Map sort_by → (column, type) so we can NULL-handle correctly. NULLS LAST
+    # makes sense for usage (0 is "no usage yet") and created_at (operators pinned regardless).
+    sort_col_map = {
+        "name":    ("c.name", "TEXT"),
+        "usage":   ("c.data_used_bytes", "NUM"),
+        "tier":    ("t.display_name", "TEXT"),
+        "created": ("c.created_at", "NUM"),
+    }
+    if sort_by not in sort_col_map:
+        raise HTTPException(400, f"sort_by must be one of {sorted(sort_col_map.keys())}, got '{sort_by}'")
+    if sort_dir not in ("asc", "desc"):
+        raise HTTPException(400, "sort_dir must be 'asc' or 'desc'")
+    sort_col, sort_type = sort_col_map[sort_by]
+    nulls = "NULLS LAST" if sort_dir == "asc" else "NULLS FIRST"
+
     rows = db_query(f"""
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
@@ -670,7 +696,7 @@ def list_customers(include_archived: bool = False, _: dict = Depends(require_ses
         FROM customers c
         LEFT JOIN tiers t ON c.tier_id = t.id
         {where}
-        ORDER BY c.is_operator DESC, c.name;
+        ORDER BY c.is_operator DESC, {sort_col} {sort_dir.upper()} {nulls}, c.name;
     """)
     out = []
     for r in rows:
@@ -698,6 +724,26 @@ def list_customers(include_archived: bool = False, _: dict = Depends(require_ses
             "over_quota": bool(r["over_quota"]),
         })
     return out
+
+
+@app.get("/api/customers/active-sessions")
+def customer_active_sessions(_: dict = Depends(require_session)):
+    """v1.2.14 — Live count of active IKE_SAs per customer.
+
+    Calls leases_active() (joins strongSwan attr-sql pool with customers/devices)
+    and returns a dict {customer_id: active_session_count}. Customers with no
+    active sessions are omitted.
+
+    Cost: ~50ms (one swanctl --list-sas call). Safe to poll at 30s.
+    """
+    leases = leases_active()
+    counts: dict[int, int] = {}
+    for l in leases:
+        cid = l.get("customer_id")
+        if cid is None:
+            continue
+        counts[cid] = counts.get(cid, 0) + 1
+    return {"counts": counts, "total_active": sum(counts.values())}
 
 
 # ---------- v1.2.7 — POST /api/customers (operator creates a new client) ----------
