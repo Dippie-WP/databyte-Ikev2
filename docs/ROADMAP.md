@@ -4,7 +4,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 ## Current state (live 2026-06-20 19:30 UTC)
 
-**Latest tag: v1.2.9** — CI hook for the smoke test (workflow file, not yet enabled — needs staging portal URL).
+**Latest tag: v1.2.10** — reset_demo.sh now detects KILLED/BLOCKED secrets + CI workflow skips cleanly when secrets missing.
 
 **Phase status:**
 | Phase | Description | Status |
@@ -27,11 +27,12 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | **v1.2.7.4** | **Operator visibility follow-up — customers-list row uses usageBar()** | **✅ DONE — 2026-06-21 06:30 UTC** |
 | **v1.2.8** | **Headless-browser smoke test (8 checks, locks in v1.2.7.1-class regression coverage)** | **✅ DONE — 2026-06-21 06:45 UTC** |
 | **v1.2.9** | **CI hook (.github/workflows/portal-smoke.yml) + LXC 903 DHCP revert + demo-phone secret reset** | **✅ DONE — 2026-06-21 07:40 UTC** |
+| **v1.2.10** | **reset_demo.sh detects KILLED/BLOCKED secrets + CI workflow uses puppeteer + skips when PORTAL_URL unset** | **✅ DONE — 2026-06-21 08:00 UTC** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
 | v1.3 | iOS native EAP fixes, cert rotation, MTU/PMTUD, nftables migration | 🔒 SHELVED — backlog, no scheduled work |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4, v1.2.6, v1.2.7, v1.2.7.1, v1.2.7.2, v1.2.7.3, v1.2.7.4, v1.2.8, v1.2.9 (15 total). **v1.2.5 deleted.**
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4, v1.2.6, v1.2.7, v1.2.7.1, v1.2.7.2, v1.2.7.3, v1.2.7.4, v1.2.8, v1.2.9, v1.2.10 (16 total). **v1.2.5 deleted.**
 
 **Active development branches:** none. All merged to main.
 
