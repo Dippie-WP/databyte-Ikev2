@@ -1,0 +1,17 @@
+{
+  "name": "strongswan-vpn-portal-smoke",
+  "version": "1.2.8",
+  "private": true,
+  "description": "Headless-browser smoke test for the databyte VPN portal UI. Catches DOM-rendering regressions that API-only tests miss (lesson learned from v1.2.7.1 el() flatten bug).",
+  "scripts": {
+    "smoke": "node portal-smoke.js",
+    "smoke:verbose": "VERBOSE=1 node portal-smoke.js",
+    "smoke:live": "PORTAL_URL=http://192.168.10.98:8080 node portal-smoke.js"
+  },
+  "dependencies": {
+    "puppeteer-core": "^23.10.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

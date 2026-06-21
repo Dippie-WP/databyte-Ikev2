@@ -1,0 +1,21 @@
+{
+  "base_url": "http://127.0.0.1:8080",
+  "username": "admin",
+  "password": "totalconnect",
+  "_password_note": "INTERNAL TEST CREDENTIAL \u2014 same as vpn-portal admin (TOOLS.md / MEMORY.md). Rotate via /api/security/password (future) or update both portal and this file together.",
+  "browser": {
+    "executable_path": "/usr/bin/chromium",
+    "headless": true,
+    "viewport": {
+      "width": 1280,
+      "height": 900
+    }
+  },
+  "timeouts": {
+    "page_load_ms": 20000,
+    "selector_ms": 20000,
+    "post_action_ms": 800
+  },
+  "screenshots_dir": "./screenshots",
+  "fail_fast": true
+}
