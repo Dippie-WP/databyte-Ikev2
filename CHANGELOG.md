@@ -8,6 +8,57 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.7.1 — 2026-06-21
+
+**Critical UI fix.** Pre-existing bug since 5C.2 — the portal's `el()`
+helper silently skipped arrays passed as children, dropping every
+array-passed DOM element. The portal UI has been UNUSABLE since 5C.2
+(login form, modals, customer detail rows, devices table all rendered
+with empty inner DOM); only the curl/API surface worked. Discovered
+while taking v1.2.7 release screenshots.
+
+**Fixed**
+
+- `host/vpn-portal/www/static/app.js` `function el()`: replaced
+  `for (const c of children) { if (Array.isArray(c)) continue; ... }`
+  with `const flat = children.flat(Infinity); for (const c of flat) { ... }`.
+  Now `el('div', {}, [a, b])` renders the same as `el('div', {}, a, b)`,
+  and `el('div', {}, sub ? [a, b] : null)` works in both branches.
+
+**Verified**
+
+- Login form: username + password inputs render
+- Dashboard: stat cards render with values (Service OK, Database
+  connected, charon reachable, ipBan active, 6 customers, 0 over
+  quota, etc.)
+- Customers list: 6 rows render with tier badges + usage + state pills
+- New client modal: 11 fields render with placeholders, hints, dropdowns
+- One-shot panel: copy-to-clipboard fields + per-OS setup cards render
+- Sessions page: active leases table + swanctl raw output render
+
+**Operator action**
+
+- Hard-refresh your browser (Ctrl+Shift+R) to bypass any cached
+  app.js from the broken version. Portal is now usable.
+
+**Why this didn't ship tests**
+
+- All UI work since 5C.2 was tested via `curl` against the JSON API,
+  not through the browser. The bug was invisible to API-only testing.
+  Going forward: every portal release should include a headless-browser
+  smoke test that loads `/`, fills the login form, and verifies the
+  dashboard renders. See `tools/portal-smoke.js` (to be added).
+
+**Out of scope (still backlog)**
+
+- Per-customer portal (clients see their own usage)
+- PATCH / DELETE customer endpoints
+- Mobileconfig generation
+- Email integration (SMTP)
+- Tier management UI
+
+(nothing in flight — all changes captured in next released version)
+
 ### v1.2.7 — 2026-06-20
 
 Operator client onboarding — first-class UI + endpoint for creating a new
