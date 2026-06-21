@@ -649,16 +649,24 @@ def logout(response: Response):
 
 
 @app.get("/api/customers")
-def list_customers(_: dict = Depends(require_session)):
-    """List customers with current usage and tier. VIPs are per-device, not per-customer."""
-    rows = db_query("""
+def list_customers(include_archived: bool = False, _: dict = Depends(require_session)):
+    """List customers with current usage and tier. VIPs are per-device, not per-customer.
+
+    v1.2.12 — ?include_archived=1 shows archived customers too (default: active only).
+    Archived = status='archived'. Operators always shown regardless.
+    """
+    where = ""
+    if not include_archived:
+        where = "WHERE c.status = 'active' OR c.is_operator = 1"
+    rows = db_query(f"""
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
-               c.over_quota, c.billing_id, c.email,
+               c.over_quota, c.billing_id, c.email, c.max_devices,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
         LEFT JOIN tiers t ON c.tier_id = t.id
+        {where}
         ORDER BY c.is_operator DESC, c.name;
     """)
     out = []
@@ -680,6 +688,7 @@ def list_customers(_: dict = Depends(require_session)):
             "tier_display": r.get("tier_display"),
             "billing_id": r.get("billing_id"),
             "email": r.get("email"),
+            "max_devices": r.get("max_devices"),
             "used_bytes": used,
             "quota_bytes": quota,
             "pct": round(used / quota * 100, 1) if quota else 0,
@@ -1350,6 +1359,190 @@ def deadman(_: dict = Depends(require_session)):
     except HTTPException:
         active_bans = -1
     return {"service": svc, "active_bans": active_bans, "log_tail": log_tail}
+
+
+# ---------- v1.2.12 — PATCH/Archive/Unarchive/Delete customers ----------
+class CustomerUpdate(BaseModel):
+    display_name: Optional[str] = None
+    telegram_username: Optional[str] = None
+    email: Optional[str] = None
+    billing_id: Optional[str] = None
+    notes: Optional[str] = None
+    tier_name: Optional[str] = None  # change tier
+    custom_cap_mb: Optional[int] = None  # if tier_name='custom'
+    max_devices: Optional[int] = None  # 1..10
+
+def _remove_eap_block(identity: str) -> bool:
+    """Remove an `eap-<identity> { ... }` block from rw-eap.conf. Returns True if found+removed."""
+    content = read_rw_eap_conf()
+    # Match: eap-<id> { ... }  (block is balanced; iterate char-by-char)
+    needle = f"eap-{identity} "
+    if needle not in content:
+        return False
+    idx = content.index(needle)
+    # Find opening brace on same line
+    brace_open = content.find("{", idx)
+    if brace_open == -1:
+        return False
+    depth = 1
+    i = brace_open + 1
+    while i < len(content) and depth > 0:
+        if content[i] == "{":
+            depth += 1
+        elif content[i] == "}":
+            depth -= 1
+        i += 1
+    block_end = i
+    # Include preceding whitespace and trailing newline
+    start = idx
+    while start > 0 and content[start - 1] in " \t":
+        start -= 1
+    end = block_end
+    if end < len(content) and content[end] == "\n":
+        end += 1
+    new_content = content[:start] + content[end:]
+    write_rw_eap_conf(new_content)
+    return True
+
+
+@app.patch("/api/customers/{customer_id}")
+def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(require_session)):
+    """v1.2.12 — edit customer fields. Operator only. Refuses to edit operators or archive a non-existent customer."""
+    cust = db_query(f"SELECT id, name, is_operator, tier_id, data_limit_bytes FROM customers WHERE id = {int(customer_id)};")
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    cust = cust[0]
+    if cust["is_operator"]:
+        raise HTTPException(403, "cannot edit the operator account")
+
+    sets = []
+    params = []
+    if req.display_name is not None:
+        sets.append(f"display_name = {_q(req.display_name)}")
+    if req.telegram_username is not None:
+        sets.append(f"telegram_username = {_q(req.telegram_username)}")
+    if req.email is not None:
+        if req.email and not EMAIL_RE.match(req.email):
+            raise HTTPException(400, f"email '{req.email}' is not a valid address")
+        sets.append(f"email = {_q(req.email)}")
+    if req.billing_id is not None:
+        sets.append(f"billing_id = {_q(req.billing_id)}")
+    if req.notes is not None:
+        sets.append(f"notes = {_q(req.notes)}")
+    if req.max_devices is not None:
+        if not 1 <= req.max_devices <= 10:
+            raise HTTPException(400, "max_devices must be 1..10")
+        sets.append(f"max_devices = {int(req.max_devices)}")
+
+    # Tier change
+    if req.tier_name is not None:
+        if req.tier_name == "custom":
+            if req.custom_cap_mb is None or req.custom_cap_mb < 1:
+                raise HTTPException(400, "custom_cap_mb (>=1) is required when tier_name='custom'")
+            ts = int(time.time())
+            tier_name = f"custom_{req.custom_cap_mb}mb_{ts}"
+            tier_display = f"Custom {req.custom_cap_mb} MiB"
+            data_limit = req.custom_cap_mb * 1024 * 1024
+            tier_id = ensure_tier(tier_name, tier_display, data_limit)
+        else:
+            rows = db_query(f"SELECT id, data_limit_bytes, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+            if not rows:
+                raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
+            if not rows[0].get("is_active"):
+                raise HTTPException(400, f"tier '{req.tier_name}' is archived")
+            tier_id = rows[0]["id"]
+            data_limit = rows[0]["data_limit_bytes"]
+        sets.append(f"tier_id = {int(tier_id)}")
+        sets.append(f"data_limit_bytes = {int(data_limit)}")
+
+    if not sets:
+        raise HTTPException(400, "no fields to update")
+
+    sets.append(f"updated_at = {int(time.time())}")
+    sql = f"UPDATE customers SET {', '.join(sets)} WHERE id = {int(customer_id)};"
+    db_exec(sql)
+    _audit(user.get("name") or "operator", "customer_update", {
+        "customer_id": int(customer_id),
+        "fields": list(req.model_dump(exclude_none=True).keys()),
+    })
+    return {"ok": True, "customer_id": int(customer_id)}
+
+
+@app.post("/api/customers/{customer_id}/archive")
+def archive_customer(customer_id: int, user: dict = Depends(require_session)):
+    """v1.2.12 — soft-delete: set status='archived'. Reversible. Keeps all data, devices, audit, leases."""
+    cust = db_query(f"SELECT id, name, is_operator, status FROM customers WHERE id = {int(customer_id)};")
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    if cust[0]["is_operator"]:
+        raise HTTPException(403, "cannot archive the operator account")
+    if cust[0]["status"] == "archived":
+        return {"ok": True, "customer_id": int(customer_id), "already_archived": True}
+    db_exec(f"UPDATE customers SET status='archived', is_active=0, updated_at={int(time.time())} WHERE id={int(customer_id)};")
+    _audit(user.get("name") or "operator", "customer_archive", {
+        "customer_id": int(customer_id),
+        "name": cust[0]["name"],
+    })
+    return {"ok": True, "customer_id": int(customer_id)}
+
+
+@app.post("/api/customers/{customer_id}/unarchive")
+def unarchive_customer(customer_id: int, user: dict = Depends(require_session)):
+    """v1.2.12 — restore an archived customer. Sets status='active', is_active=1."""
+    cust = db_query(f"SELECT id, name, is_operator, status FROM customers WHERE id = {int(customer_id)};")
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    if cust[0]["is_operator"]:
+        raise HTTPException(403, "cannot unarchive the operator account")
+    if cust[0]["status"] != "archived":
+        return {"ok": True, "customer_id": int(customer_id), "already_active": True}
+    db_exec(f"UPDATE customers SET status='active', is_active=1, updated_at={int(time.time())} WHERE id={int(customer_id)};")
+    _audit(user.get("name") or "operator", "customer_unarchive", {
+        "customer_id": int(customer_id),
+        "name": cust[0]["name"],
+    })
+    return {"ok": True, "customer_id": int(customer_id)}
+
+
+@app.delete("/api/customers/{customer_id}")
+def delete_customer(customer_id: int, confirm: str = "", user: dict = Depends(require_session)):
+    """v1.2.12 — HARD delete. Cascades: devices, alerts, purchases, audit_log, EAP secret from rw-eap.conf.
+
+    Required: ?confirm=<customer_name>. Returns 400 if name doesn't match (prevents accidental deletes).
+    Cannot delete operators.
+    """
+    cust = db_query(f"SELECT id, name, is_operator FROM customers WHERE id = {int(customer_id)};")
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    cust = cust[0]
+    if cust["is_operator"]:
+        raise HTTPException(403, "cannot delete the operator account")
+    if confirm != cust["name"]:
+        raise HTTPException(400, f"to delete '{cust['name']}', pass ?confirm={cust['name']}")
+
+    # Cascade: devices (links to customers.id), then audit, alerts, purchases
+    devices = db_query(f"SELECT id, device_name FROM devices WHERE customer_id = {int(customer_id)};")
+    db_exec(f"DELETE FROM devices WHERE customer_id = {int(customer_id)};")
+    db_exec(f"DELETE FROM alerts WHERE customer_id = {int(customer_id)};")
+    db_exec(f"DELETE FROM purchases WHERE customer_id = {int(customer_id)};")
+    db_exec(f"DELETE FROM audit_log WHERE target_type='customer' AND target_id={int(customer_id)};")
+
+    # Remove EAP block(s) — one per device
+    for dev in devices:
+        eap_identity = f"{cust['name']}-{dev['device_name']}"
+        try:
+            _remove_eap_block(eap_identity)
+        except Exception as ex:
+            log.warning("could not remove eap block %s: %s", eap_identity, ex)
+    reload_charon_creds()
+
+    db_exec(f"DELETE FROM customers WHERE id = {int(customer_id)};")
+    _audit(user.get("name") or "operator", "customer_delete_hard", {
+        "customer_id": int(customer_id),
+        "name": cust["name"],
+        "devices_deleted": len(devices),
+    })
+    return {"ok": True, "customer_id": int(customer_id), "devices_deleted": len(devices)}
 
 
 # ---------- Entrypoint ----------

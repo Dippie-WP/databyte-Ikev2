@@ -98,7 +98,22 @@
   }
   const get  = p  => api(p);
   const post = (p, b) => api(p, { method: 'POST', body: b });
+  const patch = (p, b) => api(p, { method: 'PATCH', body: b });
   const del  = p  => api(p, { method: 'DELETE' });
+
+  // v1.2.12 — toast (top-right floating notification)
+  function toast(msg, kind) {
+    const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok') }, msg);
+    document.body.appendChild(t);
+    requestAnimationFrame(() => t.classList.add('vp-toast-show'));
+    setTimeout(() => {
+      t.classList.remove('vp-toast-show');
+      setTimeout(() => t.remove(), 250);
+    }, 3000);
+  }
+
+  // v1.2.12 — $ shorthand for getElementById
+  const $ = id => document.getElementById(id);
 
   // ─── Format ────────────────────────────────────────────
   function fmtBytes(n) {
@@ -530,6 +545,8 @@
   function renderCustomers() {
     const loading = S.loading.customers;
     const err     = S.loadError.customers;
+    S.custSearch = S.custSearch || '';
+    S.custFilter = S.custFilter || 'all';  // all | over | near | operator | archived
 
     function skelRow() {
       return el('tr', {},
@@ -541,11 +558,32 @@
       );
     }
 
+    function applyFilter(rows) {
+      const q = S.custSearch.trim().toLowerCase();
+      return rows.filter(c => {
+        if (q) {
+          const hay = (c.display_name || '') + ' ' + (c.name || '') + ' ' + (c.email || '') + ' ' + (c.billing_id || '');
+          if (!hay.toLowerCase().includes(q)) return false;
+        }
+        if (S.custFilter === 'over' && !c.over_quota) return false;
+        if (S.custFilter === 'near' && !(c.pct >= 80 && !c.over_quota)) return false;
+        if (S.custFilter === 'operator' && !c.is_operator) return false;
+        if (S.custFilter === 'archived' && c.status !== 'archived') return false;
+        return true;
+      });
+    }
+
+    const allRows = S.customers || [];
+    const filteredRows = applyFilter(allRows);
+
     return el('div', { cls: 'vp-page' },
       el('div', { cls: 'vp-page-head' },
         el('div', { cls: 'vp-page-head-l' },
           el('div', { cls: 'vp-page-title' }, 'Customers'),
-          el('div', { cls: 'vp-page-sub' }, 'Click a row for full detail. ↺ Reset zeroes usage.'),
+          el('div', { cls: 'vp-page-sub' },
+            'Click a row for full detail. ↺ Reset zeroes usage. '
+            + (S.custFilter === 'archived' ? 'Showing archived only — click "Active" to restore view.' : '')
+          ),
         ),
         el('div', { cls: 'vp-page-head-r' },
           el('button', {
@@ -556,6 +594,29 @@
       ),
       err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
               '⚠ ' + err) : null,
+      // v1.2.12 — search + filter bar
+      el('div', { cls: 'vp-toolbar' },
+        el('input', {
+          type: 'search',
+          cls: 'vp-search',
+          placeholder: 'Search name / email / billing ID…',
+          value: S.custSearch,
+          'data-label': 'Search customers',
+          oninput: (ev) => { S.custSearch = ev.target.value; render(); },
+        }),
+        el('div', { cls: 'vp-pills' },
+          pillBtn('all', 'All', S.custFilter === 'all', () => { S.custFilter = 'all'; render(); }),
+          pillBtn('over', 'Over quota', S.custFilter === 'over', () => { S.custFilter = 'over'; render(); }),
+          pillBtn('near', 'Near cap (≥80%)', S.custFilter === 'near', () => { S.custFilter = 'near'; render(); }),
+          pillBtn('operator', 'Operators', S.custFilter === 'operator', () => { S.custFilter = 'operator'; render(); }),
+          pillBtn('archived', 'Archived', S.custFilter === 'archived', () => { S.custFilter = 'archived'; render(); }),
+        ),
+        el('div', { cls: 'vp-toolbar-meta' },
+          filteredRows.length === allRows.length
+            ? `${allRows.length} customer${allRows.length === 1 ? '' : 's'}`
+            : `${filteredRows.length} of ${allRows.length} shown`,
+        ),
+      ),
       el('div', { cls: 'vp-row-2' },
         // Left: table
         el('div', { cls: 'vp-left-col' },
@@ -570,17 +631,14 @@
                 ...(
                   loading
                     ? [skelRow(), skelRow(), skelRow()]
-                    : S.customers.length
-                      ? S.customers.map(c => {
+                    : filteredRows.length
+                      ? filteredRows.map(c => {
                           const pct = c.pct || 0;
-                          const state = c.over_quota ? ['CUT','red'] : pct >= 80 ? ['NEAR','amber'] : ['OK','green'];
-                          // v1.2.7.3 — for operators, drop the "%" column value (always 0 by
-                          // definition) and surface real used_bytes + "no cap" instead of
-                          // "0 B / 0 B". The Usage cell now uses usageBar() for consistency
-                          // with the sessions table + customer detail.
+                          const archived = c.status === 'archived';
+                          const state = archived ? ['ARCH','dim'] : c.over_quota ? ['CUT','red'] : pct >= 80 ? ['NEAR','amber'] : ['OK','green'];
                           const isOp = c.is_operator || !c.quota_bytes;
                           return el('tr', {
-                            cls: 'vp-tr' + (S.selectedId === c.id ? ' vp-tr-sel' : ''),
+                            cls: 'vp-tr' + (S.selectedId === c.id ? ' vp-tr-sel' : '') + (archived ? ' vp-tr-archived' : ''),
                             onclick: () => selectCustomer(c.id),
                           },
                             el('td', { cls: 'vp-mono', 'data-label': 'Name' }, c.display_name || c.name),
@@ -599,7 +657,13 @@
                           );
                         })
                       : [el('tr', {}, el('td', { colspan: 6, style: 'padding:0' },
-                            emptyState('∅', 'No customers yet', 'Add a customer via SSH + sqlite, or via the admin API.')))]
+                            emptyState('∅',
+                              S.custSearch || S.custFilter !== 'all'
+                                ? 'No customers match this filter'
+                                : 'No customers yet',
+                              S.custSearch || S.custFilter !== 'all'
+                                ? 'Clear the search box or pick another pill.'
+                                : 'Add a customer via SSH + sqlite, or via the admin API.')))]
                 )
               ),
             ),
@@ -655,6 +719,15 @@
       ),
       el('div', { cls: 'vp-btn-row' },
         el('button', { cls: 'vp-btn vp-btn-warn', onclick: () => doReset(c.id, c.display_name || c.name) }, '↺ Reset usage'),
+        c.is_operator ? null : el('button', {
+          cls: 'vp-btn vp-btn-ghost',
+          onclick: () => openEditCustomerModal(c),
+          'data-label': 'Edit customer',
+        }, '✎ Edit'),
+        c.is_operator ? null : (c.status === 'archived'
+          ? el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doUnarchive(c.id) }, '↩ Unarchive')
+          : el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doArchive(c.id, c.display_name || c.name) }, '🗄 Archive')),
+        c.is_operator ? null : el('button', { cls: 'vp-btn vp-btn-danger', onclick: () => doDelete(c.id, c.name) }, '✕ Delete'),
       ),
       el('dl', { cls: 'vp-kv' },
         el('dt', {}, 'Status'),  el('dd', {}, c.status + (c.is_active ? ' · active' : ' · INACTIVE')),
@@ -1153,6 +1226,137 @@
 
   function spanBadge(text, kind) {
     return el('span', { cls: 'vp-badge vp-badge-' + kind }, text);
+  }
+
+  // v1.2.12 — pill button (filter chip)
+  function pillBtn(value, label, active, onClick) {
+    return el('button', {
+      cls: 'vp-pill' + (active ? ' vp-pill-active' : ''),
+      'data-pill': value,
+      onclick: onClick,
+    }, label);
+  }
+
+  // v1.2.12 — Archive / Unarchive / Delete / Edit handlers
+  async function doArchive(customerId, displayName) {
+    if (!confirm(`Archive "${displayName}"?\n\n• Hides from default list\n• All data, devices, audit history preserved\n• Reversible via "Unarchive"`)) return;
+    try {
+      await post(`/api/customers/${customerId}/archive`);
+      await loadCustomers();
+      if (S.selectedId === customerId) await selectCustomer(customerId);
+      render();
+      toast('Archived.');
+    } catch (e) {
+      toast('Archive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  async function doUnarchive(customerId) {
+    try {
+      await post(`/api/customers/${customerId}/unarchive`);
+      S.custFilter = 'all';  // switch back to active view
+      await loadCustomers();
+      await selectCustomer(customerId);
+      render();
+      toast('Unarchived.');
+    } catch (e) {
+      toast('Unarchive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  async function doDelete(customerId, customerName) {
+    // 1st gate: confirm
+    if (!confirm(`DELETE "${customerName}"?\n\n• Removes customer row\n• Cascades: devices, alerts, purchases, audit\n• Removes EAP secret from rw-eap.conf (reloads charon)\n• IRREVERSIBLE — there is no undo`)) return;
+    // 2nd gate: type the name
+    const typed = prompt(`Type the customer name exactly to confirm:\n\n${customerName}`);
+    if (typed !== customerName) {
+      toast('Delete cancelled — name did not match.', 'err');
+      return;
+    }
+    try {
+      const url = `/api/customers/${customerId}?confirm=${encodeURIComponent(customerName)}`;
+      await del(url);
+      S.selectedId = null;
+      S.detail = null;
+      await loadCustomers();
+      render();
+      toast('Deleted.');
+    } catch (e) {
+      toast('Delete failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  function openEditCustomerModal(c) {
+    // v1.2.12 — edit: display_name, telegram, email, billing_id, notes, tier (incl. custom), max_devices
+    (async () => {
+      const tiers = await loadTiers();
+      const isCustom = !tiers.find(t => t.name === c.tier);
+      const allTiers = [...tiers];
+      if (isCustom && c.tier) {
+        allTiers.push({ name: c.tier, display_name: c.tier_display || c.tier });
+      }
+      const modal = el('div', {
+        cls: 'vp-modal-bg',
+        onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
+      },
+        el('div', { cls: 'vp-modal vp-modal-lg' },
+          el('div', { cls: 'vp-modal-h' },
+            el('div', { cls: 'vp-modal-title' }, 'Edit customer'),
+            el('div', { cls: 'vp-modal-sub' }, 'Changes apply on Save. Reloading charon not required for these fields.'),
+          ),
+          el('div', { cls: 'vp-modal-b' },
+            el('div', { cls: 'vp-form-grid' },
+              labeledField('Display name', el('input', { type: 'text', cls: 'vp-input', id: 'ed-disp', value: c.display_name || '' })),
+              labeledField('Telegram username', el('input', { type: 'text', cls: 'vp-input', id: 'ed-tg', value: c.telegram_username || '' })),
+              labeledField('Email', el('input', { type: 'email', cls: 'vp-input', id: 'ed-email', value: c.email || '' })),
+              labeledField('Billing ID', el('input', { type: 'text', cls: 'vp-input', id: 'ed-bill', value: c.billing_id || '' })),
+              labeledField('Max devices (1–10)', el('input', { type: 'number', min: 1, max: 10, cls: 'vp-input', id: 'ed-mdev', value: c.max_devices || 1 })),
+              labeledField('Tier',
+                el('select', { cls: 'vp-input', id: 'ed-tier' },
+                  ...allTiers.map(t => el('option', { value: t.name, selected: t.name === c.tier }, t.display_name || t.name)),
+                  el('option', { value: 'custom' }, '+ Custom cap (MiB)…'),
+                ),
+              ),
+              labeledField('Custom cap (MiB, only if tier=custom)', el('input', { type: 'number', min: 1, cls: 'vp-input', id: 'ed-custom-mb' })),
+              labeledField('Notes', el('textarea', { cls: 'vp-input', rows: 3, id: 'ed-notes' }, c.notes || ''), true),
+            ),
+          ),
+          el('div', { cls: 'vp-modal-f' },
+            el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => closeModal() }, 'Cancel'),
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: async () => {
+                const body = {
+                  display_name: $('#ed-disp').value.trim() || null,
+                  telegram_username: $('#ed-tg').value.trim() || null,
+                  email: $('#ed-email').value.trim() || null,
+                  billing_id: $('#ed-bill').value.trim() || null,
+                  max_devices: parseInt($('#ed-mdev').value || '1', 10),
+                  tier_name: $('#ed-tier').value,
+                  notes: $('#ed-notes').value.trim() || null,
+                };
+                if (body.tier_name === 'custom') {
+                  const mb = parseInt($('#ed-custom-mb').value || '0', 10);
+                  if (mb < 1) { toast('Custom cap must be ≥ 1 MiB', 'err'); return; }
+                  body.custom_cap_mb = mb;
+                }
+                try {
+                  await patch(`/api/customers/${c.id}`, body);
+                  closeModal();
+                  await loadCustomers();
+                  await selectCustomer(c.id);
+                  render();
+                  toast('Updated.');
+                } catch (e) {
+                  toast('Update failed: ' + (e.message || e), 'err');
+                }
+              },
+            }, 'Save'),
+          ),
+        ),
+      );
+      openModal(modal);
+    })();
   }
 
   // ─── v1.2.7 — New client modal + one-shot password panel ────────────────
