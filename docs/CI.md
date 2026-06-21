@@ -45,12 +45,14 @@ reach.** Options:
 1. **Public staging** (easiest): open a port on the homelab router, set
    up a free Cloudflare Tunnel from `vpn-staging.homelab.local`, point
    the secret there. Runner hits the public URL.
-2. **Self-hosted runner on LXC 902** (cleanest): register a GitHub
+2. **Self-hosted runner on NEW LXC 905** (cleanest): spin up a dedicated CI LXC on pve2, register a GitHub
    Actions runner inside the homelab network. Runner hits
    `http://192.168.10.98:8080` directly. No port forwarding.
 3. **WireGuard tunnel to the runner** (most secure): spin up a
    WireGuard endpoint on the homelab, the runner connects in, hits the
    portal over the tunnel.
+
+**LXC allocation (Zun rule, 2026-06-21):** 902 = monitoring only, 903 = VPN stack only, new services = new LXC. CI tooling is NOT a 902 fit.
 
 **Currently: option 1 or 2 required before the workflow can be turned
 on.** Without one of these, the secrets exist but the workflow will
