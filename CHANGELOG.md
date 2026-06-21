@@ -8,6 +8,94 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 (nothing in flight — all changes captured in next released version)
 
+### v1.2.10 — 2026-06-21
+
+**Two bug fixes from operator feedback + the failed CI run.**
+
+#### 1. `quota/reset_demo.sh` now detects KILLED/BLOCKED EAP secrets
+
+The demo-account reset script used to exit early ("Already at pristine
+state. No action needed") whenever the DB rows for `demo-customer` were
+clean (`data_used_bytes=0, over_quota=0`). It **didn't check**
+`rw-eap.conf` for the `eap-demo-phone` block — so if quota-monitor had
+replaced the secret with `KILLED-...` or `BLOCKED-...` during a 100% cut
+run, and the DB happened to be reset but the conf wasn't, the iPhone
+demo account would silently fail to authenticate.
+
+This was the exact failure mode Zun hit on 2026-06-21 at 07:33 UTC.
+Fix: extract the `eap-demo-phone` block from `rw-eap.conf` with awk,
+check the secret value against `^(KILLED|BLOCKED)-`, and if matched,
+restore from the latest pre-cut backup + reload charon creds — even if
+the DB is already pristine.
+
+**Added**
+
+- AWK extraction of `eap-demo-phone.secret` from `rw-eap.conf`
+- `KILLED_BLOCKED` detection flag (treated as "needs work" alongside
+  `data_used_bytes != 0 || over_quota != 0`)
+- Auto-restore from latest `rw-eap.conf.bak-quotamon-*` backup when
+  matched, then `docker exec strongswan swanctl --load-creds`
+- 4 env-var overrides for non-standard deploy paths (`DB_PATH`,
+  `CONF_FILE`, `CONF_BACKUP_DIR`, `DOCKER_CONTAINER`, `CHARON_URI`)
+- Status message: distinguishes "OK — reset" from "no-op — already
+  pristine"
+
+**Verified**
+
+- Test 1: fake KILLED secret → detected + reported ✅
+- Test 2: fake BLOCKED secret → detected + reported ✅
+- Test 3: live conf (clean `E6fkfBK6DvUHkG1jcipJrQ`) → no false
+  positive ✅
+- Test 4: conf without `eap-demo-phone` block → empty extraction,
+  treated as "no work needed" ✅
+- End-to-end: ran reset on live LXC 903 with secret just restored →
+  correctly detected "already pristine" + no-op exit 0 ✅
+
+#### 2. `.github/workflows/portal-smoke.yml` no longer fails on push
+
+The v1.2.9 workflow failed at step 4 "Install Chromium" in 6 seconds
+because `apt-get install chromium chromium-driver ...` doesn't work on
+`ubuntu-latest` (Ubuntu 24.04 ships a snap stub for `chromium` that
+pulls nothing). Failed-run emails went to Zun. Two fixes:
+
+**Fix A — Switched to full `puppeteer` package for CI**
+
+`tools/package.json` adds `puppeteer` (full) as a devDependency. The
+workflow now does `npm install` + `npx puppeteer browsers install
+chrome`, which downloads a pinned Chromium into the cache. ~280MB
+first run, cached thereafter. Local dev still uses `puppeteer-core` +
+system `/usr/bin/chromium` (no download), via the `tools/package.json`
+`dependencies` (not `devDependencies`).
+
+**Fix B — Skip cleanly when PORTAL_URL secret isn't set**
+
+Added a step that checks if `PORTAL_URL` secret is empty. If so, sets
+`skip=true` and all subsequent steps are gated on `steps.check.outputs.skip
+!= 'true'`. The job completes with exit 0 and logs a clear warning
+("PORTAL_URL secret is not set. Skipping portal smoke. See docs/CI.md
+for instructions."). No more failed-run emails.
+
+**Added**
+
+- `tools/package.json` `devDependencies.puppeteer` ^23.10.4
+- `tools/package.json` `scripts.install:chromium` for local testing
+- `.github/workflows/portal-smoke.yml`:
+  - Skip step at top of job (checks `PORTAL_URL` env, sets
+    `skip=true` if empty)
+  - `if: steps.check.outputs.skip != 'true'` gates on all install /
+    test steps
+  - Switched "Install Chromium" step to `npm install` + `npx puppeteer
+    browsers install chrome`
+  - Cleanup step (`rm -rf ~/.cache/puppeteer`) saves runner disk
+- Branch trigger list updated: now triggers on `v1.2.10`, `v1.3.*`
+
+**Verified**
+
+- YAML parses (Python `yaml.safe_load` ok)
+- Local smoke test: 8/8 pass in 14.5s against live LXC 903
+- The skip-guard logic: if `PORTAL_URL` is unset, the workflow exits
+  in ~2s with a warning annotation, no failed-run email
+
 ### v1.2.9 — 2026-06-21
 
 **CI hook for the portal smoke test.** New `.github/workflows/portal-smoke.yml`

@@ -1,23 +1,21 @@
-# v1.2.8 — databyte VPN portal headless-browser smoke test
+# v1.2.10 — databyte VPN portal headless-browser smoke test
 #
 # Runs tools/portal-smoke.js against a live portal instance. Catches the
 # v1.2.7.1 class of bug (API works, UI renders empty DOM) by driving a
 # real Chromium against the portal and verifying 8 DOM-layer invariants.
 #
 # Triggers:
-#   - On every push to main, v1.2.7.x, v1.2.8, master
+#   - On every push to main, v1.2.7.x, v1.2.8, v1.2.9, v1.2.10, master
 #   - On every PR against main
 #   - Manual workflow_dispatch
 #
-# Portal URL:
-#   - Push to main: smoke against staging portal (set in repo secrets)
-#   - PR: smoke against staging portal (same)
-#   - Manual: any URL via workflow_dispatch input
-#
-# Required secrets:
+# Required secrets (only when staging portal is wired up):
 #   - PORTAL_URL: staging portal URL, e.g. http://staging.vpn.homelab.local:8080
 #   - PORTAL_ADMIN_USER: admin username
 #   - PORTAL_ADMIN_PASS: admin password
+#
+# If secrets are not set, the workflow skips with a clear warning and
+# exits 0 (no failed-run emails).
 #
 # Optional:
 #   - PORTAL_SMOKE_TIMEOUT_MS: per-check timeout override (default 20000)
@@ -26,7 +24,7 @@ name: portal-smoke
 
 on:
   push:
-    branches: [main, v1.2.7.*, v1.2.8, v1.2.9, master]
+    branches: [main, v1.2.7.*, v1.2.8, v1.2.9, v1.2.10, v1.3.*, master]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -53,33 +51,52 @@ jobs:
     timeout-minutes: 5
 
     env:
-      # Staging portal — secret-backed so we don't burn the prod URL in PR logs.
       PORTAL_URL: ${{ secrets.PORTAL_URL }}
       PORTAL_ADMIN_USER: ${{ secrets.PORTAL_ADMIN_USER }}
       PORTAL_ADMIN_PASS: ${{ secrets.PORTAL_ADMIN_PASS }}
 
     steps:
+      - name: Skip if PORTAL_URL secret not configured
+        id: check
+        run: |
+          if [ -z "${PORTAL_URL:-}" ]; then
+            echo "::warning::PORTAL_URL secret is not set. Skipping portal smoke."
+            echo "Set PORTAL_URL, PORTAL_ADMIN_USER, PORTAL_ADMIN_PASS in repo settings to enable."
+            echo "See docs/CI.md for instructions."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "PORTAL_URL set: $PORTAL_URL"
+          fi
+
       - name: Checkout
+        if: steps.check.outputs.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Set up Node.js
+        if: steps.check.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Install Chromium
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            chromium chromium-driver fonts-liberation libnss3 \
-            libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2
-          chromium --version
-
-      - name: Install puppeteer-core
+      # v1.2.10 fix: switched from `apt-get install chromium chromium-driver ...`
+      # (which failed on ubuntu-latest because Ubuntu 24.04 ships a snap stub
+      # for `chromium` that pulls nothing) to using the full `puppeteer`
+      # package, which downloads its own pinned Chromium into a cached
+      # ~/.cache/puppeteer directory. ~280MB first run, cached thereafter.
+      - name: Install puppeteer (downloads Chromium)
+        if: steps.check.outputs.skip != 'true'
         working-directory: tools
-        run: npm install --no-audit --no-fund --omit=dev
+        run: |
+          # Use full puppeteer (not puppeteer-core) so it bundles Chromium.
+          # For local dev, the smoke test still works with puppeteer-core + system
+          # /usr/bin/chromium (no download). CI uses full puppeteer for reliability.
+          npm install --no-audit --no-fund
+          npx puppeteer browsers install chrome
+          echo "Chromium path: $(node -e 'console.log(require("puppeteer").executablePath())')"
 
       - name: Patch config with secrets
+        if: steps.check.outputs.skip != 'true'
         working-directory: tools
         run: |
           # portal-smoke.config.json has placeholders. Patch in secrets.
@@ -105,6 +122,7 @@ jobs:
           "
 
       - name: Run portal smoke
+        if: steps.check.outputs.skip != 'true'
         working-directory: tools
         env:
           PORTAL_URL: ${{ env.PORTAL_URL }}
@@ -133,3 +151,9 @@ jobs:
           path: tools/screenshots/
           if-no-files-found: ignore
           retention-days: 3
+
+      - name: Clean up Chromium cache (save runner disk)
+        if: always()
+        run: |
+          # Don't store 280MB Chromium cache on the runner after the run
+          rm -rf ~/.cache/puppeteer 2>/dev/null || true
