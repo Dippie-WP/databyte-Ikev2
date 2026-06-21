@@ -1241,8 +1241,11 @@
             el('input', { id: 'vp-nc-device', cls: 'vp-inp', type: 'text', required: true,
                            placeholder: 'laptop', maxlength: 32,
                            pattern: '[a-zA-Z0-9][a-zA-Z0-9-]{0,31}',
+                           'aria-describedby': 'vp-nc-device-hint vp-nc-device-warn',
                            value: 'laptop' }),
-            el('div', { cls: 'vp-hint' }, 'Friendly name. EAP identity = client-name-device-name'),
+            el('div', { cls: 'vp-hint', id: 'vp-nc-device-hint' },
+              'Friendly name. EAP identity will be \u201c{customer-name}-{device-name}\u201d.'),
+            el('div', { cls: 'vp-field-warn', id: 'vp-nc-device-warn', style: 'display:none' }),
           ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device type'),
@@ -1301,13 +1304,49 @@
     // Auto-derive client name from display name if not yet typed
     const nameInp  = body.querySelector('#vp-nc-name');
     const displayInp = body.querySelector('#vp-nc-display');
+    const devInp = body.querySelector('#vp-nc-device');
+    const devHint = body.querySelector('#vp-nc-device-hint');
+    const devWarn = body.querySelector('#vp-nc-device-warn');
+    const submitBtn = body.querySelector('#vp-nc-submit');
+
+    // v1.2.7.2 — live collision warning when device_name matches or starts with
+    // the customer slug. Same rule the server enforces (POST /api/customers).
+    function checkDeviceCollision() {
+      const c = (nameInp.value || '').trim();
+      const d = (devInp.value || '').trim();
+      let msg = '';
+      if (!c || !d) {
+        msg = '';
+      } else if (d.toLowerCase() === c.toLowerCase()) {
+        msg = `Will be rejected: device_name duplicates customer name (EAP identity would be "${c}-${d}"). Use a different name (e.g. iphone, laptop, pixel9).`;
+      } else if (d.toLowerCase().startsWith(c.toLowerCase() + '-')) {
+        msg = `Will be rejected: device_name starts with "${c}-" (EAP identity would duplicate the customer prefix). Drop the "${c}-" prefix (e.g. "${d.slice(c.length + 1)}" instead of "${d}").`;
+      }
+      if (msg) {
+        devWarn.textContent = '\u26a0  ' + msg;
+        devWarn.style.display = '';
+        devInp.classList.add('vp-inp-bad');
+        if (submitBtn) submitBtn.disabled = true;
+      } else {
+        devWarn.style.display = 'none';
+        devWarn.textContent = '';
+        devInp.classList.remove('vp-inp-bad');
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    }
+
     displayInp.addEventListener('blur', () => {
       if (!nameInp.value) {
         const slug = (displayInp.value || '').trim().toLowerCase()
           .replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 32);
         if (slug) nameInp.value = slug;
+        checkDeviceCollision();
       }
     });
+    nameInp.addEventListener('input', checkDeviceCollision);
+    devInp.addEventListener('input', checkDeviceCollision);
+    // Initial check (in case form re-rendered with stale values)
+    checkDeviceCollision();
   }
 
   async function onNewClientSubmit(ev) {
@@ -1483,12 +1522,98 @@
         ),
         // Per-OS setup cards
         el('div', { cls: 'vp-os-grid' }, iOS, Android, Windows, macOS, Linux),
+        // v1.2.7.2 — share/copy buttons. Web Share API on mobile (native
+        // share sheet → WhatsApp, Telegram, SMS, email, etc.), copy-all
+        // fallback on desktop. Text content built below.
+        renderShareControls({ c, d, eapId, pw, server, remoteId }),
         // Footer
         el('div', { cls: 'vp-btn-row', style: 'margin-top:20px; justify-content: flex-end' },
           el('button', { type: 'button', cls: 'vp-btn vp-btn-primary', onclick: closeModal }, 'Done'),
         ),
       ),
     );
+  }
+
+  // ─── v1.2.7.2 — Share / copy-all controls on the one-shot panel ──────
+  // Web Share API where available (Android Chrome, iOS Safari, etc.) gives
+  // the native share sheet — WhatsApp, Telegram, SMS, email, etc.
+  // Desktop browsers fall back to a single "Copy all" button.
+  function buildShareText({ c, d, eapId, pw, server, remoteId }) {
+    const name = c.display_name || c.name;
+    return [
+      '\ud83d\udd10 databyte VPN \u2014 ' + name,
+      '\u2501'.repeat(28),
+      'Server:    ' + server,
+      'Remote ID: ' + remoteId,
+      'Local ID:  ' + eapId,
+      'Username:  ' + eapId,
+      'Password:  ' + pw,
+      '',
+      'Setup (iOS): Settings \u2192 General \u2192 VPN & Device Management',
+      '\u2192 Add VPN config \u2192 Type: IKEv2 \u2192 paste the values above.',
+      '',
+      'Setup (Android): Settings \u2192 Network \u2192 VPN \u2192 +',
+      '\u2192 IKEv2/IPSec MSCHAPv2 \u2192 paste the values above.',
+      '',
+      '\u26a0  Save this message \u2014 the password is shown ONCE.',
+    ].join('\n');
+  }
+
+  function renderShareControls(ctx) {
+    const text = buildShareText(ctx);
+    const canShare = typeof navigator !== 'undefined'
+      && navigator.share
+      && typeof navigator.canShare === 'function'
+      && navigator.canShare({ text });
+
+    const btnRow = el('div', {
+      cls: 'vp-btn-row',
+      style: 'margin-top:18px; gap:8px; flex-wrap:wrap;',
+    });
+
+    if (canShare) {
+      btnRow.appendChild(el('button', {
+        type: 'button',
+        cls: 'vp-btn vp-btn-primary',
+        onclick: async () => {
+          try {
+            await navigator.share({
+              title: 'databyte VPN \u2014 ' + (ctx.c.display_name || ctx.c.name),
+              text,
+            });
+            showBanner('Shared', 'ok');
+          } catch (e) {
+            // User cancelled or share failed \u2014 fall back silently.
+            if (e && e.name !== 'AbortError') {
+              try { await navigator.clipboard.writeText(text); showBanner('Share failed \u2014 copied to clipboard', 'ok'); }
+              catch (_) { showBanner('Share failed', 'err'); }
+            }
+          }
+        },
+      }, '\u2197  Share to WhatsApp / Telegram / etc.'));
+    }
+
+    // Always-available fallback: "Copy all" \u2014 copies the same text.
+    btnRow.appendChild(el('button', {
+      type: 'button',
+      cls: canShare ? 'vp-btn vp-btn-ghost' : 'vp-btn vp-btn-primary',
+      onclick: async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          showBanner('Copied full config to clipboard', 'ok');
+        } catch (_) {
+          // Last-resort fallback for very old browsers without Clipboard API
+          const ta = document.createElement('textarea');
+          ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          document.body.appendChild(ta); ta.select();
+          try { document.execCommand('copy'); showBanner('Copied full config to clipboard', 'ok'); }
+          catch (_) { showBanner('Copy failed \u2014 select text manually', 'err'); }
+          finally { document.body.removeChild(ta); }
+        }
+      },
+    }, canShare ? '\u29c9  Copy all' : '\u29c9  Copy full config'));
+
+    return btnRow;
   }
 
   // ─── v1.2.7 — renderCustomerDetail: show billing_id, email, current_session ──
