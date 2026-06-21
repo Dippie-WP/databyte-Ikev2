@@ -17,7 +17,15 @@
  * On success, screenshots are written too (for visual confirmation in CI artifacts).
  */
 
-const puppeteer = require('puppeteer-core');
+// v1.2.11: prefer puppeteer-core for local dev (uses system chromium),
+// but allow full puppeteer (downloads chromium) for CI environments where
+// system chromium isn't installed.
+let puppeteer;
+try {
+  puppeteer = require('puppeteer-core');
+} catch {
+  puppeteer = require('puppeteer');
+}
 const fs        = require('fs');
 const path      = require('path');
 
@@ -60,7 +68,17 @@ async function waitMs(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   const browser = await puppeteer.launch({
     headless: CFG.browser.headless,
-    executablePath: CFG.browser.executable_path,
+    // If CFG points to a missing system chromium and we're in CI (PUPPETEER env
+    // var set by 'puppeteer browsers install chrome'), let puppeteer find its
+    // own chromium instead.
+    executablePath: (() => {
+      try {
+        if (CFG.browser.executable_path && require('fs').existsSync(CFG.browser.executable_path)) {
+          return CFG.browser.executable_path;
+        }
+      } catch {}
+      return undefined; // let puppeteer-core fall back, or puppeteer use bundled
+    })(),
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   });
   const page = await browser.newPage();
