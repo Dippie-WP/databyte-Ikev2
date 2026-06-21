@@ -33,6 +33,14 @@ on:
         description: 'Portal URL to smoke against (overrides secret)'
         required: false
         type: string
+      admin_user:
+        description: 'Admin username (overrides secret)'
+        required: false
+        type: string
+      admin_pass:
+        description: 'Admin password (overrides secret)'
+        required: false
+        type: string
       extra_args:
         description: 'Extra args to portal-smoke.js (e.g. --no-screenshots)'
         required: false
@@ -58,27 +66,32 @@ jobs:
       PORTAL_URL: ${{ secrets.PORTAL_URL }}
       PORTAL_ADMIN_USER: ${{ secrets.PORTAL_ADMIN_USER }}
       PORTAL_ADMIN_PASS: ${{ secrets.PORTAL_ADMIN_PASS }}
+      WD_PORTAL_URL: ${{ inputs.portal_url }}
+      WD_ADMIN_USER: ${{ inputs.admin_user }}
+      WD_ADMIN_PASS: ${{ inputs.admin_pass }}
 
     steps:
       - name: Skip if PORTAL_URL secret not configured
         id: check
         # v1.2.11: also accept workflow_dispatch input as fallback for ad-hoc testing
         # without setting a repo secret. secrets.PORTAL_URL takes precedence.
-        env:
-          WD_PORTAL_URL: ${{ inputs.portal_url }}
         run: |
           EFFECTIVE_URL="${PORTAL_URL:-${WD_PORTAL_URL:-}}"
-          if [ -z "${EFFECTIVE_URL:-}" ]; then
-            echo "::warning::PORTAL_URL not set (no secret, no workflow_dispatch input). Skipping portal smoke."
-            echo "Set PORTAL_URL, PORTAL_ADMIN_USER, PORTAL_ADMIN_PASS in repo settings to enable."
-            echo "Or trigger workflow_dispatch with portal_url input for ad-hoc testing."
+          EFFECTIVE_USER="${PORTAL_ADMIN_USER:-${WD_ADMIN_USER:-}}"
+          EFFECTIVE_PASS="${PORTAL_ADMIN_PASS:-${WD_ADMIN_PASS:-}}"
+          if [ -z "${EFFECTIVE_URL:-}" ] || [ -z "${EFFECTIVE_USER:-}" ] || [ -z "${EFFECTIVE_PASS:-}" ]; then
+            echo "::warning::Missing portal URL or admin creds (no secrets, no workflow_dispatch inputs). Skipping portal smoke."
+            echo "Set PORTAL_URL, PORTAL_ADMIN_USER, PORTAL_ADMIN_PASS as repo secrets to enable."
+            echo "Or trigger workflow_dispatch with portal_url/admin_user/admin_pass inputs for ad-hoc testing."
             echo "See docs/CI.md for instructions."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "PORTAL_URL effective: $EFFECTIVE_URL (source: $([ -n "${PORTAL_URL:-}" ] && echo secret || echo workflow_dispatch))"
-            # Override env so downstream steps use the effective URL
+            # Override env so downstream steps use the effective values
             echo "PORTAL_URL=$EFFECTIVE_URL" >> "$GITHUB_ENV"
+            echo "PORTAL_ADMIN_USER=$EFFECTIVE_USER" >> "$GITHUB_ENV"
+            echo "PORTAL_ADMIN_PASS=$EFFECTIVE_PASS" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout
