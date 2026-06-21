@@ -6,7 +6,96 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-(nothing in flight — all changes captured in next released version)
+### v1.3.0 — 2026-06-21
+
+**Customer portal (lab). Operator dashboard polish + tooling.**
+
+#### 1. Customer portal at `/portal/` — web UI for clients to see their own tier + usage
+
+A new lightweight web UI at `http://192.168.10.98:8080/portal/`. Customers
+log in with their VPN credentials (EAP identity + password). Same NTLM
+hash that charon uses for MSCHAPv2 — **no new secrets stored**.
+
+**What it shows (and only this):**
+- Tier name (e.g. "Demo 100 MB", "Tier 10 GB")
+- Progress bar with used / remaining / cap
+- Over-quota indicator (red bar + warning)
+
+**What it does NOT do (Zun's rules):**
+- No notifications (no email, no Telegram)
+- No session history, no alerts, no other features
+- No password reset flow (use the operator)
+
+**Isolation guarantees (defense in depth):**
+
+1. Cookie name `portal_session` (different from operator `session` cookie)
+2. Cookie `Path=/api/portal/` — browser doesn't send it to operator endpoints
+3. New `require_portal_session` dep — only accepts `portal_session` cookies
+4. Operator `require_session` dep explicitly REJECTS `portal_session` cookies
+5. All SQL scoped to `session["customer_id"]` — never takes a customer_id from input
+6. Constant-time NTLM hash compare
+7. Login rate-limited 5/IP/min
+8. HttpOnly + SameSite=Strict cookies
+9. No file I/O, no shell exec in `/api/portal/*` routes
+10. Audit log: every login (success + fail) and every portal API call logged
+
+**Schema change:** new table `customer_portal_sessions` (additive, no
+migrations to existing tables). Created via direct `CREATE TABLE IF NOT
+EXISTS` on `/var/lib/strongswan/ipsec.db`.
+
+**New files:**
+- `host/vpn-portal/portal_auth.py` — NTLM verify, session helpers, FastAPI deps
+- `host/vpn-portal/www/portal/index.html` — single-page mobile-first UI
+- `host/vpn-portal/www/static/portal.js` — vanilla JS, no framework
+- `tools/portal-customer-smoke.js` — 10-check headless-browser smoke test
+
+**New API endpoints:**
+- `POST /api/portal/login` — `{identity, password}` → cookie + customer info
+- `POST /api/portal/logout` — clear cookie + delete session
+- `GET /api/portal/usage` — `{tier, used, limit, pct, no_cap, over_quota}` (scoped to own customer)
+- `GET /api/portal/me` — `{name, email, logged_in_as}`
+
+**Tested:** 10/10 headless-browser checks passing in 14.8s. Operator
+dashboard still 14/14 green (no regression). Live test with `demo-phone`
+account.
+
+**Lab build (LAN-only).** No HTTPS, no public exposure. Zun confirmed
+lab mode — re-do for production when going client-facing (TLS, public
+DNS, CSP headers, audit log shipping, etc.).
+
+#### 2. Operator dashboard polish (v1.2.11 → v1.2.14)
+
+Rolled up under v1.3.0 per Zun's "stop micro-tagging" rule. The four
+intermediate v1.2.11 / v1.2.12 / v1.2.13 / v1.2.14 tags are kept on
+origin (history) but not in CHANGELOG as separate entries:
+
+- **v1.2.11** — Self-hosted GitHub Actions runner on LXC 903
+  (`actions-runner-linux-x64-2.319.1.tar.gz`, system Chromium runtime deps,
+  runs-on `[self-hosted, lxc-903, vpn]`)
+- **v1.2.12** — Customer management (edit / archive / delete, search, filter,
+  layout polish, toast notifications)
+- **v1.2.13** — Bulk operations (POST /api/customers/bulk-action,
+  atomic SQLite + EAP cleanup, checkbox UI, 2-step delete confirm)
+- **v1.2.14** — Column sort (whitelisted ORDER BY, operator-pinned first) +
+  active-sessions indicator (green dot, 30s polling)
+
+All four ship-tested at 14/14 green on self-hosted CI. v1.2.12's
+`status='archived'` schema choice (no migration) carried forward — the
+portal DB now has `status` semantics: `active` (default) or `archived`.
+
+#### 3. Diagnosis protocol skill baked
+
+After 5 false-positive bug diagnoses in one day (CGNAT, iptables, Ruijie
+IKE ×2, bulk script escape), Zun called for a structured gate before
+any "I found a bug" report. The 5-gate protocol is now a live skill
+(`openclaw skills workshop apply diagnosis-protocol-20260621-744eb4ed1e`).
+
+#### 4. Charon defaults audit
+
+`docs/charon-defaults-audit.md` — 28 tunables reviewed, 0 hard bugs.
+Documentation-only. Audit complete.
+
+---
 
 ### v1.2.10 — 2026-06-21
 

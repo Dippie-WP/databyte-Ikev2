@@ -74,6 +74,14 @@ Exit 0 = ship, exit 1 = read which check failed + look at
 
 ### History
 
+- **v1.3.0** (2026-06-21) — added `portal-customer-smoke.js` for the customer
+  portal at `/portal/`. Runs after the operator smoke. 10 checks: login form
+  loads, login submit, dashboard renders, meter, stats, logout, isolation
+  (portal cookie rejected by operator endpoints), scope (customer_id matches
+  logged-in customer). 14.8s typical.
+- **v1.2.11** (2026-06-21) — workflow runs on self-hosted runner on LXC 903.
+  `runs-on: [self-hosted, lxc-903, vpn]`. Runner hits live portal at
+  `http://192.168.10.98:8080` directly. No port forwarding needed.
 - **v1.2.8** (2026-06-21) — workflow file created. Workflow not yet
   enabled (no staging portal). Manual local runs against LXC 903
   (192.168.10.98) are the current verification path.

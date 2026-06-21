@@ -2,9 +2,9 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
-## Current state (live 2026-06-20 19:30 UTC)
+## Current state (live 2026-06-21 17:50 UTC)
 
-**Latest tag: v1.2.10** — reset_demo.sh now detects KILLED/BLOCKED secrets + CI workflow skips cleanly when secrets missing.
+**Latest tag: v1.3.0** — customer portal at `/portal/` (lab build, LAN-only) + operator dashboard polish (v1.2.11-14 rolled up under v1.3.0).
 
 **Phase status:**
 | Phase | Description | Status |
@@ -19,20 +19,40 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | v1.2.1 | Reboot fixes (two-charons, docker cold-boot) | ✅ DONE |
 | v1.2.3 | VICI parser hardening | ✅ DONE |
 | v1.2.4 | Device info UI + CHANGELOG.md | ✅ DONE |
-| **v1.2.6** | **5C.5 revert + 1-device-per-customer model lock** | **✅ DONE — 2026-06-20 19:30 UTC** |
-| **v1.2.7** | **Operator client onboarding (POST /api/customers + portal form + current_session + billing/email)** | **✅ DONE — 2026-06-20 20:36 UTC** |
-| **v1.2.7.1** | **Critical UI fix: `el()` flattens array children (portal unusable since 5C.2)** | **✅ DONE — 2026-06-21 03:50 UTC** |
-| **v1.2.7.2** | **Device-name collision guard (server + browser) + Web Share API button on one-shot panel** | **✅ DONE — 2026-06-21 04:13 UTC** |
-| **v1.2.7.3** | **Operator usage visibility (real bytes + 'no cap' label, no hidden numbers)** | **✅ DONE — 2026-06-21 06:00 UTC** |
-| **v1.2.7.4** | **Operator visibility follow-up — customers-list row uses usageBar()** | **✅ DONE — 2026-06-21 06:30 UTC** |
-| **v1.2.8** | **Headless-browser smoke test (8 checks, locks in v1.2.7.1-class regression coverage)** | **✅ DONE — 2026-06-21 06:45 UTC** |
-| **v1.2.9** | **CI hook (.github/workflows/portal-smoke.yml) + LXC 903 DHCP revert + demo-phone secret reset** | **✅ DONE — 2026-06-21 07:40 UTC** |
-| **v1.2.10** | **reset_demo.sh detects KILLED/BLOCKED secrets + CI workflow uses puppeteer + skips when PORTAL_URL unset** | **✅ DONE — 2026-06-21 08:00 UTC** |
+| v1.2.6 | 5C.5 revert + 1-device-per-customer model lock | ✅ DONE — 2026-06-20 19:30 UTC |
+| v1.2.7 | Operator client onboarding | ✅ DONE — 2026-06-20 20:36 UTC |
+| v1.2.7.1 | Critical UI fix: `el()` flattens array children | ✅ DONE — 2026-06-21 03:50 UTC |
+| v1.2.7.2 | Device-name collision guard + Web Share API button | ✅ DONE — 2026-06-21 04:13 UTC |
+| v1.2.7.3 | Operator usage visibility (real bytes + 'no cap' label) | ✅ DONE — 2026-06-21 06:00 UTC |
+| v1.2.7.4 | Operator visibility follow-up — customers-list row uses usageBar() | ✅ DONE — 2026-06-21 06:30 UTC |
+| v1.2.8 | Headless-browser smoke test (8 checks) | ✅ DONE — 2026-06-21 06:45 UTC |
+| v1.2.9 | CI hook + LXC 903 DHCP revert + demo-phone secret reset | ✅ DONE — 2026-06-21 07:40 UTC |
+| v1.2.10 | reset_demo.sh detects KILLED/BLOCKED secrets + CI workflow uses puppeteer | ✅ DONE — 2026-06-21 08:00 UTC |
+| v1.2.11 | Self-hosted GitHub Actions runner on LXC 903 (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 08:30 UTC |
+| v1.2.12 | Customer management (edit/archive/delete/search/filter, rolled up under v1.3.0) | ✅ DONE — 2026-06-21 10:25 UTC |
+| v1.2.13 | Bulk operations (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 11:05 UTC |
+| v1.2.14 | Column sort + active sessions (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 12:28 UTC |
+| **v1.3.0** | **Customer portal at `/portal/` (lab) + diagnosis protocol + charon defaults audit** | **✅ DONE — 2026-06-21 17:50 UTC** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
-| v1.3 | iOS native EAP fixes, cert rotation, MTU/PMTUD, nftables migration | 🔒 SHELVED — backlog, no scheduled work |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1, v1.2.2, v1.2.3, v1.2.4, v1.2.6, v1.2.7, v1.2.7.1, v1.2.7.2, v1.2.7.3, v1.2.7.4, v1.2.8, v1.2.9, v1.2.10 (16 total). **v1.2.5 deleted.**
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0** (21 total). **v1.2.5 deleted.**
+
+### v1.3.0 customer portal (lab, 2026-06-21)
+
+`http://192.168.10.98:8080/portal/` — customers log in with VPN credentials, see only their own tier + usage meter.
+
+**4 rules locked (Zun, 15:22 UTC):**
+1. Same credentials as VPN (NTLM hash verify, no new secrets)
+2. Just tier + usage shown (no sessions/alerts/history)
+3. No notifications (no email, no Telegram)
+4. Strict isolation (10 guarantees, see CHANGELOG.md)
+
+**Schema:** `customer_portal_sessions` table added (additive, no migrations).
+
+**New files:** `portal_auth.py`, `www/portal/index.html`, `www/static/portal.js`, `tools/portal-customer-smoke.js` (10/10 green in 14.8s).
+
+**Lab build (LAN-only).** Zun confirmed: "we still in the lab. Once we go client facing we will change all this stuff." Re-do for production when going client-facing (TLS, public DNS, CSP, etc.).
 
 **Active development branches:** none. All merged to main.
 

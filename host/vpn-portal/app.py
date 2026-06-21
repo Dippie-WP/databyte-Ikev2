@@ -46,6 +46,7 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
+import portal_auth  # v1.3.0 customer portal auth
 
 import bcrypt
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
@@ -79,6 +80,13 @@ if os.path.isdir(WWW_DIR):
     @app.get("/", include_in_schema=False)
     def root_index():
         return FileResponse(os.path.join(WWW_DIR, "index.html"))
+
+    # v1.3.0 — Customer portal at /portal/. Separate SPA with its own auth.
+    # Lab build — LAN-only. Re-do for production (HTTPS, public exposure).
+    @app.get("/portal", include_in_schema=False)
+    @app.get("/portal/", include_in_schema=False)
+    def portal_index():
+        return FileResponse(os.path.join(WWW_DIR, "portal", "index.html"))
 
 # ---------- Rate limit (in-memory, per-IP) ----------
 _login_attempts: dict[str, list[float]] = defaultdict(list)
@@ -114,7 +122,16 @@ def verify_session(token: str) -> Optional[dict]:
         return None
 
 
-def require_session(session: Optional[str] = Cookie(None)) -> dict:
+def require_session(
+    session: Optional[str] = Cookie(None),
+    portal_session: Optional[str] = Cookie(None, alias="portal_session"),
+) -> dict:
+    # v1.3.0 — defense in depth: if a portal_session cookie is being sent to
+    # an operator endpoint, that's wrong. Reject it. The portal cookie should
+    # be scoped to Path=/portal/ and the browser should not send it here, but
+    # we double-check at the app layer too.
+    if portal_session and not session:
+        raise HTTPException(401, "Portal session not valid for operator endpoints")
     if not session:
         raise HTTPException(401, "Not authenticated")
     data = verify_session(session)
@@ -1725,6 +1742,138 @@ def bulk_customer_action(req: BulkAction, user: dict = Depends(require_session))
         "skipped": result.get("skipped", []),
         "devices_deleted": result.get("devices_deleted", 0),
         "eap_blocks_removed": eap_blocks_removed,
+    }
+
+
+
+# ---------- v1.3.0 Customer portal (NTC) ----------
+
+class PortalLoginRequest(BaseModel):
+    identity: str = Field(..., min_length=1, max_length=128)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
+@app.post("/api/portal/login")
+def portal_login(req: PortalLoginRequest, request: Request, response: Response):
+    """Customer logs in with their VPN credentials (EAP identity + password).
+
+    Same NTLM hash that charon uses for MSCHAPv2 — no new secrets stored.
+    Cookie scoped to Path=/portal/ — cannot access operator routes.
+    """
+    ip = request.client.host if request.client else "unknown"
+    portal_auth._portal_rate_limit(ip)
+    ua = request.headers.get("user-agent", "")
+
+    user = portal_auth.lookup_user_and_customer(req.identity)
+    if not user:
+        log.info("portal login FAIL (no user) ip=%s identity=%s", ip, req.identity)
+        raise HTTPException(401, "Invalid credentials")
+
+    if user["customer_status"] != "active":
+        log.info("portal login FAIL (inactive customer) ip=%s identity=%s customer=%s status=%s",
+                 ip, req.identity, user["customer_name"], user["customer_status"])
+        raise HTTPException(401, "Account not active")
+
+    if not user["device_is_active"]:
+        log.info("portal login FAIL (inactive device) ip=%s identity=%s device=%s",
+                 ip, req.identity, user["device_name"])
+        raise HTTPException(401, "Device not active")
+
+    if not portal_auth.verify_password(user["password_hash"], req.password):
+        log.info("portal login FAIL (bad password) ip=%s identity=%s customer=%s",
+                 ip, req.identity, user["customer_name"])
+        raise HTTPException(401, "Invalid credentials")
+
+    # Issue session
+    session_id = portal_auth.create_session(
+        customer_id=user["customer_id"],
+        identity=req.identity,
+        user_agent=ua,
+        ip_address=ip,
+    )
+    # Cookie scoped to /portal/ — browser does NOT send this to /api/*
+    response.set_cookie(
+        key=portal_auth.PORTAL_COOKIE,
+        value=session_id,
+        httponly=True,
+        samesite="strict",
+        max_age=portal_auth.PORTAL_TTL,
+        path="/api/portal/",
+    )
+    log.info("portal login OK ip=%s identity=%s customer_id=%s customer=%s",
+             ip, req.identity, user["customer_id"], user["customer_name"])
+    return {
+        "ok": True,
+        "customer_id": user["customer_id"],
+        "customer_name": user["customer_name"],
+        "customer_display_name": user["customer_display_name"],
+    }
+
+
+@app.post("/api/portal/logout")
+def portal_logout(request: Request, response: Response,
+                  _session: dict = Depends(portal_auth.require_portal_session)):
+    """Clear the portal session cookie + delete the session row."""
+    sid = request.cookies.get(portal_auth.PORTAL_COOKIE)
+    if sid:
+        portal_auth.delete_session(sid)
+    response.delete_cookie(portal_auth.PORTAL_COOKIE, path="/api/portal/")
+    return {"ok": True}
+
+
+@app.get("/api/portal/usage")
+def portal_usage(session: dict = Depends(portal_auth.require_portal_session)):
+    """Return tier + usage for the authenticated customer.
+
+    Strictly scoped: customer_id comes from the session cookie, NEVER
+    from a request parameter. SQL JOINs tier by id, scoped to the
+    authenticated customer.
+    """
+    customer_id = session["customer_id"]
+    cust = portal_auth.lookup_customer_full(customer_id)
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+
+    used = cust.get("data_used_bytes") or 0
+    limit = cust.get("data_limit_bytes") or 0
+    is_operator = bool(cust.get("is_operator"))
+    no_cap = is_operator or limit == 0
+
+    pct = None
+    if not no_cap and limit > 0:
+        pct = round(used / limit * 100, 1)
+
+    return {
+        "customer_id": cust["id"],
+        "customer_name": cust["name"],
+        "customer_display_name": cust.get("display_name"),
+        "tier_name": cust.get("tier_name"),
+        "tier_display": cust.get("tier_display"),
+        "data_used_bytes": used,
+        "data_limit_bytes": limit,
+        "data_pct": pct,
+        "no_cap": no_cap,
+        "over_quota": bool(cust.get("over_quota")),
+        "max_devices": cust.get("max_devices"),
+        "is_operator": is_operator,
+        "status": cust.get("status"),
+    }
+
+
+@app.get("/api/portal/me")
+def portal_me(session: dict = Depends(portal_auth.require_portal_session)):
+    """Return the authenticated customer's identity info (name, email, login)."""
+    customer_id = session["customer_id"]
+    cust = portal_auth.lookup_customer_full(customer_id)
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    return {
+        "customer_id": cust["id"],
+        "customer_name": cust["name"],
+        "customer_display_name": cust.get("display_name"),
+        "email": cust.get("email"),
+        "logged_in_as": session["identity"],
+        "session_created_at": session["created_at"],
     }
 
 
