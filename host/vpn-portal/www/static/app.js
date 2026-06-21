@@ -36,6 +36,10 @@
     customers: [],
     selectedId: null,
     detail: null,
+    // v1.2.13 — bulk selection (Set of customer IDs)
+    bulkSelected: new Set(),
+    // v1.2.13 — when filter/search changes, drop selection of vanished rows
+    bulkAnchor: null,  // shift-click anchor for range select
     tiers: [],
     pools: [],
     sessions: '',
@@ -548,6 +552,12 @@
     S.custSearch = S.custSearch || '';
     S.custFilter = S.custFilter || 'all';  // all | over | near | operator | archived
 
+    // v1.2.13 — drop bulk-selected IDs that no longer exist (e.g., filter changed, deleted)
+    const validIds = new Set((S.customers || []).map(c => c.id));
+    for (const id of [...S.bulkSelected]) {
+      if (!validIds.has(id)) S.bulkSelected.delete(id);
+    }
+
     function skelRow() {
       return el('tr', {},
         el('td', {}, skelLine('80%')),
@@ -617,12 +627,59 @@
             : `${filteredRows.length} of ${allRows.length} shown`,
         ),
       ),
+      // v1.2.13 — bulk action bar (only when ≥1 row selected)
+      S.bulkSelected.size > 0 ? el('div', { cls: 'vp-bulk-bar' },
+        el('div', { cls: 'vp-bulk-bar-l' },
+          el('span', { cls: 'vp-bulk-count' }, `${S.bulkSelected.size} selected`),
+          el('button', { cls: 'vp-btn-link', onclick: () => { S.bulkSelected.clear(); render(); } }, 'Clear'),
+        ),
+        el('div', { cls: 'vp-bulk-bar-r' },
+          el('button', {
+            cls: 'vp-btn vp-btn-warn',
+            onclick: () => doBulkArchive(),
+          }, '↥ Archive'),
+          el('button', {
+            cls: 'vp-btn vp-btn-ok',
+            onclick: () => doBulkUnarchive(),
+          }, '↧ Unarchive'),
+          el('div', { cls: 'vp-bulk-tier-wrap' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: () => doBulkChangeTier(),
+            }, '⇄ Change tier'),
+          ),
+          el('button', {
+            cls: 'vp-btn vp-btn-danger',
+            onclick: () => doBulkDelete(),
+          }, '🗑 Delete'),
+        ),
+      ) : null,
       el('div', { cls: 'vp-row-2' },
         // Left: table
         el('div', { cls: 'vp-left-col' },
           el('div', { cls: 'vp-tbl-wrap' },
             el('table', {},
               el('thead', {}, el('tr', {},
+                el('th', { cls: 'vp-th-check' },
+                  (() => {
+                    const visibleIds = filteredRows.filter(c => !c.is_operator).map(c => c.id);
+                    const allSelected = visibleIds.length > 0 && visibleIds.every(id => S.bulkSelected.has(id));
+                    return el('input', {
+                      type: 'checkbox',
+                      cls: 'vp-check',
+                      title: 'Select all visible (non-operator)',
+                      checked: allSelected,
+                      onchange: (ev) => {
+                        if (ev.target.checked) {
+                          visibleIds.forEach(id => S.bulkSelected.add(id));
+                        } else {
+                          visibleIds.forEach(id => S.bulkSelected.delete(id));
+                        }
+                        render();
+                      },
+                    });
+                  })()
+                ),
                 el('th', {}, 'Name'), el('th', {}, 'Tier'),
                 el('th', {}, 'Usage'), el('th', {}, '%'), el('th', {}, 'State'),
                 el('th', {}, ''),
@@ -637,10 +694,25 @@
                           const archived = c.status === 'archived';
                           const state = archived ? ['ARCH','dim'] : c.over_quota ? ['CUT','red'] : pct >= 80 ? ['NEAR','amber'] : ['OK','green'];
                           const isOp = c.is_operator || !c.quota_bytes;
+                          const selected = S.bulkSelected.has(c.id);
                           return el('tr', {
-                            cls: 'vp-tr' + (S.selectedId === c.id ? ' vp-tr-sel' : '') + (archived ? ' vp-tr-archived' : ''),
+                            cls: 'vp-tr' + (S.selectedId === c.id ? ' vp-tr-sel' : '') + (archived ? ' vp-tr-archived' : '') + (selected ? ' vp-tr-bulk' : ''),
                             onclick: () => selectCustomer(c.id),
                           },
+                            el('td', { cls: 'vp-td-check', onclick: (ev) => ev.stopPropagation() },
+                              isOp
+                                ? el('span', { cls: 'vp-check-disabled', title: 'Operators cannot be bulk-edited' }, '⊘')
+                                : el('input', {
+                                    type: 'checkbox',
+                                    cls: 'vp-check',
+                                    checked: selected,
+                                    onchange: (ev) => {
+                                      if (ev.target.checked) S.bulkSelected.add(c.id);
+                                      else S.bulkSelected.delete(c.id);
+                                      render();
+                                    },
+                                  })
+                            ),
                             el('td', { cls: 'vp-mono', 'data-label': 'Name' }, c.display_name || c.name),
                             el('td', { 'data-label': 'Tier' }, spanBadge(c.is_operator ? 'operator' : (c.tier_display || '—'), 'dim')),
                             el('td', { 'data-label': 'Usage' },
@@ -1283,6 +1355,122 @@
       toast('Deleted.');
     } catch (e) {
       toast('Delete failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  // v1.2.13 — bulk action handlers
+  function _bulkSelectedList() {
+    // Resolve names for the confirm dialog
+    const list = [];
+    for (const c of (S.customers || [])) {
+      if (S.bulkSelected.has(c.id)) list.push(c);
+    }
+    return list;
+  }
+
+  function _bulkConfirm(action, names, extraNote) {
+    const n = names.length;
+    const preview = names.slice(0, 8).map(n => `• ${n}`).join('\n');
+    const more = n > 8 ? `\n… and ${n - 8} more` : '';
+    const summary = {
+      archive: `↥ Archive ${n} customer${n === 1 ? '' : 's'}?\n\nThey will be hidden from the default list, all data preserved. Reversible via Unarchive.`,
+      unarchive: `↧ Unarchive ${n} customer${n === 1 ? '' : 's'}?\n\nThey will return to the default list. Reversible via Archive.`,
+      change_tier: `⇄ Change tier for ${n} customer${n === 1 ? '' : 's'}?\n${extraNote || ''}\nTheir data_limit_bytes updates to the new tier's cap. Reversible.`,
+      delete: `🗑 HARD delete ${n} customer${n === 1 ? '' : 's'}?\n\nCascades: removes devices, alerts, purchases, audit log rows. Removes EAP blocks from rw-eap.conf and reloads charon ONCE.\n\nTHIS CANNOT BE UNDONE.`,
+    }[action];
+    return confirm(summary + '\n\nAffected:\n' + preview + more);
+  }
+
+  async function doBulkArchive() {
+    const list = _bulkSelectedList();
+    if (!list.length) return;
+    if (!_bulkConfirm('archive', list.map(c => c.display_name || c.name))) return;
+    const ids = list.map(c => c.id);
+    try {
+      const res = await post('/api/customers/bulk-action', { action: 'archive', customer_ids: ids });
+      S.bulkSelected.clear();
+      await loadCustomers();
+      render();
+      const skipped = (res.skipped || []).length;
+      const msg = `Archived ${res.affected.length}` + (skipped ? ` (${skipped} skipped)` : '');
+      toast(msg, skipped ? 'err' : 'ok');
+    } catch (e) {
+      toast('Bulk archive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  async function doBulkUnarchive() {
+    const list = _bulkSelectedList();
+    if (!list.length) return;
+    if (!_bulkConfirm('unarchive', list.map(c => c.display_name || c.name))) return;
+    const ids = list.map(c => c.id);
+    try {
+      const res = await post('/api/customers/bulk-action', { action: 'unarchive', customer_ids: ids });
+      S.bulkSelected.clear();
+      await loadCustomers();
+      render();
+      const skipped = (res.skipped || []).length;
+      toast(`Unarchived ${res.affected.length}` + (skipped ? ` (${skipped} skipped)` : ''), skipped ? 'err' : 'ok');
+    } catch (e) {
+      toast('Bulk unarchive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  async function doBulkChangeTier() {
+    const list = _bulkSelectedList();
+    if (!list.length) return;
+    const tierList = (S.tiers || []).map((t, i) =>
+      `${i + 1}) ${t.display_name || t.name} (${fmtBytes(t.data_limit_bytes)})  [name: ${t.name}]`
+    ).join('\n');
+    const picked = prompt(
+      `⇄ Change tier for ${list.length} customer${list.length === 1 ? '' : 's'}.\n\nAvailable tiers:\n${tierList}\n\nEnter the tier name (exact match):`
+    );
+    if (!picked) return;
+    const tierName = picked.trim();
+    const tierExists = (S.tiers || []).some(t => t.name === tierName);
+    if (!tierExists) {
+      toast(`Tier '${tierName}' not found. Use exact tier name from the list.`, 'err');
+      return;
+    }
+    if (!_bulkConfirm('change_tier', list.map(c => c.display_name || c.name), `\n→ New tier: ${tierName}\n`)) return;
+    const ids = list.map(c => c.id);
+    try {
+      const res = await post('/api/customers/bulk-action', {
+        action: 'change_tier', customer_ids: ids, tier_name: tierName
+      });
+      S.bulkSelected.clear();
+      await loadCustomers();
+      render();
+      const skipped = (res.skipped || []).length;
+      toast(`Changed tier for ${res.affected.length}` + (skipped ? ` (${skipped} skipped)` : ''), skipped ? 'err' : 'ok');
+    } catch (e) {
+      toast('Bulk change tier failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  async function doBulkDelete() {
+    const list = _bulkSelectedList();
+    if (!list.length) return;
+    const expected = `DELETE ${list.length} CUSTOMERS`;
+    if (!_bulkConfirm('delete', list.map(c => c.display_name || c.name))) return;
+    const typed = prompt(`This is irreversible. Type ${expected} to confirm:`);
+    if (typed !== expected) {
+      toast('Delete cancelled (confirmation text did not match).', 'err');
+      return;
+    }
+    const ids = list.map(c => c.id);
+    try {
+      const res = await post('/api/customers/bulk-action', {
+        action: 'delete', customer_ids: ids, confirm: typed
+      });
+      S.bulkSelected.clear();
+      S.selectedId = null;
+      S.detail = null;
+      await loadCustomers();
+      render();
+      toast(`Deleted ${res.affected.length} (${res.eap_blocks_removed} EAP blocks removed).`, 'ok');
+    } catch (e) {
+      toast('Bulk delete failed: ' + (e.message || e), 'err');
     }
   }
 

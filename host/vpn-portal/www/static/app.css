@@ -150,6 +150,21 @@ body {
 .vp-toast-err { border-color: var(--red); }
 .vp-toast-show { opacity: 1; transform: translateX(0); }
 
+/* v1.2.13 — bulk action UI */
+.vp-th-check, .vp-td-check { width: 32px; text-align: center; padding: 6px 4px; }
+.vp-check { cursor: pointer; accent-color: var(--vp-accent, #4f8cff); width: 16px; height: 16px; margin: 0; }
+.vp-check-disabled { color: var(--vp-dim); opacity: 0.4; font-size: 12px; }
+.vp-tr-bulk { background: rgba(79, 140, 255, 0.06); }
+.vp-tr-bulk:hover { background: rgba(79, 140, 255, 0.12); }
+.vp-tr-sel.vp-tr-bulk { background: rgba(79, 140, 255, 0.14); }
+.vp-bulk-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 14px; background: var(--vp-s1); border: 1px solid var(--vp-accent, #4f8cff); border-radius: 8px; box-shadow: 0 0 0 1px rgba(79, 140, 255, 0.15); }
+.vp-bulk-bar-l { display: flex; align-items: center; gap: 14px; }
+.vp-bulk-bar-r { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.vp-bulk-count { font-weight: 600; color: var(--vp-accent, #4f8cff); font-size: 13px; }
+.vp-bulk-tier-wrap { display: inline-flex; }
+.vp-btn-link { background: none; border: none; color: var(--vp-dim); cursor: pointer; padding: 4px 8px; font-size: 12px; text-decoration: underline; }
+.vp-btn-link:hover { color: var(--vp-text); }
+
 
 /* Theme toggle */
 .vp-theme-btn {

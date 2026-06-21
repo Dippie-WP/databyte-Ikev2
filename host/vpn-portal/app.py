@@ -124,8 +124,11 @@ def require_session(session: Optional[str] = Cookie(None)) -> dict:
 
 
 # ---------- SSH + DB helpers ----------
-def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT) -> str:
-    """Run a command on the VPN gateway. cmd_args is a list."""
+def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") -> str:
+    """Run a command on the VPN gateway. cmd_args is a list.
+
+    If stdin_text is provided, it's piped to the remote command's stdin.
+    """
     # Quote args safely (single-quote wrap, escape internal quotes)
     def shq(s: str) -> str:
         return "'" + s.replace("'", "'\\''") + "'"
@@ -138,7 +141,7 @@ def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT) -> str:
         f"root@{VPN_HOST}",
         remote,
     ]
-    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout, input=stdin_text or None)
     if r.returncode != 0:
         raise HTTPException(502, f"VPN gateway error: {r.stderr.strip()[:200]}")
     return r.stdout
@@ -1372,6 +1375,19 @@ class CustomerUpdate(BaseModel):
     custom_cap_mb: Optional[int] = None  # if tier_name='custom'
     max_devices: Optional[int] = None  # 1..10
 
+
+class BulkAction(BaseModel):
+    """v1.2.13 — bulk action on multiple customers.
+    action: archive | unarchive | delete | change_tier
+    customer_ids: list of customer IDs (max 100)
+    tier_name: required if action=change_tier
+    confirm: required if action=delete; the literal string 'DELETE <N> CUSTOMERS'
+    """
+    action: str
+    customer_ids: list
+    tier_name: Optional[str] = None
+    confirm: Optional[str] = None
+
 def _remove_eap_block(identity: str) -> bool:
     """Remove an `eap-<identity> { ... }` block from rw-eap.conf. Returns True if found+removed."""
     content = read_rw_eap_conf()
@@ -1522,6 +1538,11 @@ def delete_customer(customer_id: int, confirm: str = "", user: dict = Depends(re
 
     # Cascade: devices (links to customers.id), then audit, alerts, purchases
     devices = db_query(f"SELECT id, device_name FROM devices WHERE customer_id = {int(customer_id)};")
+    eap_identities = [f"{cust['name']}-{d['device_name']}" for d in devices]
+    # v1.2.13 — also clear strongSwan attr-sql pool (users table) so identity isn't orphaned
+    if eap_identities:
+        in_list = ",".join(_q(i) for i in eap_identities)
+        db_exec(f"DELETE FROM users WHERE name IN ({in_list});")
     db_exec(f"DELETE FROM devices WHERE customer_id = {int(customer_id)};")
     db_exec(f"DELETE FROM alerts WHERE customer_id = {int(customer_id)};")
     db_exec(f"DELETE FROM purchases WHERE customer_id = {int(customer_id)};")
@@ -1543,6 +1564,122 @@ def delete_customer(customer_id: int, confirm: str = "", user: dict = Depends(re
         "devices_deleted": len(devices),
     })
     return {"ok": True, "customer_id": int(customer_id), "devices_deleted": len(devices)}
+
+
+@app.post("/api/customers/bulk-action")
+def bulk_customer_action(req: BulkAction, user: dict = Depends(require_session)):
+    """v1.2.13 — Bulk action on multiple customers in one transactional call.
+
+    Supported actions:
+    - archive:     status='archived', is_active=0  (reversible via unarchive)
+    - unarchive:   status='active',   is_active=1
+    - change_tier: UPDATE tier_id + data_limit_bytes (req.tier_name required)
+    - delete:      HARD delete with cascade + EAP block removal (req.confirm required)
+
+    Atomicity: All work runs in one BEGIN TRANSACTION inside a single SSH call to LXC 903.
+    On any error, the transaction rolls back — no partial state.
+
+    Skipped (not failed): operators (cannot edit/delete) and missing IDs — returned in 'skipped'.
+    Cannot delete zun-operator (is_operator=1).
+
+    Audit: ONE row per call, payload includes action + customer_ids + skipped.
+    """
+    import json as _json
+    action = req.action
+    ids = req.customer_ids or []
+    if not ids:
+        raise HTTPException(400, "customer_ids is required")
+    if len(ids) > 100:
+        raise HTTPException(400, "max 100 customers per bulk call")
+    if action not in ("archive", "unarchive", "delete", "change_tier"):
+        raise HTTPException(400, f"unknown action '{action}'")
+    if action == "change_tier" and not req.tier_name:
+        raise HTTPException(400, "tier_name required for change_tier")
+    if action == "delete":
+        expected = f"DELETE {len(ids)} CUSTOMERS"
+        if req.confirm != expected:
+            raise HTTPException(400, f"to bulk-delete {len(ids)} customers, pass confirm='{expected}'")
+
+    # Normalize IDs to int, drop dupes, drop non-positive
+    clean_ids = []
+    seen = set()
+    for x in ids:
+        try:
+            v = int(x)
+        except (TypeError, ValueError):
+            continue
+        if v > 0 and v not in seen:
+            seen.add(v)
+            clean_ids.append(v)
+    if not clean_ids:
+        raise HTTPException(400, "no valid customer IDs")
+
+    # Resolve tier_id if needed
+    tier_id = None
+    if action == "change_tier":
+        tier_rows = db_query(f"SELECT id, data_limit_bytes FROM tiers WHERE name = {_q(req.tier_name)};")
+        if not tier_rows:
+            raise HTTPException(404, f"tier '{req.tier_name}' not found")
+        tier_id = tier_rows[0]["id"]
+
+    # Build payload to ship to LXC 903
+    payload = {
+        "action": action,
+        "ids": clean_ids,
+        "tier_id": tier_id,
+    }
+
+    # Single SSH call to LXC 903 — atomic Python script over there.
+    # Script lives at /opt/vpn-portal/scripts/bulk_action.py on LXC 903.
+    # It reads JSON action spec from stdin, runs in BEGIN IMMEDIATE,
+    # COMMITs on success or rolls back on any error.
+    out = ssh_903(["sudo", "/opt/vpn-portal/scripts/bulk_action.py"],
+                  stdin_text=_json.dumps(payload), timeout=60)
+
+    if not out.strip():
+        raise HTTPException(500, "no response from LXC 903")
+    try:
+        result = _json.loads(out)
+    except _json.JSONDecodeError:
+        log.error("bulk-action raw output: %r", out[:500])
+        raise HTTPException(500, f"unparseable response from LXC 903: {out[:200]}")
+
+    if "error" in result:
+        log.error("bulk-action error: %s", result["error"])
+        raise HTTPException(500, f"transaction failed and rolled back: {result['error']}")
+
+    # If delete: remove EAP blocks from rw-eap.conf (single reload at end)
+    eap_blocks_removed = 0
+    if action == "delete" and result.get("eap_targets"):
+        for identity in result["eap_targets"]:
+            try:
+                if _remove_eap_block(identity):
+                    eap_blocks_removed += 1
+            except Exception as ex:
+                log.warning("could not remove eap block %s: %s", identity, ex)
+        try:
+            reload_charon_creds()
+        except Exception as ex:
+            log.warning("could not reload charon creds: %s", ex)
+
+    # Audit log (one row for the whole bulk action)
+    _audit(user.get("name") or "operator", f"customer_bulk_{action}", {
+        "action": action,
+        "affected": result.get("affected", []),
+        "skipped": result.get("skipped", []),
+        "tier_name": req.tier_name if action == "change_tier" else None,
+        "devices_deleted": result.get("devices_deleted", 0),
+        "eap_blocks_removed": eap_blocks_removed,
+    })
+
+    return {
+        "ok": True,
+        "action": action,
+        "affected": result.get("affected", []),
+        "skipped": result.get("skipped", []),
+        "devices_deleted": result.get("devices_deleted", 0),
+        "eap_blocks_removed": eap_blocks_removed,
+    }
 
 
 # ---------- Entrypoint ----------

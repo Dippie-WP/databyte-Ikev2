@@ -68,6 +68,35 @@ async function check(name, fn) {
   }
 }
 
+// v1.2.13 — login via API and return session cookie value
+async function loginApi(url) {
+  const r = await fetch(new URL('/api/login', url).toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: CFG.username, password: CFG.password }),
+  });
+  if (!r.ok) throw new Error(`login API failed: HTTP ${r.status}`);
+  const rawHeaders = r.headers.getSetCookie ? r.headers.getSetCookie() : (r.headers.get('set-cookie') || '').split(/,(?=[^ ])/);
+  for (const h of rawHeaders) {
+    // Cookie name is `session` (FastAPI SessionMiddleware default), not vpn_session
+    const m = h.match(/(?:^|;\s*)session=([^;]+)/);
+    if (m) return m[1];
+  }
+  throw new Error(`login did not return session cookie. status=${r.status}, set-cookie=${rawHeaders[0] || '(none)'}`);
+}
+
+// v1.2.13 — login via UI (for tests that need the DOM)
+async function loginUi(page) {
+  await page.waitForSelector('#vp-user', { timeout: CFG.timeouts.selector_ms });
+  await page.type('#vp-user', CFG.username, { delay: 20 });
+  await page.type('#vp-pass', CFG.password, { delay: 20 });
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'networkidle0', timeout: CFG.timeouts.page_load_ms }).catch(() => {}),
+    page.click('button[type="submit"]'),
+  ]);
+  await new Promise(r => setTimeout(r, 600));
+}
+
 async function waitMs(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 (async () => {
@@ -311,6 +340,107 @@ async function waitMs(ms) { return new Promise(r => setTimeout(r, ms)); }
       throw new Error(`Used card sub doesn't say "no cap / tracking": "${usedCard.sub}"`);
     }
     await shot(page, '08-operator-detail');
+  }));
+
+  // === v1.2.13 — bulk operations ===
+  results.push(await check('9. Bulk action bar appears when rows selected (checkboxes present)', async () => {
+    // We may already be logged in from a prior test — clear cookies + storage so we see the login form
+    const client = await page.target().createCDPSession();
+    await client.send('Network.clearBrowserCookies');
+    await client.send('Network.clearBrowserStorage').catch(() => {});
+    await page.goto(CFG.base_url + '/', { waitUntil: 'networkidle0' });
+    await shot(page, '09a-pre-login');
+    await loginUi(page);
+    await shot(page, '09b-after-login');
+    await page.waitForSelector('.vp-metric', { timeout: CFG.timeouts.selector_ms });
+    // Go to Customers
+    await page.waitForSelector('.vp-nav-tab', { timeout: CFG.timeouts.selector_ms });
+    const navItems = await page.$$('.vp-nav-tab');
+    let custNav = null;
+    for (const it of navItems) {
+      const txt = await page.evaluate(el => el.textContent || '', it);
+      if (/customers/i.test(txt)) { custNav = it; break; }
+    }
+    if (!custNav) throw new Error('Customers nav not found');
+    await custNav.click();
+    await page.waitForSelector('.vp-tbl-wrap tbody tr', { timeout: CFG.timeouts.selector_ms });
+    // Verify checkboxes exist in thead
+    const thCheck = await page.$('.vp-th-check .vp-check');
+    if (!thCheck) throw new Error('header checkbox missing');
+    // Verify checkboxes exist in tbody (non-operator rows have them, operator has disabled)
+    const checks = await page.$$('.vp-td-check .vp-check');
+    const disabled = await page.$$('.vp-td-check .vp-check-disabled');
+    log('   row checkboxes:', checks.length, 'operator disabled icons:', disabled.length);
+    if (checks.length < 1) throw new Error('no row checkboxes found');
+    // Tick the first 2 row checkboxes via direct property manipulation + dispatchEvent
+    // (puppeteer .click() on a checkbox flips DOM .checked but may not fire onchange
+    //  reliably in puppeteer's synthetic event flow). Use evaluate() instead.
+    await page.evaluate(() => {
+      const cbs = document.querySelectorAll('.vp-td-check .vp-check');
+      if (cbs[0]) {
+        cbs[0].checked = true;
+        cbs[0].dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    await new Promise(r => setTimeout(r, 400));
+    await page.evaluate(() => {
+      const cbs = document.querySelectorAll('.vp-td-check .vp-check');
+      if (cbs[1]) {
+        cbs[1].checked = true;
+        cbs[1].dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    await new Promise(r => setTimeout(r, 400));
+    // Bulk action bar should appear
+    await shot(page, '09c-after-checkbox');
+    const bar = await page.$('.vp-bulk-bar');
+    if (!bar) throw new Error('bulk action bar did not appear after selecting rows');
+    const count = await page.evaluate(el => el.textContent || '', await page.$('.vp-bulk-count'));
+    if (!/2 selected/.test(count)) throw new Error(`bulk count wrong: "${count}"`);
+    const buttons = await page.$$('.vp-bulk-bar button');
+    const btnTexts = await Promise.all(buttons.map(b => page.evaluate(el => el.textContent || '', b)));
+    log('   bulk bar buttons:', btnTexts);
+    if (btnTexts.length !== 5) throw new Error(`expected 5 bulk buttons (Clear, Archive, Unarchive, Change tier, Delete), got ${btnTexts.length}`);
+    await shot(page, '09-bulk-bar');
+  }));
+
+  results.push(await check('10. Bulk archive + delete via API (full lifecycle, EAP cleanup)', async () => {
+    const token = await loginApi(CFG.base_url);
+    const created = [];
+    for (let i = 1; i <= 2; i++) {
+      const r = await fetch(new URL('/api/customers', CFG.base_url).toString(), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `session=${token}` },
+        body: JSON.stringify({ name: `smoke-bulk-${i}`, display_name: `Smoke Bulk ${i}`, tier_name: 'tier_3gb', device_name: `dev${i}`, device_type: 'Linux' }),
+      });
+      const j = await r.json();
+      if (!j.customer || !j.customer.id) throw new Error(`create #${i} failed: ${JSON.stringify(j)}`);
+      created.push(j.customer.id);
+    }
+    log('   created temp customers:', created);
+    const arch = await fetch(new URL('/api/customers/bulk-action', CFG.base_url).toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `session=${token}` },
+      body: JSON.stringify({ action: 'archive', customer_ids: created }),
+    });
+    const archJ = await arch.json();
+    if (!archJ.ok) throw new Error(`bulk archive failed: ${JSON.stringify(archJ)}`);
+    if (archJ.affected.length !== 2) throw new Error(`expected 2 affected, got ${archJ.affected.length}`);
+    log('   archived:', archJ.affected.map(a => a.name));
+    const def = await (await fetch(new URL('/api/customers', CFG.base_url).toString(), { headers: { Cookie: `session=${token}` } })).json();
+    const arc = await (await fetch(new URL('/api/customers?include_archived=1', CFG.base_url).toString(), { headers: { Cookie: `session=${token}` } })).json();
+    if (def.some(c => created.includes(c.id))) throw new Error('archived customers still in default list');
+    if (!arc.some(c => created.includes(c.id) && c.status === 'archived')) throw new Error('archived customers not in archived list');
+    const del = await fetch(new URL('/api/customers/bulk-action', CFG.base_url).toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `session=${token}` },
+      body: JSON.stringify({ action: 'delete', customer_ids: created, confirm: 'DELETE 2 CUSTOMERS' }),
+    });
+    const delJ = await del.json();
+    if (!delJ.ok) throw new Error(`bulk delete failed: ${JSON.stringify(delJ)}`);
+    if (delJ.affected.length !== 2) throw new Error(`expected 2 affected, got ${delJ.affected.length}`);
+    if (delJ.eap_blocks_removed !== 2) throw new Error(`expected 2 EAP blocks removed, got ${delJ.eap_blocks_removed}`);
+    log('   cleanup ok: deleted', delJ.affected.length, 'and removed', delJ.eap_blocks_removed, 'EAP blocks');
   }));
 
   await browser.close();
