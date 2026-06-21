@@ -4,6 +4,7 @@
   "password": "totalconnect",
   "_password_note": "INTERNAL TEST CREDENTIAL \u2014 same as vpn-portal admin (TOOLS.md / MEMORY.md). Rotate via /api/security/password (future) or update both portal and this file together.",
   "browser": {
+    "_executable_path_note": "Local dev: /usr/bin/chromium. CI: omitted so puppeteer uses its bundled chromium (~/.cache/puppeteer).",
     "executable_path": "/usr/bin/chromium",
     "headless": true,
     "viewport": {
