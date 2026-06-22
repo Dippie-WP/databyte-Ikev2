@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS customers (
     data_used_bytes  INTEGER NOT NULL DEFAULT 0,      -- cumulative used since last reset
     tier_id          INTEGER,                         -- FK tiers.id (NULL for operator)
     status           TEXT    NOT NULL DEFAULT 'active', -- 'active'|'suspended'|'expired'
+    max_devices      INTEGER NOT NULL DEFAULT 1,         -- v1.2.6: 1 creds = 1 device
+    bandwidth_down_mbps INTEGER NOT NULL DEFAULT 20,    -- Phase 5D: per-user download cap (Mbps)
+    bandwidth_up_mbps   INTEGER NOT NULL DEFAULT 20,    -- Phase 5D: per-user upload cap (Mbps)
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
     notes            TEXT
