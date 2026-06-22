@@ -152,6 +152,38 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas
 # Should show: rw-eap #1, ESTABLISHED, IKEv2, <phone_ip>[port] [10.99.0.50]
 ```
 
+### From the VPS, verify per-user bandwidth limits (Phase 5D):
+
+```bash
+# 1. Service is running
+sudo systemctl is-active bandwidth-monitor
+# Expected: active
+
+# 2. tc has a per-user class for the connected phone (last octet = class minor)
+sudo tc class show dev eth0 | grep -E '1:[0-9]+ ' | grep -v '1:1 \|1:ffff'
+# Expected: shows 1:<VIP_last_octet> htb rate 20Mbit ceil 20Mbit
+
+# 3. iptables has MARK rules with comment "bw:10.99.0.50" (or whatever VIP)
+sudo iptables-legacy -t mangle -L PREROUTING -n -v | grep 'bw:'
+sudo iptables-legacy -t mangle -L POSTROUTING -n -v | grep 'bw:'
+# Expected: MARK rule with comment "bw:10.99.0.X" for the connected VIP
+
+# 4. Real-world test: from your phone (still on VPN), run a speed test
+# Expected: capped at ~18-20 Mbps (allowing for overhead). NOT saturating the VPS link.
+```
+
+If a connected user does NOT show up in steps 2-3, check the daemon:
+
+```bash
+sudo journalctl -u bandwidth-monitor -n 30 --no-pager
+```
+
+Common cause: stale swanctl VICI connection. Restart the daemon:
+
+```bash
+sudo systemctl restart bandwidth-monitor
+```
+
 ---
 
 ## Files and Where They Live
