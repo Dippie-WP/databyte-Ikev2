@@ -469,13 +469,44 @@ ok "DB backup cron installed (daily at ${CRON_H}:${CRON_M} UTC)."
 info "=== Step 17/19: Installing bandwidth-monitor service ==="
 # On the Xneelo VPS, the ifb module can be loaded (full kernel access).
 # We enable it at boot so ingress shaping works.
-cat > /etc/modules-load.d/ifb.conf << 'EOF'
-# Load ifb for ingress bandwidth shaping (per-user download limits)
-ifb
-EOF
+#
+# IMPORTANT: /etc/modules-load.d/ifb.conf only loads the module — it does NOT
+# create the ifb0 device. The `numifbs=1` parameter must be passed to modprobe
+# explicitly. We use a dedicated systemd service (ifb-setup.service) to:
+#   1. modprobe ifb numifbs=1   — create ifb0 device
+#   2. ip link set ifb0 up      — bring it up
+# Both must run before bandwidth-monitor starts. Hit on Xneelo VPS
+# 2026-06-22: ifb module loaded at boot but ifb0 didn't exist, daemon warned
+# "ifb0 not available (likely LXC without host module access)" — wrong diagnosis.
+# Root cause: modules-load.d doesn't pass parameters, so the default 2 ifb
+# devices were created but later removed, or never created.
+cat > /etc/systemd/system/ifb-setup.service << 'EOF'
+[Unit]
+Description=Create ifb0 device for ingress bandwidth shaping
+After=network-pre.target
+Before=network.target bandwidth-monitor.service
+DefaultDependencies=no
 
-# Verify the module loads now
-modprobe ifb numifbs=1 2>/dev/null && ok "ifb module loaded (ingress shaping available)" || warn "ifb module load failed; ingress shaping will be disabled (egress only)"
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe ifb numifbs=1
+ExecStart=/sbin/ip link set ifb0 up
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ifb-setup.service
+systemctl start ifb-setup.service
+sleep 1
+
+# Verify ifb0 exists and is up
+if ip link show ifb0 2>/dev/null | grep -q "UP"; then
+    ok "ifb0 device created and UP (ingress shaping available)"
+else
+    warn "ifb0 not UP; ingress shaping will be disabled (egress only)"
+fi
 
 # Copy the bandwidth-monitor.py + service file from the cloned repo
 cd /opt/strongswan-vpn-gateway
