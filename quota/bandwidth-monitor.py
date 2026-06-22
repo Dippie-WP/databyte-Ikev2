@@ -370,8 +370,17 @@ def remove_bandwidth(vip: str, iface: str):
 #     remote 'zun' @ 192.168.1.100[4500] [10.99.0.50]
 # We only care about ESTABLISHED rw-eap connections.
 SA_HEADER_RE = re.compile(r"^\s*rw-eap:\s+#\d+,\s+ESTABLISHED")
-SA_VIP_RE = re.compile(r"\]\s+\[(\d+\.\d+\.\d+\.\d+)\]")
-SA_IDENTITY_RE = re.compile(r"remote\s+'([^']+)'\s+@")
+# Match the LAST [X.X.X.X] on a line (the VIP). The previous regex
+# matched the FIRST [port] instead, which broke when Windows clients
+# behind NAT send IKE identity in a different position.
+SA_VIP_RE = re.compile(r"\[(\d+\.\d+\.\d+\.\d+)\]\s*$")
+
+# Match the EAP identity (preferred) or fall back to the IKE identity.
+# iPhone/Mac send:  remote 'zun-operator' @ IP[4500] [10.99.0.1]
+# Windows behind NAT:  remote '192.168.10.18' @ IP[4500] EAP: 'zun-operator' [10.99.0.2]
+# The EAP identity is the actual user; the IKE identity may be a private IP.
+SA_IDENTITY_RE = re.compile(r"EAP:\s+'([^']+)'")
+SA_IKE_IDENTITY_RE = re.compile(r"remote\s+'([^']+)'\s+@")
 
 
 def list_active_vips() -> dict[str, str]:
@@ -396,6 +405,13 @@ def list_active_vips() -> dict[str, str]:
         m_id = SA_IDENTITY_RE.search(line)
         if m_id:
             sa["username"] = m_id.group(1)
+        else:
+            # Fallback: Windows clients behind NAT may not send EAP: on this
+            # line; use the IKE identity. NOT preferred because it's often a
+            # private IP (e.g. 192.168.10.18) which doesn't match DB users.
+            m_ike = SA_IKE_IDENTITY_RE.search(line)
+            if m_ike:
+                sa["username"] = m_ike.group(1)
         m_vip = SA_VIP_RE.search(line)
         if m_vip:
             sa["vip"] = m_vip.group(1)
