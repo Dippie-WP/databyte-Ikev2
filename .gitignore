@@ -11,6 +11,9 @@ docker/swanctl/x509/*.pem
 docker/swanctl/x509ca/*.pem
 !docker/swanctl/x509ca/.gitkeep
 
+# Bundled client-side CA cert (deliberately committed for setup-windows-vpn.ps1)
+!scripts/strongswan-ca.crt.pem
+
 # SQLite DB with user data + leases
 *.db
 *.db.backup-*
@@ -50,3 +53,4 @@ rclone.conf
 # Python bytecode
 __pycache__/
 *.pyc
+.env.xneelo
