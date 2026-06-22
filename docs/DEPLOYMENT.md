@@ -202,6 +202,11 @@ curl --interface 10.99.0.50 --max-time 10 https://ifconfig.me
 # Should return the LXC's public IP
 ```
 
+> **For per-user bandwidth limits (Phase 5D):**
+> See [5D-BANDWIDTH-LIMITING.md](./5D-BANDWIDTH-LIMITING.md) — the
+> `bandwidth-monitor` daemon enforces per-user bandwidth caps (tc + iptables).
+> On Xneelo, this is installed as part of `bootstrap-xneelo.sh` step 17.
+
 ## 11. Rollback
 
 If v1.2 is broken, rollback to v1.1 (PSK only, no VIP pin) in 3 min:

@@ -13,15 +13,17 @@
 #   6. Configure fail2ban for SSH (3 retries → 24h ban)
 #   7. Apply sysctl hardening (ip_forward, redirect hardening)
 #   8. Apply iptables MSS clamp + VPN FORWARD rules
-#   9. Clone project repo
-#   10. Generate strongSwan CA + server certs (SAN = SERVER_ID)
-#   11. Edit rw-eap.conf + rw-psk.conf from templates
-#   12. Build docker image
-#   13. Start container via docker compose
-#   14. Seed first users in SQLite DB
-#   15. Configure rclone remote for RustFS backup
-#   16. Install DB backup cron job
-#   17. Smoke test
+#   9. Load ifb kernel module (for ingress bandwidth shaping on Xneelo VPS)
+#   10. Clone project repo
+#   11. Generate strongSwan CA + server certs (SAN = SERVER_ID)
+#   12. Edit rw-eap.conf + rw-psk.conf from templates
+#   13. Build docker image
+#   14. Start container via docker compose
+#   15. Seed first users in SQLite DB (with bandwidth columns)
+#   16. Install bandwidth-monitor systemd service (per-user tc + iptables shaping)
+#   17. Configure rclone remote for RustFS backup
+#   18. Install DB backup cron job
+#   19. Smoke test
 #
 # Time: ~15-25 min depending on network speed.
 #
@@ -432,6 +434,41 @@ CRON_M="${BACKUP_CRON_MINUTE:-0}"
 echo "${CRON_M} ${CRON_H} * * * root /usr/local/bin/vpn-db-backup.sh" > /etc/cron.d/vpn-db-backup
 chmod 644 /etc/cron.d/vpn-db-backup
 ok "DB backup cron installed (daily at ${CRON_H}:${CRON_M} UTC)."
+
+# ─── Step 17: Install bandwidth-monitor systemd service ─────────────────────
+info "=== Step 17/19: Installing bandwidth-monitor service ==="
+# On the Xneelo VPS, the ifb module can be loaded (full kernel access).
+# We enable it at boot so ingress shaping works.
+cat > /etc/modules-load.d/ifb.conf << 'EOF'
+# Load ifb for ingress bandwidth shaping (per-user download limits)
+ifb
+EOF
+
+# Verify the module loads now
+modprobe ifb numifbs=1 2>/dev/null && ok "ifb module loaded (ingress shaping available)" || warn "ifb module load failed; ingress shaping will be disabled (egress only)"
+
+# Copy the bandwidth-monitor.py + service file from the cloned repo
+cd /opt/strongswan-vpn-gateway
+sudo cp quota/bandwidth-monitor.py /home/zunaid/strongswan/quota/bandwidth-monitor.py 2>/dev/null || \
+    { mkdir -p /home/zunaid/strongswan/quota
+      sudo cp quota/bandwidth-monitor.py /home/zunaid/strongswan/quota/bandwidth-monitor.py; }
+sudo chown root:root /home/zunaid/strongswan/quota/bandwidth-monitor.py
+sudo chmod 755 /home/zunaid/strongswan/quota/bandwidth-monitor.py
+
+sudo cp quota/bandwidth-monitor.service /etc/systemd/system/bandwidth-monitor.service
+sudo chown root:root /etc/systemd/system/bandwidth-monitor.service
+sudo chmod 644 /etc/systemd/system/bandwidth-monitor.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable bandwidth-monitor
+sudo systemctl start bandwidth-monitor
+sleep 2
+
+if systemctl is-active --quiet bandwidth-monitor; then
+    ok "bandwidth-monitor service active."
+else
+    warn "bandwidth-monitor service failed to start. Check: journalctl -u bandwidth-monitor"
+fi
 
 # ─── Smoke test ─────────────────────────────────────────────────────────────
 info ""

@@ -1,0 +1,28 @@
+[Unit]
+Description=strongSwan per-user bandwidth monitor (Phase 5D — tc + iptables per-user shaping)
+Documentation=file:///home/zunaid/strongswan/quota/bandwidth-monitor.py
+After=docker.service quota-monitor.service
+Wants=quota-monitor.service
+
+# bandwidth-monitor.py is the daemon that:
+#   1. Reads active IKE_SAs from swanctl --list-sas
+#   2. Looks up each user's bandwidth_down_mbps / bandwidth_up_mbps from customers table
+#   3. For new connections: adds iptables mangle MARK rule + tc class on egress
+#      (and ifb0 if available for ingress shaping)
+#   4. For disconnected users: removes the iptables rule + tc class
+#   5. Polled every 60s (matches quota-monitor cadence)
+#
+# Run on the LXC 903 host (or Xneelo VPS host). NOT inside the strongSwan container.
+# Requires: iptables-legacy, tc (iproute2), ifb kernel module (for ingress shaping on VPS)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/zunaid/strongswan/quota/bandwidth-monitor.py
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
