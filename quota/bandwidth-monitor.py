@@ -347,14 +347,17 @@ def remove_bandwidth(vip: str, iface: str):
             "-m", "comment", "--comment", f"bw:{vip}",
         ])
 
-    # Remove tc filter + class on egress
+    # Remove tc filter + class on egress.
+    # Note: 'tc filter del' REQUIRES prio to be specified when handle is set,
+    # otherwise kernel says "Cannot flush filters with protocol, handle or
+    # kind set." Default prio for 'tc filter add ... fw' is 49152.
     run(["tc", "filter", "del", "dev", iface, "parent", "1:",
-         "handle", mark, "fw"])
+         "prio", "49152", "handle", mark, "fw"])
     run(["tc", "class", "del", "dev", iface, "classid", classid])
 
     if INGRESS_SHAPING:
         run(["tc", "filter", "del", "dev", INGRESS_IFB, "parent", "1:",
-             "handle", mark, "fw"])
+             "prio", "49152", "handle", mark, "fw"])
         run(["tc", "class", "del", "dev", INGRESS_IFB, "classid", classid])
 
     log.info("Removed bandwidth for VIP %s", vip)
