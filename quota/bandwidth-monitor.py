@@ -174,23 +174,30 @@ def vip_to_mark(vip: str) -> str:
 def vip_to_classid(vip: str) -> str:
     """Convert VIP to a unique tc classid under 1:1 parent.
 
-    Use last octet as the minor classid. Range: 1:2 to 1:ff (250 users max).
+    Offset last octet by +1 to avoid colliding with parent classid 1:1.
+    Range: 10.99.0.1 → 1:2 ... 10.99.0.254 → 1:255 (254 users max).
     """
     last = int(vip.rsplit(".", 1)[-1])
-    if last < 2 or last > 0xff:
-        raise ValueError(f"VIP last octet {last} out of range for classid")
-    return f"1:{last}"
+    if last < 1 or last > 254:
+        raise ValueError(f"VIP last octet {last} out of range (need 1-254)")
+    return f"1:{last + 1}"
 
 
 def user_bandwidth_rules_present(vip: str) -> bool:
-    """Check if iptables MARK + tc class already exist for this VIP."""
+    """Check if iptables MARK + tc class already exist for this VIP.
+
+    Look in BOTH mangle chains (POSTROUTING for upload, PREROUTING for download)
+    AND FORWARD (for forwarded traffic that hits neither input nor output).
+    A rule is "present" if the source/dest match the VIP AND the mark matches.
+    """
     mark = vip_to_mark(vip)
-    # Check iptables
-    out = run(["iptables-legacy", "-t", "mangle", "-L", "POSTROUTING", "-n", "-v"],
-              check=False)
-    for line in out.stdout.splitlines():
-        if f"bw:{vip}" in line and f"SET {mark}" in line:
-            return True
+    # Check both chains
+    for chain in ("PREROUTING", "POSTROUTING", "FORWARD"):
+        out = run(["iptables-legacy", "-t", "mangle", "-L", chain, "-n", "-v"],
+                  check=False)
+        for line in out.stdout.splitlines():
+            if f"bw:{vip}" in line and mark in line:
+                return True
     return False
 
 
@@ -208,20 +215,27 @@ def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # 1. iptables marks (PREROUTING for download, POSTROUTING for upload)
-    #    PREROUTING matches the destination (the user's VIP) for download traffic
-    #    arriving from the internet. POSTROUTING matches the source (the user's
-    #    VIP) for upload traffic going out. Same VIP, two chains, one mark.
-    run([
-        "iptables-legacy", "-t", "mangle", "-A", "PREROUTING",
-        "-d", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
-        "-m", "comment", "--comment", f"bw:{vip}",
-    ])
-    run([
-        "iptables-legacy", "-t", "mangle", "-A", "POSTROUTING",
-        "-s", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
-        "-m", "comment", "--comment", f"bw:{vip}",
-    ])
+    # 1. iptables marks in THREE mangle chains (PREROUTING, FORWARD, POSTROUTING).
+    #    - PREROUTING: matches traffic destined to the VIP (download arriving
+    #      on ens3 before routing). May not see IPSec-decapsulated traffic
+    #      if the kernel routes it directly to the SA.
+    #    - FORWARD: matches traffic routed through the host. VPN client traffic
+    #      that comes in decapsulated from the SA and goes out to the internet
+    #      (and vice versa) traverses FORWARD. THIS IS WHERE THE BULK OF VPN
+    #      TRAFFIC IS SHAPED.
+    #    - POSTROUTING: matches traffic sourced from the VIP going out (upload).
+    #    Same VIP, three chains, one mark per direction.
+    for chain, match_flag, addr in (
+        ("PREROUTING", "-d", f"{vip}/32"),   # download: dst=VIP
+        ("FORWARD", "-d", f"{vip}/32"),       # forwarded download: dst=VIP
+        ("FORWARD", "-s", f"{vip}/32"),       # forwarded upload: src=VIP
+        ("POSTROUTING", "-s", f"{vip}/32"),   # local-sourced upload
+    ):
+        run([
+            "iptables-legacy", "-t", "mangle", "-A", chain,
+            match_flag, addr, "-j", "MARK", "--set-mark", mark,
+            "-m", "comment", "--comment", f"bw:{vip}",
+        ])
 
     # 2. tc class on egress (user's upload = rate)
     run([
@@ -257,6 +271,18 @@ def remove_bandwidth(vip: str, iface: str):
     global INGRESS_SHAPING
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
+    # Remove MARK rules from all 3 mangle chains where we added them
+    for chain in ("PREROUTING", "POSTROUTING", "FORWARD"):
+        run([
+            "iptables-legacy", "-t", "mangle", "-D", chain,
+            "-d", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
+            "-m", "comment", "--comment", f"bw:{vip}",
+        ], check=False)
+        run([
+            "iptables-legacy", "-t", "mangle", "-D", chain,
+            "-s", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
+            "-m", "comment", "--comment", f"bw:{vip}",
+        ], check=False)
 
     # Remove iptables rules (PREROUTING and POSTROUTING) by comment
     for table_chain in [("mangle", "PREROUTING"), ("mangle", "POSTROUTING")]:
@@ -314,7 +340,7 @@ def list_active_vips() -> dict[str, str]:
         if SA_HEADER_RE.search(line):
             sa = {}
             continue
-        if not sa:
+        if sa is None:
             continue
         m_id = SA_IDENTITY_RE.search(line)
         if m_id:
