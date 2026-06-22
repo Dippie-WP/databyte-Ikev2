@@ -29,8 +29,8 @@
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tiers (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    name             TEXT    NOT NULL UNIQUE,        -- e.g. "tier_3gb", "demo_100mb"
-    display_name     TEXT    NOT NULL,               -- e.g. "3 GB", "Demo 100MB"
+    name             TEXT    NOT NULL UNIQUE,        -- e.g. "tier_5gb", "tier_10gb", "tier_20gb", "demo_100mb"
+    display_name     TEXT    NOT NULL,               -- e.g. "5 GB", "10 GB", "20 GB", "Demo 100MB"
     data_limit_bytes INTEGER NOT NULL,                -- tier allowance in bytes
     price_zar        INTEGER,                        -- price in ZAR cents (NULL = not for sale)
     is_active        INTEGER NOT NULL DEFAULT 1,     -- 1=available, 0=archived

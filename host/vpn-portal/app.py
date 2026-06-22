@@ -10,7 +10,7 @@ Endpoints:
   POST /api/logout
   GET  /api/customers                  list w/ tier, used, quota, over_quota, vip
   GET  /api/customers/{id}             + devices[] + alerts[]
-  GET  /api/tiers                      tier defs (3GB/10GB/15GB/demo_100MB)
+  GET  /api/tiers                      tier defs (5GB/10GB/20GB/demo_100MB) — Tier 1/2/3 at $3/$5/$8 USD
   GET  /api/quota/{customer_id}        live used/quota + cap state
   POST /api/quota/{customer_id}/reset  sqlite UPDATE, returns reset_from_bytes
   GET  /api/vpn/sessions               docker exec swanctl --list-sas (raw)
@@ -602,7 +602,7 @@ class ClientCreate(BaseModel):
     telegram_username: Optional[str] = Field(None, max_length=64)
     notes:            Optional[str] = Field(None, max_length=1024)
     # Tier — either existing tier_name OR 'custom' with custom_cap_mb
-    tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_3gb') OR 'custom'")
+    tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_5gb', 'tier_10gb', 'tier_20gb') OR 'custom'")
     custom_cap_mb:    Optional[int] = Field(None, ge=1, le=1024*1024,
                                            description="Cap in MiB. Required iff tier_name=='custom'")
     # Device (1 creds = 1 device, per v1.2.6 model)

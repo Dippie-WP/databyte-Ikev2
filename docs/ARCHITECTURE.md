@@ -172,14 +172,14 @@ iptables-legacy counter (bytes per VIP, in FORWARD chain)
 - **Source of truth for "how much data" = iptables-legacy FORWARD counter** (per-VIP ACCEPT rules)
 - **Kill credentials at 100% via `rw-eap.conf` mutation, NOT DB** (see ADR `5B-credentials-kill.md`)
 
-### Tiers (seeded in 5B.1)
+### Tiers (seeded in 5B.1, **rewritten 2026-06-22** for 5D pre-commercial lineup)
 
-| Name | Display | data_limit_bytes | Status |
-|------|---------|------------------|--------|
-| tier_3gb | 3 GB | 3,221,225,472 | Active, for sale |
-| tier_10gb | 10 GB | 10,737,418,240 | Active, for sale |
-| tier_15gb | 15 GB | 16,106,127,360 | Active, for sale |
-| demo_100mb | Demo 100 MB | 104,857,600 | Persistent demo account (Zun resets after each demo) |
+| Name | Display | data_limit_bytes | Price | Status |
+|------|---------|------------------|-------|--------|
+| tier_5gb  | 5 GB  |  5,368,709,120 | $3 USD | Active, for sale — Tier 1 |
+| tier_10gb | 10 GB | 10,737,418,240 | $5 USD | Active, for sale — Tier 2 |
+| tier_20gb | 20 GB | 21,474,836,480 | $8 USD | Active, for sale — Tier 3 |
+| demo_100mb | Demo 100 MB | 104,857,600 | — | Persistent demo (Zun resets after each demo) |
 
 **Operator:** `zun-operator` (is_operator=1, no tier, unlimited bypass)
 **Demo customer:** `demo-customer` (tier=4, 2 devices, hard cap at 100 MiB for testing)
