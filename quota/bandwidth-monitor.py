@@ -319,7 +319,7 @@ def remove_bandwidth(vip: str, iface: str):
 #     remote 'zun' @ 192.168.1.100[4500] [10.99.0.50]
 # We only care about ESTABLISHED rw-eap connections.
 SA_HEADER_RE = re.compile(r"^\s*rw-eap:\s+#\d+,\s+ESTABLISHED")
-SA_VIP_RE = re.compile(r"\[(\d+\.\d+\.\d+\.\d+)\]")
+SA_VIP_RE = re.compile(r"\]\s+\[(\d+\.\d+\.\d+\.\d+)\]")
 SA_IDENTITY_RE = re.compile(r"remote\s+'([^']+)'\s+@")
 
 
