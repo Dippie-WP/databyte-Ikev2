@@ -78,6 +78,48 @@ fi
 info "Loading environment from: ${ENV_FILE}"
 set -a; source "$ENV_FILE"; set +a
 
+# ─── Auto-generate any missing credentials ───────────────────────────────────
+# If OPERATOR_PASSWORD is empty, generate a strong one and write it back to
+# the env file. Same for DEMO_CUSTOMER_PASSWORD and FRIEND_PSK. This means
+# the operator only needs to fill in SERVER_ID + PUBLIC_IPV4 + RUSTFS_* —
+# everything else is generated and persisted to .env.xneelo.
+gen_password() {
+    # 4× 8-char segments, no ambiguous chars (0/O/1/l/I), ~200 bits entropy
+    python3 -c "
+import secrets, string
+alphabet = ''.join(c for c in string.ascii_letters + string.digits if c not in '0O1lI')
+print('-'.join([''.join(secrets.choice(alphabet) for _ in range(8)) for _ in range(4)]))
+"
+}
+
+write_back_env() {
+    # Update or add KEY=VALUE in the env file (preserves quoting and comments)
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$ENV_FILE"
+    else
+        echo "${key}=\"${value}\"" >> "$ENV_FILE"
+    fi
+}
+
+if [[ -z "${OPERATOR_PASSWORD:-}" ]]; then
+    OPERATOR_PASSWORD="$(gen_password)"
+    write_back_env OPERATOR_PASSWORD "$OPERATOR_PASSWORD"
+    info "Auto-generated OPERATOR_PASSWORD (32 chars, written to .env.xneelo)"
+fi
+if [[ -z "${DEMO_CUSTOMER_PASSWORD:-}" ]]; then
+    DEMO_CUSTOMER_PASSWORD="$(gen_password)"
+    write_back_env DEMO_CUSTOMER_PASSWORD "$DEMO_CUSTOMER_PASSWORD"
+    info "Auto-generated DEMO_CUSTOMER_PASSWORD (32 chars, written to .env.xneelo)"
+fi
+if [[ -z "${FRIEND_PSK:-}" ]]; then
+    FRIEND_PSK="$(openssl rand -base64 32 | tr -d '/+=' | head -c 48)"
+    write_back_env FRIEND_PSK "$FRIEND_PSK"
+    info "Auto-generated FRIEND_PSK (48 chars base64, written to .env.xneelo)"
+fi
+# Re-source to pick up the newly-written values
+set -a; source "$ENV_FILE"; set +a
+
 # ─── Validation ────────────────────────────────────────────────────────────────
 REQUIRED=("PUBLIC_IPV4" "SERVER_ID" "OPERATOR_USER" "OPERATOR_PASSWORD" "DEMO_CUSTOMER_USER" "DEMO_CUSTOMER_VIP")
 for var in "${REQUIRED[@]}"; do
@@ -358,7 +400,7 @@ cd /opt/strongswan-vpn-gateway/docker
 # rw-eap.conf — fill in the server ID and secrets block
 sed "s/vpn\.homelab\.local/${SERVER_ID}/" swanctl/conf.d/rw-eap.conf.template > swanctl/conf.d/rw-eap.conf
 
-# Add operator EAP secret to rw-eap.conf secrets block
+# Add operator + demo customer EAP secrets to rw-eap.conf secrets block
 # (Note: strongSwan stores the plaintext for MSCHAPv2; NTLM hash alternative
 # requires xxd + openssl-legacy, not used here. Plaintext works fine.)
 cat >> swanctl/conf.d/rw-eap.conf << EOF
@@ -367,6 +409,10 @@ secrets {
     eap-operator {
         id = ${OPERATOR_USER}
         secret = "${OPERATOR_PASSWORD}"
+    }
+    eap-demo-customer {
+        id = ${DEMO_CUSTOMER_USER}
+        secret = "${DEMO_CUSTOMER_PASSWORD}"
     }
 }
 EOF
@@ -548,12 +594,25 @@ systemctl is-active fail2ban | grep -q "active" && ok "fail2ban running" || warn
 echo ""
 ok "=== Bootstrap complete ==="
 info "Next step: Connect a client from outside the VPS (e.g. your phone on LTE)."
+info ""
 info "  Server: ${SERVER_ID}"
 info "  Type:   IKEv2 EAP-MSCHAPv2"
-info "  User:   ${OPERATOR_USER} / ${OPERATOR_PASSWORD}"
+info ""
+info "  ─── Credentials (auto-generated if left empty) ──────────────────"
+info "  Operator (admin):  ${OPERATOR_USER} / ${OPERATOR_PASSWORD}"
+info "  Demo customer:     ${DEMO_CUSTOMER_USER} / ${DEMO_CUSTOMER_PASSWORD}"
+info "  Friend PSK:        ${FRIEND_PSK:0:8}...${FRIEND_PSK: -8}  (48 chars)"
+info ""
+info "  All credentials also persisted to ${ENV_FILE}"
+info "  CA cert: /opt/strongswan-vpn-gateway/docker/swanctl/x509ca/strongswan-ca.crt.pem"
 info ""
 info "Check logs: docker logs strongswan --tail 30"
 info "Full status: docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas"
 info ""
 info "NOTE: Remember to update Cloudflare DNS A record for ${SERVER_ID} → ${PUBLIC_IPV4}"
 info "      Use DNS-only (grey cloud) — Cloudflare proxy does NOT proxy UDP 500/4500."
+info ""
+info "For Windows IKEv2 clients: install the CA cert into Trusted Root CAs"
+info "  PowerShell (admin):"
+info "    Import-Certificate -FilePath \"<path-to-strongswan-ca.crt.pem>\" \\"
+info "      -CertStoreLocation Cert:\\LocalMachine\\Root"
