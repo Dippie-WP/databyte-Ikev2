@@ -89,8 +89,8 @@ ok "All required variables are set."
 
 # ─── Pre-flight ──────────────────────────────────────────────────────────────
 info "=== Pre-flight checks ==="
-whoami == root || die "Must run as root"
-uname -r | grep -qE "Linux" || die "Not Linux?"
+[[ "$(whoami)" == "root" ]] || die "Must run as root"
+uname -s | grep -q "Linux" || die "Not Linux?"
 ok "Running as root on Linux"
 
 # Detect OS
@@ -117,7 +117,7 @@ if [[ -z "${INTERNAL_IFACE:-}" ]]; then
 fi
 
 # ─── Step 1: apt update + install packages ───────────────────────────────────
-info "=== Step 1/16: Updating apt and installing packages ==="
+info "=== Step 1/19: Updating apt and installing packages ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
@@ -125,8 +125,10 @@ apt-get install -y -qq \
     curl \
     gnupg \
     lsb-release \
+    iptables \
+    arptables \
+    ebtables \
     docker.io \
-    docker-compose-plugin \
     rclone \
     sqlite3 \
     unattended-upgrades \
@@ -136,12 +138,18 @@ apt-get install -y -qq \
     openssl \
     sudo \
     git \
-    ufw \
     bc \
     dnsutils \
     net-tools \
     > /dev/null 2>&1
-ok "Packages installed."
+
+# Switch to iptables-legacy (Debian 13 ships iptables-nft by default,
+# but our strongSwan container + bandwidth-monitor use iptables-legacy).
+update-alternatives --set iptables   /usr/sbin/iptables-legacy  >/dev/null 2>&1 || true
+update-alternatives --set ip6tables  /usr/sbin/ip6tables-legacy >/dev/null 2>&1 || true
+update-alternatives --set arptables  /usr/sbin/arptables-legacy  >/dev/null 2>&1 || true
+update-alternatives --set ebtables   /usr/sbin/ebtables-legacy   >/dev/null 2>&1 || true
+ok "Packages installed + iptables-legacy set as default."
 
 # ─── Step 2: Disable root SSH login ─────────────────────────────────────────
 info "=== Step 2/16: Disabling root SSH login ==="
@@ -210,8 +218,8 @@ rkhunter --propupd 2>/dev/null
 ok "rkhunter configured."
 
 # ─── Step 7: Sysctl hardening ────────────────────────────────────────────────
-info "=== Step 7/16: Applying sysctl hardening ==="
-cat >> /etc/sysctl.d/99-strongswan.conf << 'EOF'
+info "=== Step 7/19: Applying sysctl hardening ==="
+cat >> /etc/sysctl.d/99-strongswan.conf << EOF
 
 # ── Xneelo VPS bootstrap ──────────────────────────────────────────────────
 # VPN gateway: forward traffic from VPN clients
@@ -263,6 +271,20 @@ COMMIT
 :FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
 
+# ── Loopback ───────────────────────────────────────────────────────────────
+# CRITICAL: charon VICI listens on 127.0.0.1:4502 (TCP). Without this rule,
+# INPUT policy DROP blocks the loopback SYN and the start-scripts (swanctl
+# --load-creds/--load-conns/--load-pools) all timeout. Symptom: charon
+# appears running, port 4502 shows LISTEN in `ss`, but every swanctl call
+# hangs forever. (Hit on Xneelo VPS 154.65.110.44 deploy 2026-06-22.)
+# Also: many services (systemd-resolved, docker bridge) rely on loopback.
+-A INPUT -i lo -j ACCEPT
+
+# ── VICI socket (operator) ────────────────────────────────────────────────
+# Loopback-only by default. Accept TCP 4502 from anywhere on the public
+# interface too — in case we add a future remote operator port forward.
+-A INPUT -p tcp --dport 4502 -j ACCEPT
+
 # ── VPN clients (10.99.0.0/24) ─────────────────────────────────────────────
 # Allow all traffic to/from VPN subnet
 -A INPUT  -s 10.99.0.0/24 -j ACCEPT
@@ -287,6 +309,13 @@ COMMIT
 # ── Established/related ─────────────────────────────────────────────────────
 -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
+COMMIT
+
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
 # ── NAT for VPN clients ────────────────────────────────────────────────────
 # MASQUERADE VPN client traffic going out the public interface
 -A POSTROUTING -s 10.99.0.0/24 ! -d 10.99.0.0/24 -m comment --comment "VPN MASQ" -j MASQUERADE
@@ -330,7 +359,8 @@ cd /opt/strongswan-vpn-gateway/docker
 sed "s/vpn\.homelab\.local/${SERVER_ID}/" swanctl/conf.d/rw-eap.conf.template > swanctl/conf.d/rw-eap.conf
 
 # Add operator EAP secret to rw-eap.conf secrets block
-OPERATOR_NTLM=$(echo -n "${OPERATOR_PASSWORD}" | iconv -t utf-16le | openssl md4 -binary | xxd -p -c 256)
+# (Note: strongSwan stores the plaintext for MSCHAPv2; NTLM hash alternative
+# requires xxd + openssl-legacy, not used here. Plaintext works fine.)
 cat >> swanctl/conf.d/rw-eap.conf << EOF
 
 secrets {
