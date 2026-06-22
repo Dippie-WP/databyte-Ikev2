@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# seed_real_tiers.sh — Seed the 3 production tiers (3GB, 10GB, 15GB).
+# seed_real_tiers.sh — Seed the 3 production tiers for 5D pre-commercial lineup.
 #
-# Idempotent. Use INSERT OR IGNORE on the UNIQUE name constraint.
+#   tier_5gb   | 5 GB  |   5 * 1024^3 =   5,368,709,120 bytes | $3 USD  | Tier 1
+#   tier_10gb  | 10 GB |  10 * 1024^3 =  10,737,418,240 bytes | $5 USD  | Tier 2
+#   tier_20gb  | 20 GB |  20 * 1024^3 =  21,474,836,480 bytes | $8 USD  | Tier 3
+#
+# Idempotent. Uses INSERT OR IGNORE on the UNIQUE name constraint.
 # Run on the LXC HOST (not inside the container).
 #
 # Usage:
 #   bash quota/seed_real_tiers.sh
 #
-# Adds 3 rows to `tiers`:
-#   tier_3gb  | 3 GB  |  3 * 1024^3 =  3,221,225,472 bytes
-#   tier_10gb | 10 GB | 10 * 1024^3 = 10,737,418,240 bytes
-#   tier_15gb | 15 GB | 15 * 1024^3 = 16,106,127,360 bytes
-#
-# price_zar is left NULL — pricing happens in 5D (commercial), out of scope for 5B.
+# Notes:
+# - price_zar column kept for legacy; new USD price is in price_cents or
+#   notes field. Pricing happens in 5D (commercial) — tier display only.
+# - Old tier_3gb / tier_15gb rows are NOT deleted by this script. To
+#   archive them, run the explicit migration step (5D-migrate-tiers.sh).
 
 set -euo pipefail
 
@@ -24,29 +27,33 @@ if [ ! -s "$DB_PATH" ]; then
     exit 1
 fi
 
-# Compute byte values (math in shell, then pass to sqlite)
-GB3=$((3 * 1024 * 1024 * 1024))    # 3221225472
-GB10=$((10 * 1024 * 1024 * 1024))  # 10737418240
-GB15=$((15 * 1024 * 1024 * 1024))  # 16106127360
+GB5=$((5 * 1024 * 1024 * 1024))     # 5368709120
+GB10=$((10 * 1024 * 1024 * 1024))   # 10737418240
+GB20=$((20 * 1024 * 1024 * 1024))   # 21474836480
 
-echo "=== Seed real tiers ==="
+# USD cents (Stripe-friendly: integer cents)
+USD3=$((3 * 100))   # 300
+USD5=$((5 * 100))   # 500
+USD8=$((8 * 100))   # 800
+
+echo "=== Seed 5D pre-commercial tiers ==="
 echo "  DB:     $DB_PATH"
-echo "  Tiers:  tier_3gb ($GB3), tier_10gb ($GB10), tier_15gb ($GB15)"
+echo "  Tiers:  tier_5gb ($GB5 bytes, $USD3 cents)  → Tier 1"
+echo "          tier_10gb ($GB10 bytes, $USD5 cents) → Tier 2"
+echo "          tier_20gb ($GB20 bytes, $USD8 cents) → Tier 3"
 
 sqlite3 "$DB_PATH" <<SQL
 INSERT OR IGNORE INTO tiers (name, display_name, data_limit_bytes, price_zar, is_active, created_at, notes)
 VALUES
-  ('tier_3gb',  '3 GB',  $GB3,  NULL, 1, $TS, 'Standard tier — 3 GB'),
-  ('tier_10gb', '10 GB', $GB10, NULL, 1, $TS, 'Standard tier — 10 GB'),
-  ('tier_15gb', '15 GB', $GB15, NULL, 1, $TS, 'Standard tier — 15 GB');
+  ('tier_5gb',  '5 GB',  $GB5,  NULL, 1, $TS, 'Tier 1 — 5 GB for \$3 USD (5D pre-commercial, 2026-06-22)'),
+  ('tier_10gb', '10 GB', $GB10, NULL, 1, $TS, 'Tier 2 — 10 GB for \$5 USD (5D pre-commercial, 2026-06-22)'),
+  ('tier_20gb', '20 GB', $GB20, NULL, 1, $TS, 'Tier 3 — 20 GB for \$8 USD (5D pre-commercial, 2026-06-22)');
 
-INSERT INTO audit_log (actor, action, target_type, payload, created_at)
-VALUES ('system', 'seed_real_tiers', 'system',
-        json_object('tiers_added', 'tier_3gb,tier_10gb,tier_15gb', 'ts', $TS),
-        $TS);
-
-SELECT '--- tiers after seed ---';
-SELECT id, name, display_name, data_limit_bytes, is_active FROM tiers ORDER BY id;
+SELECT json_object(
+    'tiers_added', group_concat(name, ','),
+    'ts', $TS
+) FROM tiers WHERE name IN ('tier_5gb', 'tier_10gb', 'tier_20gb') AND created_at = $TS;
 SQL
 
-echo "  Status: OK"
+echo "=== Done. Verify with: ==="
+echo "  sqlite3 $DB_PATH 'SELECT name, display_name, data_limit_bytes, notes FROM tiers WHERE is_active=1;'"

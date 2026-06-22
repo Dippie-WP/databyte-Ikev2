@@ -112,8 +112,8 @@ through per-VIP rules correctly.
 
 **Why no calendar cycle:**
 - 5B Q&A confirmed: per-purchase cycle, no rolling window. Customer pays
-  for 3 GB, gets 3 GB, when 3 GB is used they're cut. To get more, they
-  buy more (manual extension by Zun).
+  for a tier (e.g. 5 GB), gets 5 GB, when 5 GB is used they're cut. To get
+  more, they buy more (manual extension by Zun).
 - Manual extension means Zun runs `extend_customer.sh <customer>
   <tier>` after payment — no automatic payment integration (5D).
 

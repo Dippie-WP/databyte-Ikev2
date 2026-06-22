@@ -6,17 +6,18 @@ Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite
 
 ## What this is
 
-A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Single-operator homelab use** (Zun's only). Personal devices (Android, iPhone, Windows, Linux) connect from anywhere over 5G/WiFi. No multi-tenant, no billing, no customer onboarding. (Phase 5B added a hard-cut data cap layer for the operator's own use, not for reselling.)
+A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices connect from anywhere over 5G/WiFi. Phase 5B added a hard-cut data cap layer and customer/operator portals in pre-launch form. Commercial customer onboarding is gated on 5D (currently in pre-launch prep).
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
-- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.1.0` (2026-06-19, 5B data cap layer)
+- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.2.15` (2026-06-22, 5C portal + 5B quota layer)
 - **StrongSwan version:** 6.0.7 (CVE-2026-47895 patched)
 - **Auth:** Server-cert (RSA-2048 + RSASSA-PSS) + EAP-MSCHAPv2 (primary) and PSK (fallback)
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via attr-sql + SQLite
-- **Deployed at:** LXC 903 (192.168.10.98, on pve2 in Cape Town homelab)
+- **Lab deployed at:** LXC 903 (192.168.10.98, on pve2 in Cape Town homelab)
+- **Production VPS:** Xneelo Johannesburg, `myvpn.databyte.co.za` — see [docs/VPS-XNEELO-DEPLOY.md](docs/VPS-XNEELO-DEPLOY.md) for the deployment runbook.
 - **Backed up to:** `rustfs:/open-claw-push/strongswan-{db,configs}/` (daily + ISO-week slots, 14d/8w retention)
-- **Public endpoint:** 102.182.117.43, router forwards UDP 500/4500 → 192.168.10.98
-- **Monitoring:** Prometheus exporter on `:9101` (`strongswan_exporter.py`), dashboard `strongswan-v1-2` in Grafana
+- **Lab public endpoint:** 102.182.117.43, router forwards UDP 500/4500 → 192.168.10.98 (homelab only, not production)
+- **Production:** `myvpn.databyte.co.za` (Cloudflare DNS, grey cloud for IKEv2)
 
 ## What's where
 
@@ -25,7 +26,7 @@ A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **
 | `docker/` | The container: Dockerfile, docker-compose, swanctl configs, strongswan.d overrides, in-image `start.sh` |
 | `host/` | The LXC host: sysctl, iptables, firewalld zone, optional nftables service |
 | `scripts/` | Operate-time: cert gen, DB seed, image build, daily backup, rollback |
-| `docs/` | ROADMAP, ARCHITECTURE, DEPLOYMENT, ISSUES-LOG, SESSION-HISTORY |
+| `docs/` | ROADMAP, ARCHITECTURE, DEPLOYMENT, ISSUES-LOG, SESSION-HISTORY, **VPS-XNEELO-DEPLOY**, **CLOUDFLARE-DNS** |
 | `examples/` | Client profiles: Android `.sswan`, iOS `.mobileconfig` template (iOS path is broken; see issues) |
 
 ## Quick start (new host — or recovery rebuild)

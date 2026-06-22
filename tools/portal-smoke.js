@@ -414,7 +414,7 @@ async function waitMs(ms) { return new Promise(r => setTimeout(r, ms)); }
       const r = await fetch(new URL('/api/customers', CFG.base_url).toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Cookie: `session=${token}` },
-        body: JSON.stringify({ name: `smoke-bulk-${i}`, display_name: `Smoke Bulk ${i}`, tier_name: 'tier_3gb', device_name: `dev${i}`, device_type: 'Linux' }),
+        body: JSON.stringify({ name: `smoke-bulk-${i}`, display_name: `Smoke Bulk ${i}`, tier_name: 'tier_5gb', device_name: `dev${i}`, device_type: 'Linux' }),
       });
       const j = await r.json();
       if (!j.customer || !j.customer.id) throw new Error(`create #${i} failed: ${JSON.stringify(j)}`);

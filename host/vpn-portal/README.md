@@ -67,7 +67,7 @@ curl -sS http://192.168.10.212:8080/api/health | jq
 | POST | /api/logout                     | cookie | Clear session |
 | GET  | /api/customers                  | cookie | Customer list w/ tier, used, quota, VIP |
 | GET  | /api/customers/{id}             | cookie | + devices[] + alerts[] |
-| GET  | /api/tiers                      | cookie | tier defs (3GB / 10GB / 15GB / demo_100MB) |
+| GET  | /api/tiers                      | cookie | tier defs (5GB / 10GB / 20GB / demo_100MB) — Tier 1 / 2 / 3 |
 | GET  | /api/quota/{customer_id}        | cookie | live used/quota + cap state |
 | POST | /api/quota/{customer_id}/reset  | cookie | sqlite UPDATE, audit_log row |
 | GET  | /api/vpn/sessions               | cookie | docker exec swanctl --list-sas (raw) |

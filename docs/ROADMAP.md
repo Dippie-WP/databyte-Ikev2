@@ -88,7 +88,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 **Goal (revised 2026-06-19 13:17 UTC — single-operator + paying customers):**
 - Operator account: unlimited, no data cap, bypasses all quota checks
-- Customers: 2 simultaneous connections per purchase, shared quota pool, 3GB/10GB/15GB catalog
+- Customers: 2 simultaneous connections per purchase, shared quota pool, **5GB / 10GB / 20GB** catalog at **$3 / $5 / $8 USD** for **Tier 1 / 2 / 3**
 - 100% = hard cut, manual extension by operator after payment (no calendar cycle)
 - Customer-facing web page: read + "buy more" CTA → DM to operator → operator sends payment link
 - Customer auth: username + password (bcrypt)
@@ -112,7 +112,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 **5B deliverables (tagged v1.1.0):**
 - `quota/quota_schema.sql` — 6 tables, 10 indexes, idempotent `IF NOT EXISTS`
 - `quota/apply_quota_schema.sh` — host-side applier, idempotent, pre/post check
-- `quota/seed_real_tiers.sh` — 3GB/10GB/15GB tiers
+- `quota/seed_real_tiers.sh` — 5GB / 10GB / 20GB tiers at $3 / $5 / $8 USD (Tier 1 / 2 / 3)
 - `quota/seed_5B1.sh` — demo_100mb tier + zun-operator + demo-customer + 5 device links
 - `quota/seed_demo_creds.sh` — conf-driven EAP creds (avoids hard-coding secrets in DB)
 - `quota/reset_demo.sh` — resets demo customer's `data_used_bytes` to 0
