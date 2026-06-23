@@ -6,10 +6,14 @@ then `systemctl daemon-reload && systemctl restart vpn-portal`.
 
 ## Files
 
-- **`runtime-dir.conf`** — loosens `RuntimeDirectoryMode` from `0750` (default
-  in the main unit) to `0755` so the nginx worker (running as `www-data`) can
-  traverse `/run/vpn-portal/` to reach `gunicorn.sock`. The socket file itself
-  remains mode 0777.
+- **`runtime-dir.conf`** — sets `RuntimeDirectoryMode=0755` so the nginx worker
+  (running as `www-data`) can traverse `/run/vpn-portal/` to reach
+  `gunicorn.sock`. The socket file itself remains mode 0777.
+
+  **Important:** the main unit file (`/etc/systemd/system/vpn-portal.service`)
+  must NOT define its own `RuntimeDirectoryMode=`. The drop-in is the
+  single source of truth. Removed `RuntimeDirectoryMode=0750` from the live
+  VPS main unit on 2026-06-23 to eliminate the duplicate.
 
 - **`readwrite-paths.conf`** — adds paths to the systemd `ReadWritePaths=`
   list. Required because the main unit has `ProtectSystem=strict` which
