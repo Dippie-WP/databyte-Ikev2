@@ -528,8 +528,8 @@ class WhitelistAddRequest(BaseModel):
 DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")
 SLUG_RE        = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$")  # customers.name + users.name
 EMAIL_RE       = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")          # RFC 5322 lite
-RW_EAP_CONF    = "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"
-BACKUP_DIR     = "/home/zunaid/strongswan/swanctl/conf.d/.backups"
+RW_EAP_CONF    = os.environ.get("RW_EAP_CONF",        "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
+BACKUP_DIR     = os.environ.get("RW_EAP_BACKUP_DIR",   "/home/zunaid/strongswan/swanctl/conf.d/.backups")
 ALLOWED_DEVICE_TYPES = {"iOS", "Android", "Windows", "macOS", "Linux", "Other"}
 
 
@@ -544,7 +544,7 @@ def ntlm_hash_bytes(pw: str) -> bytes:
 
 
 def read_rw_eap_conf() -> str:
-    """Read rw-eap.conf from LXC 903. Returns empty string on failure."""
+    """Read rw-eap.conf from VPN_HOST (LXC 903 lab or VPS, via env vars). Returns empty string on failure."""
     try:
         return ssh_903(["cat", RW_EAP_CONF])
     except HTTPException:
@@ -1277,20 +1277,20 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
 
         # 2a. Read the current conf file (ssh_903 with no bash -c)
         try:
-            conf = ssh_903(["cat", "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
+            conf = ssh_903(["cat", RW_EAP_CONF])
         except HTTPException as e:
             conf = ""
             steps.append({"step": "read_conf", "ok": False, "error": str(e.detail)})
 
         # 2b. Find latest backup via `ls -1` + local sort (avoids bash -c)
         try:
-            ls_out = ssh_903(["ls", "-1", "/home/zunaid/strongswan/swanctl/conf.d/.backups/"])
+            ls_out = ssh_903(["ls", "-1", BACKUP_DIR + "/"])
             files = [f.strip() for f in ls_out.splitlines()
                      if f.strip().startswith("rw-eap.conf.bak-quotamon-")]
             if files:
                 # Filenames include unix epoch — newest is the largest number
                 files.sort()
-                backup_path = "/home/zunaid/strongswan/swanctl/conf.d/.backups/" + files[-1]
+                backup_path = BACKUP_DIR + "/" + files[-1]
         except HTTPException as e:
             steps.append({"step": "find_backup", "ok": False, "error": str(e.detail)})
 
@@ -1320,7 +1320,7 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
         # 2d. If any KILLED, restore backup + reload charon
         if secret_devices and backup_path:
             try:
-                ssh_903(["cp", backup_path, "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
+                ssh_903(["cp", backup_path, RW_EAP_CONF])
                 ssh_903([
                     "docker", "exec", "strongswan",
                     "swanctl", "--uri=tcp://127.0.0.1:4502", "--load-creds"
