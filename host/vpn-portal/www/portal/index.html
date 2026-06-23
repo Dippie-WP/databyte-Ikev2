@@ -7,42 +7,7 @@
 <meta name="referrer" content="no-referrer" />
 <meta name="robots" content="noindex, nofollow" />
 <title>databyte · Customer Portal</title>
-<style>
-  body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  .vp-portal { max-width: 480px; margin: 0 auto; padding: 24px 16px; min-height: 100vh; display: flex; flex-direction: column; justify-content: center; box-sizing: border-box; }
-  .vp-portal h1 { font-size: 1.5rem; margin: 0 0 4px; color: #58a6ff; font-weight: 600; }
-  .vp-portal .vp-subtitle { font-size: 0.85rem; color: #8b949e; margin-bottom: 24px; }
-  .vp-portal .vp-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
-  .vp-portal label { display: block; font-size: 0.85rem; margin-bottom: 6px; color: #8b949e; }
-  .vp-portal input[type=text], .vp-portal input[type=password] {
-    width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
-    border-radius: 4px; color: #e6edf3; font-size: 1rem; box-sizing: border-box;
-    margin-bottom: 16px; font-family: inherit;
-  }
-  .vp-portal input:focus { outline: 2px solid #58a6ff; outline-offset: -1px; }
-  .vp-portal button {
-    width: 100%; padding: 12px; background: #238636; color: #fff;
-    border: none; border-radius: 4px; font-size: 1rem; font-weight: 600;
-    cursor: pointer; font-family: inherit;
-  }
-  .vp-portal button:hover { background: #2ea043; }
-  .vp-portal button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
-  .vp-portal .vp-error { background: #4c1f1f; color: #ff7b72; padding: 10px 12px; border-radius: 4px; margin-bottom: 16px; font-size: 0.9rem; }
-  .vp-portal .vp-tier { font-size: 1.1rem; color: #58a6ff; margin-bottom: 12px; font-weight: 600; }
-  .vp-portal .vp-meter { background: #21262d; border-radius: 4px; height: 16px; overflow: hidden; margin-bottom: 8px; position: relative; }
-  .vp-portal .vp-meter-fill { background: #238636; height: 100%; transition: width 0.3s; }
-  .vp-portal .vp-meter-fill.vp-warn { background: #d29922; }
-  .vp-portal .vp-meter-fill.vp-over { background: #da3633; }
-  .vp-portal .vp-meter-text { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; color: #fff; font-weight: 600; mix-blend-mode: difference; }
-  .vp-portal .vp-stats { display: flex; justify-content: space-between; font-size: 0.85rem; color: #8b949e; margin-top: 8px; }
-  .vp-portal .vp-stats strong { color: #e6edf3; }
-  .vp-portal .vp-no-cap { text-align: center; padding: 12px; background: #21262d; border-radius: 4px; color: #8b949e; font-size: 0.9rem; margin-top: 12px; }
-  .vp-portal .vp-no-cap strong { color: #58a6ff; }
-  .vp-portal .vp-logout { background: transparent; color: #58a6ff; border: 1px solid #30363d; margin-top: 12px; }
-  .vp-portal .vp-logout:hover { background: #161b22; }
-  .vp-portal .vp-meta { font-size: 0.75rem; color: #6e7681; text-align: center; margin-top: 24px; }
-  .vp-portal .vp-hidden { display: none !important; }
-</style>
+<link rel="stylesheet" href="/static/portal.css?v=1.4.0" />
 </head>
 <body>
 <div class="vp-portal">
@@ -70,7 +35,7 @@
     <div class="vp-card">
       <div class="vp-tier" id="vp-tier">Loading...</div>
       <div class="vp-meter">
-        <div class="vp-meter-fill" id="vp-meter-fill" style="width: 0%"></div>
+        <div class="vp-meter-fill" id="vp-meter-fill"></div>
         <div class="vp-meter-text" id="vp-meter-text"></div>
       </div>
       <div class="vp-stats" id="vp-stats"></div>
