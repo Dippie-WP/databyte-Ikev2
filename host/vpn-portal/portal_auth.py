@@ -35,6 +35,9 @@ import subprocess
 import time
 from typing import Optional
 
+from argon2 import PasswordHasher, Type
+from argon2.exceptions import VerifyMismatchError, InvalidHashError
+
 from fastapi import Cookie, HTTPException, Request, Response
 
 
@@ -42,11 +45,66 @@ from fastapi import Cookie, HTTPException, Request, Response
 # The operator require_session dep explicitly REJECTS this cookie name.
 PORTAL_COOKIE = "portal_session"
 
+# Operator session cookie name. Distinct from portal_session for the same
+# reason (separation of concerns, defense in depth).
+OPERATOR_COOKIE = "session"
+
 # 30-day sliding expiry. After 30 days of inactivity, the customer must log in again.
 PORTAL_TTL = 30 * 24 * 3600
 
+# Operator session TTL — 8h sliding. After 8h inactivity, operator must re-auth.
+OPERATOR_TTL = 8 * 3600
+
 # Login rate limit (per IP per minute). Same as operator login.
 PORTAL_RATE_LIMIT = 5
+
+# Argon2id parameters per OWASP 2026 Password Storage Cheat Sheet:
+# - memory_cost: 19 MiB
+# - time_cost: 2 iterations
+# - parallelism: 1
+# https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+_ARGON2 = PasswordHasher(
+    time_cost=2,
+    memory_cost=19 * 1024,   # 19 MiB in KiB
+    parallelism=1,
+    hash_len=32,
+    salt_len=16,
+    type=Type.ID,
+)
+
+
+# ---------- Operator password hashing (Argon2id) ----------
+
+def hash_operator_password(password: str) -> str:
+    """Hash an operator password using Argon2id with OWASP 2026 parameters.
+
+    Returns the encoded hash string (includes salt + parameters). Safe to store
+    in DB or env file. ~70ms per hash on modern hardware.
+    """
+    return _ARGON2.hash(password)
+
+
+def verify_operator_password(stored_hash: str, submitted: str) -> bool:
+    """Constant-time verify of submitted password against stored Argon2id hash.
+
+    Returns False on any error (wrong hash, malformed stored hash, etc.) to
+    avoid leaking which failure mode occurred.
+    """
+    if not stored_hash or not submitted:
+        return False
+    try:
+        _ARGON2.verify(stored_hash, submitted)
+        return True
+    except (VerifyMismatchError, InvalidHashError, Exception):
+        return False
+
+
+def operator_password_needs_rehash(stored_hash: str) -> bool:
+    """Check if stored hash uses outdated Argon2id parameters (for future migration)."""
+    try:
+        return _ARGON2.check_needs_rehash(stored_hash)
+    except Exception:
+        return True  # Treat malformed as needs-rehash
 
 
 # ---------- Password hash helpers ----------
@@ -279,4 +337,115 @@ def require_portal_session(portal_session: Optional[str] = Cookie(None)) -> dict
     info = verify_session(portal_session)
     if not info:
         raise HTTPException(401, "Invalid or expired session")
+    return info
+
+
+# ---------- Operator sessions (DB-backed, server-side) ----------
+
+def create_operator_session(username: str, user_agent: str, ip_address: str) -> str:
+    """Create a new operator session. Returns the session_id (random URL-safe token).
+
+    Token format: secrets.token_urlsafe(32) — 256 bits of entropy. Stored as-is
+    in the operator_sessions table; the same value goes into the cookie.
+    """
+    session_id = secrets.token_urlsafe(32)
+    now = int(time.time())
+    expires = now + OPERATOR_TTL
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO operator_sessions (session_id, username, created_at, last_active, expires_at, user_agent, ip_address) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, username, now, now, expires, user_agent[:256], ip_address[:64])
+        )
+        conn.commit()
+    return session_id
+
+
+def verify_operator_session(session_id: str, slide: bool = True) -> Optional[dict]:
+    """Look up an operator session by session_id. Returns the row dict, or None.
+
+    Side effects (when slide=True): refreshes last_active + extends expires_at
+    (sliding 8h window). Sessions past expires_at are deleted and return None.
+    Revoked sessions (revoked=1) return None.
+    """
+    now = int(time.time())
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT session_id, username, created_at, last_active, expires_at, revoked "
+            "FROM operator_sessions WHERE session_id = ?",
+            (session_id,)
+        ).fetchone()
+        if not row:
+            return None
+        if row["revoked"]:
+            return None
+        if row["expires_at"] < now:
+            conn.execute("DELETE FROM operator_sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+            return None
+        if slide:
+            new_expires = now + OPERATOR_TTL
+            conn.execute(
+                "UPDATE operator_sessions SET last_active = ?, expires_at = ? WHERE session_id = ?",
+                (now, new_expires, session_id)
+            )
+            conn.commit()
+        return dict(row)
+
+
+def delete_operator_session(session_id: str) -> None:
+    """Delete an operator session (logout). Idempotent."""
+    with _db() as conn:
+        conn.execute("DELETE FROM operator_sessions WHERE session_id = ?", (session_id,))
+        conn.commit()
+
+
+def revoke_all_operator_sessions(username: Optional[str] = None) -> int:
+    """Mark sessions as revoked. If username is given, only that user's. Returns count.
+
+    Used for: "logout everywhere", suspicious activity response, after password
+    change, after role change.
+    """
+    with _db() as conn:
+        if username:
+            cur = conn.execute(
+                "UPDATE operator_sessions SET revoked = 1 WHERE username = ? AND revoked = 0",
+                (username,)
+            )
+        else:
+            cur = conn.execute("UPDATE operator_sessions SET revoked = 1 WHERE revoked = 0")
+        conn.commit()
+        return cur.rowcount
+
+
+def purge_expired_operator_sessions() -> int:
+    """Delete expired operator sessions. Returns count deleted. Call periodically."""
+    now = int(time.time())
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM operator_sessions WHERE expires_at < ?", (now,))
+        conn.commit()
+        return cur.rowcount
+
+
+# ---------- Operator session FastAPI dep ----------
+
+def require_operator_session(
+    request: Request,
+    session: Optional[str] = Cookie(None, alias=OPERATOR_COOKIE),
+    portal_session: Optional[str] = Cookie(None, alias=PORTAL_COOKIE),
+) -> dict:
+    """FastAPI dep: require a valid operator session. Returns session info dict.
+
+    Only accepts the operator session cookie. Portal session cookies are rejected
+    (defense in depth — portal_session cookie scoped to /portal/ but we double-check).
+    """
+    if portal_session and not session:
+        raise HTTPException(401, "Portal session not valid for operator endpoints")
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    info = verify_operator_session(session)
+    if not info:
+        raise HTTPException(401, "Invalid or expired session")
+    # Stash for /api/audit-style logging
+    request.state.operator_session = info
     return info

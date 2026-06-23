@@ -219,9 +219,31 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 
 ## 2026-06-23 — CP4 + CP5 audit findings (commit dcc0676, audit follow-up)
 
-### 🔴 CRITICAL — Portal unreachable from Cloudflare (open)
+### 🔴 CRITICAL — Portal unreachable from Cloudflare ✅ RESOLVED 2026-06-23 07:42 UTC (commit a64211f)
 
-**Bug:** OS firewall `iptables-legacy` INPUT chain has policy DROP and **no rules for TCP 80 or 443**. The Xneelo cloud firewall is open (verified by Zun), but the OS firewall then blocks all external traffic. The portal is currently unreachable from the internet.
+**Bug:** OS firewall `iptables-legacy` INPUT chain had policy DROP and **no rules for TCP 80 or 443**. The Xneelo cloud firewall was open (verified by Zun), but the OS firewall then blocked all external traffic. The portal was unreachable from the internet.
+
+**Resolution:** Inserted two ACCEPT rules at positions 9 + 10 (before RELATED/ESTABLISHED):
+```
+-A INPUT -p tcp -m tcp --dport 80 -m comment --comment "vpn-portal: HTTP (nginx)" -j ACCEPT
+-A INPUT -p tcp -m tcp --dport 443 -m comment --comment "vpn-portal: HTTPS (nginx)" -j ACCEPT
+```
+Persisted via `netfilter-persistent save` to `/etc/iptables/rules.v4`. Will survive reboot.
+
+**External verification (OC host 192.168.10.77 → 154.65.110.44):**
+- TCP :443 → CONNECT_OK
+- TCP :80 → CONNECT_OK
+- HTTPS /api/health → 200, all 7 security headers
+- HTTPS /certs/strongswan-ca.crt.pem → 200, SHA256 matches client fingerprint
+- Login → Set-Cookie: Secure; HttpOnly; SameSite=lax
+
+Reference rules snapshot committed at `host/firewall/rules.v4`.
+
+**Original audit entry preserved below for the historical record:**
+
+### 🔴 CRITICAL — Portal unreachable from Cloudflare (RESOLVED — see above)
+
+**Bug (original):** OS firewall `iptables-legacy` INPUT chain had policy DROP and **no rules for TCP 80 or 443**.
 
 **Evidence:**
 - `iptables-legacy -L INPUT -n` — 9 rules, none for 80/443
