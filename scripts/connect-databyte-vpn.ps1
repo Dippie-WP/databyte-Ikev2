@@ -26,6 +26,15 @@
 
 #Requires -RunAsAdministrator
 
+# Start a transcript so the output survives even if the PowerShell window
+# closes (common when piped via 'irm | iex' from a fresh PowerShell).
+# Transcript lives at $env:TEMP\databyte-vpn-setup-<timestamp>.log
+$transcriptPath = Join-Path $env:TEMP "databyte-vpn-setup-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+try {
+    Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContinue | Out-Null
+    Write-Host "(Transcript: $transcriptPath)" -ForegroundColor DarkGray
+} catch { }
+
 # ============================================================================
 # CONFIG (edit these for your environment)
 # ============================================================================
@@ -283,3 +292,13 @@ Write-Host ""
 Write-Host "To reconnect:  powershell -ExecutionPolicy Bypass -File connect-databyte-vpn.ps1"
 Write-Host "To disconnect: rasdial $ConnectionName /disconnect"
 Write-Host ""
+
+# Stop transcript + keep window open so the user can read the output.
+# Without this, a piped invocation (irm | iex) closes the window immediately.
+try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+
+Write-Host "---" -ForegroundColor DarkGray
+Write-Host "Full log: $transcriptPath" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "Press Enter to close..." -ForegroundColor Yellow
+Read-Host | Out-Null
