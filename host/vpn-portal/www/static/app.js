@@ -65,9 +65,13 @@
 
   // ─── Skeleton + empty helpers ──────────────────────────
   // Visual placeholders for loading state. `width` / `height` optional.
+  // v1.4.0 — width/height are passed via CSS custom properties (CSSOM-set, CSP-safe).
   function skel(cls, w, h) {
     const c = 'vp-skel ' + (cls || 'vp-skel-line');
-    return el('span', { cls: c, style: (w ? 'width:' + w + ';' : '') + (h ? 'height:' + h + ';' : '') }, '\u00a0');
+    const cssVars = {};
+    if (w) cssVars.skelW = w;
+    if (h) cssVars.skelH = h;
+    return el('span', { cls: c, cssVars }, '\u00a0');
   }
   function skelBlock(w, h) { return skel('vp-skel-block', w, h); }
   function skelNum(w)     { return skel('vp-skel-num', w || '70%'); }
@@ -154,15 +158,18 @@
       );
     }
     const barColor = over_quota ? 'var(--red)' : (pct >= 80 ? 'var(--amber)' : 'var(--green)');
+    const clampedPct = Math.min(100, Math.max(0, pct));
     return el('div', { cls: 'vp-usage' },
       el('div', { cls: 'vp-usage-track' },
         el('div', {
           cls: 'vp-usage-fill',
-          style: 'width: ' + Math.min(100, Math.max(0, pct)) + '%; background: ' + barColor,
+          cssVars: { pct: clampedPct + '%', 'bar-color': barColor },
         }),
       ),
-      el('div', { cls: 'vp-usage-text vp-mono', style: 'color: ' + barColor },
-        fmtBytes(used) + ' / ' + fmtBytes(limit) + ' (' + pct.toFixed(1) + '%)'),
+      el('div', {
+        cls: 'vp-usage-text vp-mono',
+        cssVars: { 'bar-color': barColor },
+      }, fmtBytes(used) + ' / ' + fmtBytes(limit) + ' (' + pct.toFixed(1) + '%)'),
     );
   }
   function fmtTime(e) {
@@ -171,12 +178,37 @@
   }
 
   // ─── DOM helpers ───────────────────────────────────────
-  // el('div', {cls, attrs}, children...)
+  // el('div', {cls, cssVars, ...attrs}, children...)
+  // v1.4.0: `style:` is REJECTED — strict CSP blocks inline style attributes.
+  //   Use either:
+  //     - a className:  el('div', { cls: 'vp-mt-20 vp-empty-err' }, 'oops')
+  //     - cssVars:      el('div', { cls: 'vp-bar-fill', cssVars: { pct: 50 } })
+  //       which calls el.style.setProperty('--pct', '50') (CSSOM API,
+  //       allowed by strict CSP per W3C CSP3 — only inline-style *attributes*
+  //       are blocked, not CSSOM custom-property sets).
+  //   Trying to pass style: throws to catch regressions early.
+  //
+  // Note on `el.style.setProperty`: it is the CSSOM API, distinct from a CSS
+  // `style` attribute. CSP `style-src` (per W3C CSP3 §6.7.3.1) only blocks
+  // inline style *attributes* and `<style>` elements; CSSOM property writes
+  // — including custom property writes — are explicitly allowed. Verified
+  // against Chrome 119+ behavior.
   function el(tag, attrs, ...children) {
     const e = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
       if (k === 'cls') e.className = v;
       else if (k === 'html') e.innerHTML = v;
+      else if (k === 'cssVars' && v) {
+        // Set CSS custom properties (CSP-safe via CSSOM)
+        for (const [prop, val] of Object.entries(v)) {
+          e.style.setProperty('--' + prop, val);
+        }
+      }
+      else if (k === 'style') {
+        // HARD REJECTION: inline style attribute violates strict CSP.
+        // Throws to fail loud in dev — silent fallback would hide a security regression.
+        throw new Error('el(): style: key forbidden by strict CSP — use cls: or cssVars: instead');
+      }
       else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
       else if (v === false || v == null) {
         // skip — null/undefined means absent; false means absent for boolean attrs
@@ -215,9 +247,10 @@
     }
     b.className = 'vp-banner vp-banner-' + kind;
     b.textContent = msg;
-    b.style.display = 'block';
+    // v1.4.0 — classList toggle replaces .style.display to keep strict CSP clean.
+    b.classList.remove('vp-hidden');
     clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(() => { b.style.display = 'none'; }, 4500);
+    bannerTimer = setTimeout(() => { b.classList.add('vp-hidden'); }, 4500);
   }
 
   // ─── Render (entry point) ───────────────────────────────
@@ -256,7 +289,7 @@
     const card = el('div', { cls: 'vp-login-card' });
     card.appendChild(el('div', { cls: 'vp-login-logo' }, 'databyte'));
     card.appendChild(el('div', { cls: 'vp-login-sub' }, 'VPN Portal · admin'));
-    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err', style: 'display:none' });
+    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err vp-hidden' });
     card.appendChild(errEl);
     const form = el('form', { onsubmit: onLoginSubmit });
     form.appendChild(el('div', { cls: 'vp-field' }, [
@@ -276,7 +309,7 @@
   async function onLoginSubmit(e) {
     e.preventDefault();
     const errEl = document.getElementById('vp-login-err');
-    errEl.style.display = 'none';
+    errEl.classList.add('vp-hidden');
     errEl.textContent = '';
     const user = document.getElementById('vp-user').value;
     const pass = document.getElementById('vp-pass').value;
@@ -287,7 +320,7 @@
       render();
     } catch(err) {
       errEl.textContent = err.message || 'Login failed';
-      errEl.style.display = 'block';
+      errEl.classList.remove('vp-hidden');
     }
   }
 
@@ -545,7 +578,7 @@
         el('div', { cls: 'vp-page-title' }, 'Dashboard'),
         el('div', { cls: 'vp-page-sub' }, 'System health, customer rollup, VPN topology.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // 4 metric cards (skeletons while loading)
       el('div', { cls: 'vp-row' },
@@ -553,8 +586,9 @@
           ? [skelMetric(), skelMetric(), skelMetric(), skelMetric()]
           : [
               mCard('Service', h.status === 'ok' ? 'OK' : (h.status || '—'), h.status === 'ok' ? 'green' : 'red'),
-              mCard('Database', h.db_ok ? 'connected' : 'DOWN', h.db_ok ? 'green' : 'red',
-                    h.db_customers != null ? h.db_customers + ' customers' : ''),
+              mCard('Database', h.db_ok ? 'connected' : 'DOWN',
+                    h.db_customers != null ? h.db_customers + ' customers' : '',
+                    h.db_ok ? 'green' : 'red'),
               mCard('charon', h.charon_ok ? 'reachable' : 'DOWN', h.charon_ok ? 'green' : 'red', 'vici @ ' + (h.vpn_host || 'gateway')),
               // On VPS (VPN_HOST=127.0.0.1) we use OS iptables + fail2ban instead of ipban.
               // Show 'OS firewall' with status from /api/health-derived info rather than ipban.
@@ -664,7 +698,7 @@
           }, '+ New client'),
         ),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // v1.2.12 — search + filter bar
       el('div', { cls: 'vp-toolbar' },
@@ -803,7 +837,7 @@
                             ),
                           );
                         })
-                      : [el('tr', {}, el('td', { colspan: 8, style: 'padding:0' },
+                      : [el('tr', {}, el('td', { colspan: 8, cls: 'vp-no-pad' },
                             emptyState('∅',
                               S.custSearch || S.custFilter !== 'all'
                                 ? 'No customers match this filter'
@@ -862,7 +896,10 @@
         mCard('Quota', noCap ? (c.is_operator ? 'no cap' : 'no quota') : fmtBytes(c.quota_bytes), noCap ? (c.is_operator ? 'bypass' : 'unset') : 'effective limit'),
       ),
       noCap ? null : el('div', { cls: 'vp-bar-wrap' },
-        el('div', { cls: 'vp-bar-fill vp-bar-' + barColor, style: 'width:' + Math.min(100, pct) + '%' }),
+        el('div', {
+          cls: 'vp-bar-fill vp-bar-' + barColor,
+          cssVars: { pct: Math.min(100, Math.max(0, pct)) + '%' },
+        }),
       ),
       el('div', { cls: 'vp-btn-row' },
         el('button', { cls: 'vp-btn vp-btn-warn', onclick: () => doReset(c.id, c.display_name || c.name) }, '↺ Reset usage'),
@@ -892,7 +929,7 @@
       ),
       // Devices (with metadata + edit)
       c.devices && c.devices.length ? [
-        el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Devices (' + c.devices.length + ')'),
+        el('div', { cls: 'vp-card-title vp-mt-20' }, 'Devices (' + c.devices.length + ')'),
         el('div', { cls: 'vp-tbl-wrap' },
           el('table', {},
             el('thead', {}, el('tr', {},
@@ -926,7 +963,7 @@
       ] : [],
       // Alerts
       c.alerts && c.alerts.length ? [
-        el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Alerts (' + c.alerts.length + ')'),
+        el('div', { cls: 'vp-card-title vp-mt-20' }, 'Alerts (' + c.alerts.length + ')'),
         el('div', { cls: 'vp-tbl-wrap' },
           el('table', {},
             el('thead', {}, el('tr', {},
@@ -981,7 +1018,7 @@
           el('textarea', { id: 'dev-notes', rows: '2', placeholder: 'admin notes' },
             d.notes || ''),
         ),
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:14px' },
+        el('div', { cls: 'vp-btn-row vp-mt-14' },
           el('button', { cls: 'vp-btn', onclick: closeModal }, 'Cancel'),
           el('button', {
             cls: 'vp-btn vp-btn-primary',
@@ -1073,12 +1110,12 @@
 
   function renderAuditLog(entries) {
     if (!entries.length) {
-      return el('div', { cls: 'vp-muted', style: 'margin-top:20px; font-size:12px' }, 'No audit log entries.');
+      return el('div', { cls: 'vp-muted vp-mt-20 vp-fs-12' }, 'No audit log entries.');
     }
     // Show newest first
     const sorted = entries.slice().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
     return el('div', {},
-      el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Audit log (' + entries.length + ')'),
+      el('div', { cls: 'vp-card-title vp-mt-20' }, 'Audit log (' + entries.length + ')'),
       el('div', { cls: 'vp-tbl-wrap' },
         el('table', {},
           el('thead', {}, el('tr', {},
@@ -1094,7 +1131,7 @@
                 el('td', { cls: 'vp-mono', 'data-label': 'When' }, fmtTime(e.created_at)),
                 el('td', { cls: 'vp-mono', 'data-label': 'Actor' }, e.actor || '—'),
                 el('td', { 'data-label': 'Action' }, spanBadge(e.action, parsed.kind)),
-                el('td', { 'data-label': 'Detail', style: 'font-size:12px' }, parsed.icon + ' ' + parsed.detail),
+                el('td', { 'data-label': 'Detail', cls: 'vp-fs-12' }, parsed.icon + ' ' + parsed.detail),
               );
             })
           ),
@@ -1133,7 +1170,7 @@
         el('div', { cls: 'vp-page-title' }, 'Tiers'),
         el('div', { cls: 'vp-page-sub' }, 'Quota tiers. Schema changes go through the admin layer.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       loading
         ? el('div', { cls: 'vp-row' }, [skelBlock('90%', '120px'), skelBlock('90%', '120px'), skelBlock('90%', '120px'), skelBlock('90%', '120px')])
@@ -1171,7 +1208,7 @@
             ? 'Auto-refreshing every 10s while a client is connected.'
             : 'Active IKE SAs and virtual-IP pool state.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' }, 'Pools'),
@@ -1223,8 +1260,8 @@
                             lease.customer_name
                               ? el('a', {
                                   href: '#',
+                                  cls: 'vp-link-cyan',
                                   onclick: (e) => { e.preventDefault(); switchPage('customers'); setTimeout(() => selectCustomer(lease.customer_id), 100); },
-                                  style: 'color: var(--cyan); text-decoration: none',
                                 }, lease.customer_name)
                               : el('span', { cls: 'dim' }, '—')),
                           el('td', { cls: 'vp-mono', 'data-label': 'Device' }, lease.device_name || '—'),
@@ -1269,7 +1306,7 @@
         el('div', { cls: 'vp-page-title' }, 'Security'),
         el('div', { cls: 'vp-page-sub' }, 'ipBan bans, firewalld trusted zone, deadman status.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // ipBan status
       el('div', { cls: 'vp-card' },
@@ -1281,7 +1318,7 @@
               mCard('Active bans', dm.active_bans != null ? dm.active_bans : '—', '', dm.active_bans > 0 ? 'amber' : 'green'),
             ),
         !loading && dm.log_tail ? [
-          el('div', { cls: 'vp-card-title', style: 'margin-top:14px' }, 'Recent log (last 8 lines)'),
+          el('div', { cls: 'vp-card-title vp-mt-14' }, 'Recent log (last 8 lines)'),
           el('pre', { cls: 'vp-raw' }, dm.log_tail.split('\n').slice(-8).join('\n')),
         ] : [],
       ),
@@ -1300,7 +1337,7 @@
                   ),
                 )
               : emptyState('∅', 'Whitelist is empty', 'Add a CIDR below to trust an entire subnet.')),
-        el('div', { cls: 'vp-card-title', style: 'margin-top:14px' }, 'Add CIDR'),
+        el('div', { cls: 'vp-card-title vp-mt-14' }, 'Add CIDR'),
         el('form', { cls: 'vp-inline-form', onsubmit: onAddWhitelist },
           el('input', { id: 'vp-cidr', cls: 'vp-inp vp-inp-mono', placeholder: '192.168.1.0/24', required: true }),
           el('button', { cls: 'vp-btn vp-btn-primary', type: 'submit' }, '+ Add'),
@@ -1363,9 +1400,12 @@
   }
 
   // ─── Shared UI components ──────────────────────────────
+  // v1.4.0 — `color` is a CSS variable name (e.g. 'green', 'red', 'amber') or null.
+  //   Set via CSS custom property `metric-color: var(--<name>)` (CSSOM-set, CSP-safe).
   function mCard(label, value, sub, color) {
+    const cssVars = color ? { 'metric-color': 'var(--' + color + ')' } : null;
     return el('div', { cls: 'vp-card vp-card-sm' },
-      el('div', { cls: 'vp-metric', style: color ? 'color:var(--' + color + ')' : '' }, value),
+      el('div', { cls: 'vp-metric', cssVars }, value),
       el('div', { cls: 'vp-metric-label' }, label),
       sub ? el('div', { cls: 'vp-metric-sub' }, sub) : [],
     );
@@ -1770,7 +1810,7 @@
             el('label', { cls: 'vp-label' }, 'Tier'),
             el('select', { id: 'vp-nc-tier', cls: 'vp-inp', required: true }, tierOptions),
           ),
-          el('div', { cls: 'vp-field', id: 'vp-nc-custom-wrap', style: 'display:none' },
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-custom-wrap' },
             el('label', { cls: 'vp-label' }, 'Custom cap (MiB)'),
             el('input', { id: 'vp-nc-custom-mb', cls: 'vp-inp', type: 'number',
                            min: 1, max: 1048576, placeholder: 'e.g. 1500 for 1.5 GB' }),
@@ -1786,7 +1826,7 @@
                            value: 'laptop' }),
             el('div', { cls: 'vp-hint', id: 'vp-nc-device-hint' },
               'Friendly name. EAP identity will be \u201c{customer-name}-{device-name}\u201d.'),
-            el('div', { cls: 'vp-field-warn', id: 'vp-nc-device-warn', style: 'display:none' }),
+            el('div', { cls: 'vp-field-warn vp-hidden', id: 'vp-nc-device-warn' }),
           ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device type'),
@@ -1806,9 +1846,9 @@
           ),
         ),
         // Live custom-cap preview
-        el('div', { id: 'vp-nc-custom-preview', cls: 'vp-custom-preview', style: 'display:none' }),
-        el('div', { id: 'vp-nc-form-err', cls: 'vp-form-err', style: 'display:none' }),
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:18px; justify-content: flex-end' },
+        el('div', { id: 'vp-nc-custom-preview', cls: 'vp-custom-preview vp-hidden' }),
+        el('div', { id: 'vp-nc-form-err', cls: 'vp-form-err vp-hidden' }),
+        el('div', { cls: 'vp-btn-row vp-mt-18 vp-justify-end' },
           el('button', { type: 'button', cls: 'vp-btn vp-btn-ghost', onclick: closeModal }, 'Cancel'),
           el('button', { type: 'submit', cls: 'vp-btn vp-btn-primary', id: 'vp-nc-submit' }, 'Create client'),
         ),
@@ -1822,21 +1862,21 @@
     const preview  = body.querySelector('#vp-nc-custom-preview');
     function refresh() {
       const isCustom = tierSel.value === 'custom';
-      customWrap.style.display = isCustom ? '' : 'none';
+      customWrap.classList.toggle('vp-hidden', !isCustom);
       if (isCustom) {
         const mb = parseInt(customMb.value || '0', 10);
         if (mb > 0) {
           const bytes = mb * 1048576;
-          preview.style.display = '';
+          preview.classList.remove('vp-hidden');
           preview.innerHTML = '';
           preview.appendChild(el('strong', {}, '→ New tier: '));
           preview.appendChild(document.createTextNode(
             `custom_${mb}mb_<ts> · ${fmtBytes(bytes)} (${mb} MiB)`));
         } else {
-          preview.style.display = 'none';
+          preview.classList.add('vp-hidden');
         }
       } else {
-        preview.style.display = 'none';
+        preview.classList.add('vp-hidden');
       }
     }
     tierSel.addEventListener('change', refresh);
@@ -1865,11 +1905,11 @@
       }
       if (msg) {
         devWarn.textContent = '\u26a0  ' + msg;
-        devWarn.style.display = '';
+        devWarn.classList.remove('vp-hidden');
         devInp.classList.add('vp-inp-bad');
         if (submitBtn) submitBtn.disabled = true;
       } else {
-        devWarn.style.display = 'none';
+        devWarn.classList.add('vp-hidden');
         devWarn.textContent = '';
         devInp.classList.remove('vp-inp-bad');
         if (submitBtn) submitBtn.disabled = false;
@@ -1893,7 +1933,7 @@
   async function onNewClientSubmit(ev) {
     ev.preventDefault();
     const errEl = document.getElementById('vp-nc-form-err');
-    errEl.style.display = 'none';
+    errEl.classList.add('vp-hidden');
     errEl.textContent = '';
     const submitBtn = document.getElementById('vp-nc-submit');
     submitBtn.disabled = true;
@@ -1921,7 +1961,7 @@
       renderOneshotPanel(r);
     } catch (e) {
       errEl.textContent = e.message || String(e);
-      errEl.style.display = '';
+      errEl.classList.remove('vp-hidden');
       submitBtn.disabled = false;
       submitBtn.textContent = 'Create client';
     }
@@ -2068,7 +2108,7 @@
         // fallback on desktop. Text content built below.
         renderShareControls({ c, d, eapId, pw, server, remoteId }),
         // Footer
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:20px; justify-content: flex-end' },
+        el('div', { cls: 'vp-btn-row vp-mt-20 vp-justify-end' },
           el('button', { type: 'button', cls: 'vp-btn vp-btn-primary', onclick: closeModal }, 'Done'),
         ),
       ),
@@ -2108,8 +2148,7 @@
       && navigator.canShare({ text });
 
     const btnRow = el('div', {
-      cls: 'vp-btn-row',
-      style: 'margin-top:18px; gap:8px; flex-wrap:wrap;',
+      cls: 'vp-btn-row vp-mt-18 vp-gap-8',
     });
 
     if (canShare) {
@@ -2144,8 +2183,10 @@
           showBanner('Copied full config to clipboard', 'ok');
         } catch (_) {
           // Last-resort fallback for very old browsers without Clipboard API
+          // v1.4.0 — use .vp-offscreen class instead of inline style (strict CSP).
           const ta = document.createElement('textarea');
-          ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          ta.value = text;
+          ta.className = 'vp-offscreen';
           document.body.appendChild(ta); ta.select();
           try { document.execCommand('copy'); showBanner('Copied full config to clipboard', 'ok'); }
           catch (_) { showBanner('Copy failed \u2014 select text manually', 'err'); }

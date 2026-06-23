@@ -216,13 +216,49 @@ body {
 .vp-row      { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .vp-row-2    { display: grid; grid-template-columns: 380px 1fr; gap: 18px; align-items: start; }
 .vp-left-col, .vp-right-col { min-width: 0; }
-.vp-metric   { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 500; line-height: 1.1; }
+.vp-metric   { font-family: ui-monospace, monospace; font-size: 26px; font-weight: 500; line-height: 1.1; color: var(--metric-color, var(--vp-text)); }
 .vp-metric-label { font-size: 12px; color: var(--vp-text2); margin-top: 3px; }
 .vp-metric-sub   { font-size: 11px; color: var(--vp-text3); margin-top: 2px; }
 .vp-big-num  { font-family: ui-monospace, monospace; font-size: 30px; font-weight: 500; color: var(--cyan); margin: 6px 0 4px; }
 .vp-note     { font-size: 12px; color: var(--vp-text2); margin-top: 10px; }
 .vp-muted    { color: var(--vp-text3); font-size: 13px; }
 .vp-mono     { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
+
+/* ─── v1.4.0 — strict-CSP utility classes ────────────────
+   Inline style attributes (`el(..., {style: '...'})` or
+   `el.style.x = '...'`) violate strict `style-src 'self'` CSP.
+   These classes replace every prior inline-style use case.
+   For dynamic values (bar width, dynamic color), CSS custom
+   properties are set via the CSSOM API `el.style.setProperty()`
+   which is NOT blocked by strict CSP per W3C CSP3. */
+.vp-hidden   { display: none !important; }
+.vp-mt-14    { margin-top: 14px; }
+.vp-mt-18    { margin-top: 18px; }
+.vp-mt-20    { margin-top: 20px; }
+.vp-mt-12    { margin-top: 12px; }
+.vp-justify-end { justify-content: flex-end; }
+.vp-gap-8    { gap: 8px; }
+.vp-fs-12    { font-size: 12px; }
+.vp-no-pad   { padding: 0; }
+.vp-link-cyan { color: var(--cyan); text-decoration: none; }
+.vp-link-cyan:hover { text-decoration: underline; }
+
+/* v1.4.0 — red error box (replaces inline `style='border-color:var(--red); color:var(--red)'` on .vp-empty) */
+.vp-empty.vp-empty-err {
+  border-color: var(--red);
+  color: var(--red);
+  margin-bottom: 14px;
+}
+
+/* v1.4.0 — offscreen textarea (clipboard fallback). Used to be inline
+   `ta.style.position = 'fixed'; ta.style.opacity = '0'` which violates strict CSP. */
+.vp-offscreen {
+  position: fixed;
+  top: 0; left: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: -1;
+}
 
 /* ─── Badges ──────────────────────────────────────────── */
 .vp-badge {
@@ -236,8 +272,10 @@ body {
 .vp-badge-dim    { background: var(--vp-s2);      color: var(--vp-text2); }
 
 /* ─── Progress bar ────────────────────────────────────── */
+/* v1.4.0 — width is set via `--pct` CSS custom property (CSP-safe via CSSOM).
+   Element gets `style="--pct: 50"` (set by `el.style.setProperty('--pct', 50)` in JS). */
 .vp-bar-wrap   { background: var(--vp-s2); border-radius: 4px; height: 6px; overflow: hidden; margin: 10px 0 14px; }
-.vp-bar-fill   { height: 100%; border-radius: 4px; transition: width .4s; }
+.vp-bar-fill   { height: 100%; border-radius: 4px; width: var(--pct, 0%); transition: width .4s; }
 .vp-bar-green   { background: var(--green); }
 .vp-bar-amber   { background: var(--amber); }
 .vp-bar-red     { background: var(--red); }
@@ -331,8 +369,12 @@ tr:last-child td { border-bottom: none; }
   border-radius: 4px;
   color: transparent;
   user-select: none;
+  /* v1.4.0 — dynamic width/height via CSS custom properties (set via CSSOM, CSP-safe).
+     JS calls skel(cls, w, h) → el.style.setProperty('--skelW', w) / '--skelH', h. */
+  width: var(--skelW, 100%);
+  height: var(--skelH, 12px);
 }
-.vp-skel-line   { height: 12px; width: 100%; }
+.vp-skel-line   { /* defaults already set above */ }
 .vp-skel-line-sm { height: 10px; width: 60%; }
 .vp-skel-num    { height: 28px; width: 70%; border-radius: 6px; }
 .vp-skel-block  { height: 80px; width: 100%; border-radius: 8px; }
@@ -385,11 +427,15 @@ tr:last-child td { border-bottom: none; }
   height: 6px; width: 100%; background: var(--vp-s2);
   border-radius: 3px; overflow: hidden;
 }
+/* v1.4.0 — same CSS-custom-property pattern as vp-bar-fill above.
+   Width via `--pct`, color via `--bar-color` (both CSSOM-set, CSP-safe). */
 .vp-usage-fill {
   height: 100%; border-radius: 3px;
+  width: var(--pct, 0%);
+  background: var(--bar-color, var(--green));
   transition: width 0.4s ease-out;
 }
-.vp-usage-text { font-size: 11px; color: var(--vp-text2); white-space: nowrap; }
+.vp-usage-text { font-size: 11px; color: var(--bar-color, var(--vp-text2)); white-space: nowrap; }
 /* v1.2.7.3 — 'no cap' / 'no quota' tag next to operator usage number */
 .vp-usage-tag {
   display: inline-block;
