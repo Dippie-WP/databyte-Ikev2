@@ -71,11 +71,11 @@ Remove-Item $xmlPath -Force
 # Set IKEv2 crypto to match the server
 Set-VpnConnectionIPsecConfiguration -ConnectionName $ConnectionName `
   -AuthenticationTransformConstants "SHA256128" `
-  -CipherTransformConstants "AES256" `
+  -CipherTransformConstants "AES128" `
   -DHGroup "Group14" `
-  -EncryptionMethod "AES256" `
+  -EncryptionMethod "AES128" `
   -IntegrityCheckMethod "SHA256" `
-  -PfsGroup "ECP384" -Force
+  -PfsGroup "PFS2048" -Force
 
 # Enable strong DH (Group14+) registry tweak
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
