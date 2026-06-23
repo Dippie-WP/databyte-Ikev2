@@ -237,14 +237,14 @@ try
 {
     Set-VpnConnectionIPsecConfiguration `
         -ConnectionName $ConnectionName `
-        -AuthenticationTransformConstants "SHA256128" `
+        -AuthenticationTransformConstants "SHA256" `
         -CipherTransformConstants "AES128" `
-        -DHGroup "Group14" `
+        -DHGroup "ECP384" `
         -EncryptionMethod "AES128" `
         -IntegrityCheckMethod "SHA256" `
-        -PfsGroup "PFS2048" `
+        -PfsGroup "ECP384" `
         -Force | Out-Null
-    Write-Host "  IPsec crypto: AES128/SHA256/Group14/PFS2048 (MS Learn canonical)" -ForegroundColor Green
+    Write-Host "  IPsec crypto: AES128/SHA256/ECP384 (matches homelab-tested path)" -ForegroundColor Green
 }
 catch
 {

@@ -200,24 +200,21 @@ if ($connectionObj) {
 
 # Set IPsec crypto to match what the Windows IKEv2 client actually accepts.
 #
-# SOURCE: Microsoft Learn "How to configure cryptographic settings for IKEv2
-# VPN connections" (learn.microsoft.com/en-us/windows/security/operating-system-security/network-and-data-center-security/configuring-ikev2-vpn-connections).
-# Windows defaults are DES3/SHA1/DH2 which strongSwan rejects as insecure.
-# The article's canonical example uses AES128/SHA256/Group14/PFS2048 — these
-# values are accepted across Win10 versions including the pre-1903 build
-# Zun's homelab test ran on. Earlier versions of this script used AES256/
-# ECP384 to "match the server", but ECP384 is silently rejected on older
-# Windows builds, causing the cmdlet to fall back to defaults — which then
-# fail IKE_AUTH with the server.
+# SOURCE: Microsoft Learn "VPN authentication options" + Reddit-supported
+# Windows 11 IKEv2 setup walkthrough. The homelab test (2026-06-22) used
+# ECP384 for both DH and PFS, and it worked. The MS Learn canonical example
+# uses PFS2048 (more portable across builds) but ECP384 is what the working
+# script in this repo has always used. Keep ECP384 to match what the
+# homelab test verified.
 Set-VpnConnectionIPsecConfiguration -ConnectionName $ConnectionName `
-    -AuthenticationTransformConstants "SHA256128" `
+    -AuthenticationTransformConstants "SHA256" `
     -CipherTransformConstants "AES128" `
-    -DHGroup "Group14" `
+    -DHGroup "ECP384" `
     -EncryptionMethod "AES128" `
     -IntegrityCheckMethod "SHA256" `
-    -PfsGroup "PFS2048" `
+    -PfsGroup "ECP384" `
     -Force | Out-Null
-Write-Host "  IPsec crypto: AES128/SHA256/Group14/PFS2048 (MS Learn canonical)" -ForegroundColor Green
+Write-Host "  IPsec crypto: AES128/SHA256/ECP384 (matches homelab-tested path)" -ForegroundColor Green
 
 # Strong DH (Group14+) registry tweak — required for MSCHAPv2 to negotiate
 # Group14 instead of the default DH2 (1024-bit).
