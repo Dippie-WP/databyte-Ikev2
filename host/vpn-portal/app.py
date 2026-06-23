@@ -1417,7 +1417,10 @@ def deadman(_: dict = Depends(require_session)):
                              "SELECT COUNT(*) FROM IPAddresses WHERE State > 0;"]).strip()
         active_bans = int(count_out) if count_out.isdigit() else 0
     except HTTPException:
-        active_bans = -1
+        # SSH failed — could be ipBan not installed (e.g. VPS uses OS firewall + fail2ban
+        # instead of ipban). Return 0 instead of -1 so the dashboard shows a clean count,
+        # not a misleading negative. The `service` field will carry the actual error.
+        active_bans = 0
     return {"service": svc, "active_bans": active_bans, "log_tail": log_tail}
 
 
