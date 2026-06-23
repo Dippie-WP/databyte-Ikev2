@@ -42,7 +42,7 @@ $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
 # CA cert pinned SHA256 fingerprint (the cert we EXPECT to receive).
 # This is the strongSwan CA from /opt/strongswan-vpn-gateway/docker/swanctl/x509ca/
-# on the production VPN server. Defence against MITM — if the fetched cert
+# on the production VPN server. Defence against MITM  -  if the fetched cert
 # doesn't match this fingerprint, we refuse to install it.
 $ExpectedCaSha256 = "5C:10:B9:6A:97:06:10:29:7C:8D:8F:B3:6B:E3:5A:98:58:CF:F4:10:C8:1E:72:78:7E:25:08:43:B2:71:CE:06"
 
@@ -118,7 +118,7 @@ if ($installed) {
 }
 
 if ($needsInstall) {
-    # Try live fetch first (preferred — freshest, comes from production server).
+    # Try live fetch first (preferred  -  freshest, comes from production server).
     Write-Host "  Fetching CA cert from $CaCertUrl ..."
 
     # Some Windows systems may not have $env:TEMP set in non-interactive contexts.
@@ -249,7 +249,7 @@ try
 catch
 {
     Write-Warning "Set-VpnConnectionIPsecConfiguration failed: $_"
-    Write-Warning "The connection will use Windows defaults (DES3/SHA1/DH2 — strongSwan will reject as insecure)."
+    Write-Warning "The connection will use Windows defaults (DES3/SHA1/DH2  -  strongSwan will reject as insecure)."
 }
 
 # Also set the registry key that enables strong DH (Group14+) for EAP-MSCHAPv2.

@@ -7,7 +7,7 @@
     options" canonical walkthrough.
 
 .DESCRIPTION
-    This is the SIMPLIFIED version — no <EapHostConfig> XML, no
+    This is the SIMPLIFIED version  -  no <EapHostConfig> XML, no
     -ConfigurationFile, no -EapConfigXmlStream. Just two cmdlets:
     Add-VpnConnection + Set-VpnConnectionIPsecConfiguration, with
     -EncryptionLevel "Required" to force strong crypto (the actual
@@ -44,7 +44,7 @@
 # ============================================================================
 # CONFIG (test-win-5g customer)
 # ============================================================================
-$ServerAddress   = "154.65.110.44"   # raw IP — Cloudflare proxy doesn't carry UDP
+$ServerAddress   = "154.65.110.44"   # raw IP  -  Cloudflare proxy doesn't carry UDP
 $ConnectionName  = "DatabyteVPNTest"
 $Username        = "test-win-5g-laptop"
 $Password        = "a1V5M2Cd1oE0TNWY9wORsg"
