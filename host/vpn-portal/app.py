@@ -6,8 +6,8 @@ Single-file app. Reads SQLite from LXC 903 via SSH. Wraps swanctl/ipBan/firewall
 
 Endpoints:
   GET  /api/health                     public — service + DB + charon reach
-  POST /api/login                      admin auth (bcrypt + HMAC-signed cookie)
-  POST /api/logout
+  POST /api/login                      admin auth (Argon2id + DB session cookie)
+  POST /api/logout                     deletes DB session + clears cookie
   GET  /api/customers                  list w/ tier, used, quota, over_quota, vip
   GET  /api/customers/{id}             + devices[] + alerts[]
   GET  /api/tiers                      tier defs (5GB/10GB/20GB/demo_100MB) — Tier 1/2/3 at $3/$5/$8 USD
@@ -26,12 +26,13 @@ Endpoints:
   GET  /api/security/deadman           ipban-ctl deadman status (raw)
 
 Config via env:
-  VPN_HOST       LXC 903 IP/host (default 192.168.10.98)
+  VPN_HOST       VPN gateway IP/host (default 192.168.10.98). On VPS, set to 127.0.0.1
   SSH_KEY        path to SSH private key (default /root/.ssh/id_ed25519_vpn)
-  DB_PATH        SQLite on 903 (default /var/lib/strongswan/ipsec.db)
+  DB_PATH        SQLite on the gateway (default /var/lib/strongswan/ipsec.db)
   ADMIN_USER     admin username (default admin)
-  ADMIN_PASS_HASH  bcrypt hash of admin password (REQUIRED)
-  SESSION_SECRET  HMAC secret (random default; set explicitly for multi-instance)
+  ADMIN_PASS_HASH  Argon2id hash of admin password (REQUIRED). Generate with:
+                    python -c "import portal_auth; print(portal_auth.hash_operator_password('YOURPASS'))"
+  COOKIE_SECURE   "true" / "1" to set Secure flag on cookies (REQUIRED when behind HTTPS)
 """
 import os
 import sys
@@ -46,9 +47,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
-import portal_auth  # v1.3.0 customer portal auth
+import portal_auth  # v1.3.0 customer portal auth + v1.3.1 operator sessions
 
-import bcrypt
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -60,8 +60,6 @@ SSH_KEY         = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
 DB_PATH         = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
 ADMIN_USER      = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS_HASH = os.environ.get("ADMIN_PASS_HASH", "")
-SESSION_SECRET  = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
-SESSION_TTL     = int(os.environ.get("SESSION_TTL", "86400"))   # 24h
 RATE_LIMIT_PER_MIN = 5
 SSH_TIMEOUT     = 10
 
@@ -100,44 +98,18 @@ def rate_limit(ip: str):
     _login_attempts[ip] = attempts + [now]
 
 
-# ---------- Session signing (HMAC, no external dep) ----------
-def sign_session(data: dict) -> str:
-    payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
-    sig = hmac.new(SESSION_SECRET.encode(), payload, hashlib.sha256).hexdigest()
-    return f"{payload.hex()}.{sig}"
+# ---------- Session: server-side (DB-backed) ----------
+#
+# v1.3.1 — replaced the HMAC-signed-JSON cookie pattern with an opaque random
+# token + DB lookup (operator_sessions table). Trade-off: we can now revoke
+# (logout-everywhere, ban stolen cookie). Cookie value is `secrets.token_urlsafe(32)`
+# — 256 bits of entropy, not user data.
+#
+# The require_session dep delegates to portal_auth.require_operator_session
+# which does the cookie name + DB lookup + sliding expiry dance. We keep the
+# name `require_session` so we don't have to touch every route signature.
 
-
-def verify_session(token: str) -> Optional[dict]:
-    try:
-        payload_hex, sig = token.split(".", 1)
-        payload = bytes.fromhex(payload_hex)
-        expected = hmac.new(SESSION_SECRET.encode(), payload, hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            return None
-        data = json.loads(payload)
-        if time.time() - data.get("iat", 0) > SESSION_TTL:
-            return None
-        return data
-    except Exception:
-        return None
-
-
-def require_session(
-    session: Optional[str] = Cookie(None),
-    portal_session: Optional[str] = Cookie(None, alias="portal_session"),
-) -> dict:
-    # v1.3.0 — defense in depth: if a portal_session cookie is being sent to
-    # an operator endpoint, that's wrong. Reject it. The portal cookie should
-    # be scoped to Path=/portal/ and the browser should not send it here, but
-    # we double-check at the app layer too.
-    if portal_session and not session:
-        raise HTTPException(401, "Portal session not valid for operator endpoints")
-    if not session:
-        raise HTTPException(401, "Not authenticated")
-    data = verify_session(session)
-    if not data:
-        raise HTTPException(401, "Invalid or expired session")
-    return data
+require_session = portal_auth.require_operator_session
 
 
 # ---------- SSH + DB helpers ----------
@@ -640,30 +612,52 @@ def health():
 
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request, response: Response):
-    ip = request.client.host
+    # Unix socket requests have no client info (request.client is None).
+    # Behind nginx, prefer X-Forwarded-For from trusted proxy.
+    ip = (
+        (request.headers.get("x-forwarded-for", "").split(",")[0].strip() if request.headers.get("x-forwarded-for") else None)
+        or (request.client.host if request.client else None)
+        or "127.0.0.1"
+    )
     rate_limit(ip)
     if not ADMIN_PASS_HASH:
         log.error("ADMIN_PASS_HASH not set — refusing login")
         raise HTTPException(503, "Server not configured")
+    # Constant-time username compare — avoid username enumeration
     if not hmac.compare_digest(req.username.encode(), ADMIN_USER.encode()):
-        # Constant-time compare to avoid username enumeration (length-bake aside)
+        # Spend comparable time on the wrong-username path so attackers can't
+        # tell apart "user doesn't exist" from "wrong password" via timing.
+        # Argon2id verify on a dummy hash burns ~70ms.
+        portal_auth.verify_operator_password(
+            "$argon2id$v=19$m=19456,t=2,p=1$YWFhYWFhYWFhYWFhYWFhYQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG",
+            req.password or "x",
+        )
         raise HTTPException(401, "Invalid credentials")
-    pw_bytes = req.password.encode()
-    pw_match = bcrypt.checkpw(pw_bytes, ADMIN_PASS_HASH.encode())
-    log.info("login debug user=%s pw_repr=%s pw_len=%d hash_repr=%s pw_match=%s",
-             req.username, repr(pw_bytes[:30]), len(pw_bytes),
-             repr(ADMIN_PASS_HASH[:30]), pw_match)
+    pw_match = portal_auth.verify_operator_password(ADMIN_PASS_HASH, req.password)
     if not pw_match:
         raise HTTPException(401, "Invalid credentials")
-    token = sign_session({"u": req.username, "iat": time.time()})
-    response.set_cookie(key="session", value=token, httponly=True, samesite="lax",
-                        max_age=SESSION_TTL, path="/")
-    log.info("login ok user=%s ip=%s", req.username, ip)
+    ua = request.headers.get("user-agent", "")
+    session_id = portal_auth.create_operator_session(req.username, ua, ip)
+    secure_cookie = os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+    response.set_cookie(
+        key="session",
+        value=session_id,
+        httponly=True,
+        samesite="lax",
+        secure=secure_cookie,  # only True when behind HTTPS
+        max_age=portal_auth.OPERATOR_TTL,
+        path="/",
+    )
+    log.info("login ok user=%s ip=%s session_id_prefix=%s",
+             req.username, ip, session_id[:8])
     return {"ok": True, "user": req.username}
 
 
 @app.post("/api/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response):
+    session_id = request.cookies.get("session")
+    if session_id:
+        portal_auth.delete_operator_session(session_id)
     response.delete_cookie("session", path="/")
     return {"ok": True}
 
