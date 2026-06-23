@@ -3,6 +3,21 @@ $ConnectionName = "DatabyteVPN"
 $Username = "zun-operator"
 $Password = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
+# Step 0 - Make sure the strongSwan CA cert is installed (fetches from live URL
+# with SHA256 fingerprint pinning, falls back to bundled cert).
+$setupScript = Join-Path $PSScriptRoot "setup-windows-vpn.ps1"
+if (Test-Path $setupScript) {
+    Write-Host "Running setup-windows-vpn.ps1 (steps 1-3) before connecting..." -ForegroundColor Cyan
+    & $setupScript -ErrorAction Continue
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Setup failed with exit code $LASTEXITCODE. Aborting connect." -ForegroundColor Red
+        exit $LASTEXITCODE
+    }
+} else {
+    Write-Host "WARN: setup-windows-vpn.ps1 not found at $setupScript" -ForegroundColor Yellow
+    Write-Host "      CA cert may not be installed. Run it manually first." -ForegroundColor Yellow
+}
+
 # Tear down old connection if it exists
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
