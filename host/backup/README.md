@@ -1,106 +1,168 @@
-# backup — VPN Portal Config + DB Backup to RustFS
+# backup-workspace — Daily OpenClaw Workspace Backup to RustFS
 
-Disaster-recovery backup of VPN portal secrets + DB to the LAN-attached
+Disaster-recovery backup of `~/.openclaw/workspace` to the LAN-attached
 RustFS (S3-compatible) bucket.
+
+## Why this exists
+
+OpenClaw holds my long-term state (MEMORY.md, TOOLS.md, HEARTBEAT.md, daily
+memory files, runbooks, project files, skills). Losing the workspace means
+losing months of accumulated context. This is the same pattern as the
+VPN portal backup, applied to the OpenClaw host itself.
 
 ## What's backed up
 
-| File | Source | Notes |
+**Total: ~672 files, ~47 MB** (compressed at S3 level by RustFS).
+
+| Category | Count | Notes |
 |---|---|---|
-| `vpn-portal.env` | `vpn-prod-01:/etc/vpn-portal.env` | Argon2id hashes, DB path, COOKIE_SECURE |
-| `databyte.co.za.crt` | `vpn-prod-01:/etc/ssl/cloudflare/databyte.co.za.crt` | Cloudflare Origin CA cert |
-| `databyte.co.za.key` | `vpn-prod-01:/etc/ssl/cloudflare/databyte.co.za.key` | Cloudflare Origin CA key (private!) |
-| `ipsec.db` | `vpn-prod-01:/var/lib/strongswan/ipsec.db` | SQLite — customers, devices, sessions, audit_log |
+| Top-level state | 30+ | MEMORY.md, TOOLS.md, SOUL.md, AGENTS.md, IDENTITY.md, USER.md, HEARTBEAT.md, DECISIONS.md, etc. |
+| Daily memory | 100+ | `memory/YYYY-MM-DD.md` |
+| Project files | varies | `projects/`, `docs/`, `runbooks/`, `scripts/` |
+| Skills | 50+ | `skills/*.skill` |
+| References | 7 | PDF + markdown research material |
+| Dashboards | varies | Grafana dashboard JSON |
 
-**Total size:** ~330 KB. Negligible.
+## What's NOT backed up (and why)
 
-## Where it goes
+### Sensitive (NEVER backup)
+
+| Pattern | Reason |
+|---|---|
+| `credentials/` | Telegram bot tokens |
+| `.demo_vpn_creds` | VPN PSK for the lab |
+| `*.mobileconfig` | VPN profiles (contain PSK / password) |
+| `*.pfx`, `*.p12` | Private key bundles |
+| `.env` | Secret env files |
+| `**/id_rsa*`, `**/id_ed25519*` | SSH private keys (defensive) |
+| `memory/.dreams/` | Old migrated agent memory; contains bot tokens |
+| Any file containing `[0-9]{8,}:[A-Za-z0-9_-]{30,}` regex match | Catches Telegram bot tokens wherever they appear |
+
+### Regenerable (not source-of-truth)
+
+| Pattern | Why |
+|---|---|
+| `.git/` | Version control, regenerable from remote |
+| `**/__pycache__/` | Python bytecode |
+| `**/node_modules/` | Node modules |
+| `**/dist/` | Build artifacts |
+| `mempalace_env/` (365 MB) | Python venv, regenerable with `pip install -r requirements.txt` |
+| `reports/pdf-tool/` (54 MB) | Old PDF binaries |
+| `reports/weather-beacon-versions/` (187 MB) | Old versioned binaries |
+| `ops-tracker/node_modules/`, `ops-tracker-react/{node_modules,dist}/` | Build deps |
+| `*.log`, `*.log.*` | Regen from running services |
+
+### Cruft
+
+| Pattern | Notes |
+|---|---|
+| `tmp.bak-*`, `http.bak-*` | Old backup attempts |
+| `app.py.bak-v13pre` | Old backup of portal app |
+| `zitadel-compose.bak-*` | Abandoned Zitadel experiment |
+| Files with control chars in name | Workspace-root corruption remnants (`,\n    f`, etc.) |
+
+## How it works
 
 ```
-rustfs:open-claw-push/vpn-portal-config/<YYYY-MM-DD>/
-  vpn-portal.env
-  databyte.co.za.crt
-  databyte.co.za.key
-  ipsec.db
+1. workspace_files_enumerator.py walks /root/.openclaw/workspace
+2. Excludes dirs/files matching EXCLUDE_DIRS / SENSITIVE_NAMES / SENSITIVE_SUFFIXES
+3. Scans text content (≤10 MB) for bot token regex
+4. Outputs a list of safe relative paths
+5. backup-workspace.sh does `rclone copy --files-from=<list>` to RustFS
+6. Post-flight: spot-checks key files + re-scans for sensitive content
 ```
 
-## How to install
+The `--files-from` approach (vs `--exclude` patterns) handles weird
+filenames with control characters more robustly — they never get
+enumerated in the first place.
+
+## Install
 
 ```bash
-# 1. Install the script
-sudo install -m 0755 backup-vpn-portal-config.sh /usr/local/bin/
+# 1. Install script + enumerator
+sudo install -m 0755 backup-workspace.sh /usr/local/bin/
+sudo install -m 0755 workspace_files_enumerator.py /usr/local/bin/
 
 # 2. Install systemd units
-sudo install -m 0644 backup-vpn-portal-config.service /etc/systemd/system/
-sudo install -m 0644 backup-vpn-portal-config.timer /etc/systemd/system/
+sudo install -m 0644 backup-workspace.service /etc/systemd/system/
+sudo install -m 0644 backup-workspace.timer /etc/systemd/system/
+sudo install -d -m 0755 /var/log/workspace-backup
 
 # 3. Enable daily run
 sudo systemctl daemon-reload
-sudo systemctl enable --now backup-vpn-portal-config.timer
+sudo systemctl enable --now backup-workspace.timer
 ```
 
-## Verify a backup
+## Verify
 
 ```bash
-# Last run
-sudo systemctl status backup-vpn-portal-config.service
+# Next scheduled run
+systemctl list-timers backup-workspace.timer
+
+# Manual one-shot
+sudo systemctl start backup-workspace.service
+sudo journalctl -u backup-workspace.service --no-pager
 
 # List today's backup
-rclone ls rustfs:open-claw-push/vpn-portal-config/$(date -u +%Y-%m-%d)/
-
-# Pull a backup for restore
-rclone copy rustfs:open-claw-push/vpn-portal-config/2026-06-23/ /tmp/restore/
+rclone lsf rustfs:open-claw-push/workspace-backups/2026-06-23/ | head -10
+rclone size rustfs:open-claw-push/workspace-backups/2026-06-23/
 ```
 
 ## Restore procedure
 
 ```bash
-# 1. SSH to VPS
-ssh vpn-prod-01
+# Pull today's backup to a temp dir
+mkdir -p /tmp/restore
+rclone copy rustfs:open-claw-push/workspace-backups/2026-06-23/ /tmp/restore/
 
-# 2. Pull backup files (locally first)
-rclone copy rustfs:open-claw-push/vpn-portal-config/2026-06-23/ /tmp/restore/
+# Inspect (don't overwrite your live workspace blindly!)
+ls /tmp/restore/
+diff -r /tmp/restore/MEMORY.md ~/.openclaw/workspace/MEMORY.md
 
-# 3. Stop portal
-sudo systemctl stop vpn-portal
-
-# 4. Restore env
-sudo cp /tmp/restore/vpn-portal.env /etc/vpn-portal.env
-sudo chmod 600 /etc/vpn-portal.env
-sudo chown root:root /etc/vpn-portal.env
-
-# 5. Restore certs
-sudo cp /tmp/restore/databyte.co.za.crt /etc/ssl/cloudflare/
-sudo cp /tmp/restore/databyte.co.za.key /etc/ssl/cloudflare/
-sudo chmod 644 /etc/ssl/cloudflare/databyte.co.za.crt
-sudo chmod 600 /etc/ssl/cloudflare/databyte.co.za.key
-
-# 6. Restore DB (atomic — backup the existing first)
-sudo sqlite3 /var/lib/strongswan/ipsec.db ".backup /tmp/ipsec-pre-restore.db"
-sudo cp /tmp/restore/ipsec.db /var/lib/strongswan/ipsec.db
-sudo chown root:strongswan /var/lib/strongswan/ipsec.db
-sudo chmod 664 /var/lib/strongswan/ipsec.db
-
-# 7. Restart portal + charon
-sudo systemctl restart vpn-portal
-sudo systemctl restart charon  # or docker restart strongswan
-
-# 8. Verify
-curl -sk https://myvpn.databyte.co.za/api/health
+# If you want to RESTORE OVER existing workspace (destructive!):
+#   1. Backup current workspace first (defensive)
+#      rclone sync ~/.openclaw/workspace rustfs:open-claw-push/workspace-backups/_pre-restore-$(date -u +%Y-%m-%d)/
+#   2. Restore
+#      rclone sync /tmp/restore/ ~/.openclaw/workspace/
 ```
 
 ## Lessons
 
-### #81 — `sqlite3 .backup` is the only safe way to copy a live SQLite DB
+### #83 — Pre-backup audit caught 4 leaks
 
-Don't `cp` a SQLite DB while a process is writing to it. You WILL get
-corruption (or a snapshot mid-transaction). `sqlite3 db ".backup dest"`
-uses SQLite's online backup API which holds a read lock for the duration
-of the copy and writes atomically.
+A naïve `rclone copy` with no exclusions would have backed up:
+- 16 `*.mobileconfig` files (contain VPN PSK + EAP password)
+- `.demo_vpn_creds` (VPN PSK)
+- `credentials/telegram-tokens.md` (Telegram bot tokens)
+- `memory/.dreams/short-term-recall.json.migrated` (Qwen bot token in old migrated memory)
+- 3 script files with hardcoded Telegram bot tokens in `archives/` and `reports/`
 
-### #82 — backup destinations need rotation too
+A simple `rclone size` dry-run doesn't surface these — you have to **search
+the source tree for known sensitive patterns** and verify your exclusion
+list catches them all. The post-backup grep check (in the script) is the
+last line of defense.
 
-Right now we keep one backup per day, forever. After ~3 years that's
-~1000 directories, ~330 MB. Not a problem. But if secrets leak (e.g.
-private key), you need a way to delete old backups. Document your
-retention policy.
+### #84 — `set -euo pipefail` + grep returns 1 = script exits 1
+
+`grep` returns 1 when no match. With `pipefail`, the pipeline returns the
+rightmost non-zero. Combined with `set -e`, an assignment like
+`SENSITIVE_HITS=$(... | grep ...)` exits the script if grep finds nothing.
+
+Fix: `SENSITIVE_HITS=$(... | grep ...) || true`. Always think about the
+exit code of every command in a `set -e` script.
+
+### #85 — `sed -i` creates `.duplicate-tmp` files on some systems
+
+GNU sed (default) replaces in-place, but with a copy-then-rename under the
+hood. If the rename fails (permissions, etc.), you can be left with a
+`.duplicate-tmp` file alongside the original. Always clean these up
+after `sed -i` operations on files with secrets.
+
+### #86 — Content-based scanning catches what pattern-matching misses
+
+Pattern-based exclusion (`*.mobileconfig`) is fast but rigid.
+Content-based scanning (`grep -E "[0-9]{8,}:[A-Za-z0-9_-]{30,}"`) catches
+tokens wherever they appear — even in JSON migration files, archives, or
+unexpected code paths. The enumerator does BOTH: pattern-based for speed
++ a content scan for safety. The two-layer approach is more robust than
+either alone.
