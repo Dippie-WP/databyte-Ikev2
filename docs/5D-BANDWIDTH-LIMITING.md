@@ -142,6 +142,75 @@ sudo sqlite3 /var/lib/strongswan/ipsec.db \
 For **fresh Xneelo deploys**, the columns are baked into `quota_schema.sql`,
 so `quota/apply_quota_schema.sh` includes them automatically.
 
+## Per-customer UI (added 2026-06-23, commit `91da68e`)
+
+The portal now exposes `bandwidth_down_mbps` / `bandwidth_up_mbps` end-to-end
+so operators don't need SQLite to change a customer's cap.
+
+### What the UI shows
+
+**Edit customer modal** (`Customers` tab → click ✏️ on a row):
+
+| Field | Default | Range | Where it ends up |
+|---|---|---|---|
+| Bandwidth down (Mbps, 1–1000) | 20 | 1..1000 | `customers.bandwidth_down_mbps` |
+| Bandwidth up   (Mbps, 1–1000) | 20 | 1..1000 | `customers.bandwidth_up_mbps`   |
+
+### API surface
+
+```http
+PATCH /api/customers/{id}
+Content-Type: application/json
+Cookie: session=<operator session>
+
+{
+  "bandwidth_down_mbps": 50,
+  "bandwidth_up_mbps":   10
+}
+```
+
+Validation (returns 400 on violation):
+- `bandwidth_down_mbps` and `bandwidth_up_mbps` must each be 1..1000.
+- The customer must not be `is_operator=1` (operator has its own
+  bypass-all-caps policy — refuses with 403 if you try to edit it).
+
+### End-to-end path (verified on vpn-prod-01, 2026-06-23)
+
+```
+operator (Edit modal)
+  └─→ PATCH /api/customers/{id}
+        └─→ app.py:update_customer() writes to customers.bandwidth_down_mbps
+              └─→ bandwidth-monitor.py polls every 60s
+                    └─→ swanctl --list-sas → for each VIP, look up bandwidth_*
+                          └─→ tc class replace with new rate/ceil
+                          └─→ iptables mangle rule MARK remains (0xVIP_HASH)
+```
+
+**No charon restart needed.** The bandwidth-monitor daemon reads the DB on
+every poll cycle and replaces the user's tc class with the new rate.
+
+### Reading the current value
+
+```bash
+# Direct DB
+sudo sqlite3 /var/lib/strongswan/ipsec.db \
+  "SELECT name, bandwidth_down_mbps, bandwidth_up_mbps FROM customers;"
+
+# Via API (operator session required)
+curl -sk -b cookies.txt https://myvpn.databyte.co.za/api/customers | jq '.[] | {name, bandwidth_down_mbps, bandwidth_up_mbps}'
+```
+
+### Caveats
+
+1. **Changes apply at next poll cycle (≤60s)** — the bandwidth-monitor
+   daemon polls every 60s; an existing session will keep its old tc class
+   until the next refresh.
+2. **In-flight traffic gets a brief burst** when the tc class is replaced.
+   Not a real concern at 20–100 Mbps scale, but for higher limits consider
+   using HTB `ceil` instead of `rate` for smoother transitions.
+3. **Database write, not tc atomic** — if the monitor is stopped when you
+   PATCH, the change sits in the DB until you `systemctl start bandwidth-monitor`.
+
 ## Audit log entry
 
 ```sql
@@ -330,6 +399,49 @@ ports you need open.
 Lesson: **UDP 500/4500 open ≠ all ports open.** Xneelo firewall is per-port;
 every public-facing service needs its own rule.
 
+### #75 — Verify the full read path before shipping a write feature
+
+Symptom: PATCH /api/customers/{id} was returning 200 and writing to the DB,
+but GET /api/customers/{id} was returning 502. The "feature shipped" (per
+PATCH) masked the broken "feature reads back" path.
+
+Root cause: pre-existing schema drift — `get_customer` queried
+`device_type, os_version, hostname` from the `devices` table, but the VPS
+devices table (bootstrapped from an older schema) didn't have those columns.
+Lab LXC 903 had them.
+
+Fix:
+1. Migrate VPS: `ALTER TABLE devices ADD COLUMN device_type TEXT DEFAULT NULL;`
+   (also `os_version`, `hostname`).
+2. Add migration script: `quota/migrate_v128_device_metadata.sh`.
+3. Update `quota/quota_schema.sql` so future fresh deploys get the columns.
+
+Lesson: **A PATCH that "works" (200 OK) does NOT prove the feature works.**
+The read path is the proof. Always test the round-trip: write → read-back →
+confirm via separate channel (DB or UI). If the read path is broken, the
+feature is half-built no matter how many tests pass on the write.
+
+### #76 — Schema migrations belong in BOTH the schema file AND a script
+
+Symptom: columns added to lab (LXC 903) devices table were missing from
+`quota/quota_schema.sql`. Any fresh VPS deploy would have skipped them
+silently.
+
+Root cause: ad-hoc migration to lab via direct sqlite3 command, never
+captured in `quota_schema.sql` or a script. Schema file is authoritative
+for fresh deploys; migration scripts handle existing deployments.
+
+Fix:
+- Update `quota/quota_schema.sql` (authoritative for new installs).
+- Add `quota/migrate_v128_device_metadata.sh` (idempotent script for
+  existing installs).
+
+Lesson: **A column exists in production ≠ the schema captures it.**
+Whenever you `ALTER TABLE` anything, also update `quota_schema.sql` and add
+a migration script. Three places, one change. Idempotent scripts (catch
+"errors on duplicate column") make re-runs safe.
+
 ---
 
-**Last updated:** 2026-06-22 (Misha) — Lessons #41-#50 added; cap mechanism + Windows client validated end-to-end via Angola iperf3 (17.0 Mbps through 20 Mbit cap).
+**Last updated:** 2026-06-23 (Misha) — Per-customer UI added (commit `91da68e`);
+Lessons #75 + #76 from schema-drift fix; end-to-end verified on vpn-prod-01.
