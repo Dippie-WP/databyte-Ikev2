@@ -242,7 +242,10 @@ Write-Host "=== [5/5] Connecting ===" -ForegroundColor Cyan
 
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
-$connect = rasdial $ConnectionName
+
+# Pass credentials directly to rasdial so Windows doesn't show the GUI prompt.
+# Format: rasdial <name> <username> <password>
+$connect = rasdial $ConnectionName $Username $Password
 Write-Host ""
 Write-Host "  rasdial output:" -ForegroundColor Cyan
 Write-Host "  $connect"
