@@ -66,7 +66,37 @@ RATE_LIMIT_PER_MIN = 5
 SSH_TIMEOUT     = 10
 
 # ---------- Logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# CP7 JSON logging. Emits one JSON object per line on stdout (captured by
+# journald → Loki/Promtail/etc). Fields: ts, level, logger, msg, plus any
+# extra fields passed via extra={...} to the logger call.
+import json as _json
+class _JsonFormatter(logging.Formatter):
+    def format(self, record):
+        payload = {
+            "ts": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        # Promote any extra fields attached to the record
+        for k, v in record.__dict__.items():
+            if k not in ("name", "msg", "args", "levelname", "levelno", "pathname",
+                         "filename", "module", "exc_info", "exc_text", "stack_info",
+                         "lineno", "funcName", "created", "msecs", "relativeCreated",
+                         "thread", "threadName", "processName", "process", "message",
+                         "taskName"):
+                try:
+                    _json.dumps(v)  # only include JSON-serializable values
+                    payload[k] = v
+                except (TypeError, ValueError):
+                    payload[k] = repr(v)
+        if record.exc_info:
+            payload["exc"] = self.formatException(record.exc_info)
+        return _json.dumps(payload, separators=(",", ":"))
+
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(_JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 log = logging.getLogger("vpn-portal")
 
 # ---------- App ----------
@@ -644,6 +674,70 @@ def health():
     }
 
 
+@app.get("/api/admin/audit")
+def admin_audit(
+    request: Request,
+    since: Optional[int] = None,         # unix epoch; default = last 24h
+    limit: int = 100,                    # max rows to return
+    action: Optional[str] = None,        # substring match on action column
+    actor: Optional[str] = None,         # exact match on actor column
+):
+    """CP7 — operator audit trail. Returns recent audit_log rows.
+
+    Auth: requires a valid operator session cookie. Returns 401 otherwise.
+    Query params:
+      - since: unix epoch; default = now - 24h
+      - limit: cap rows (default 100, max 1000)
+      - action: filter to actions containing this substring (e.g. "login", "delete")
+      - actor: filter to exact actor match (e.g. "admin", "portal", "system")
+    """
+    # Inline auth check (mirrors require_session dep). Doing it manually here so
+    # the endpoint can be defined anywhere in the file without depending on the
+    # order of FastAPI dep registration.
+    import portal_auth as _pa
+    sess_cookie = request.cookies.get(_pa.OPERATOR_COOKIE)
+    if not sess_cookie:
+        raise HTTPException(401, "Not authenticated")
+    sess = _pa.verify_operator_session(sess_cookie)
+    if not sess:
+        raise HTTPException(401, "Session expired")
+    if limit < 1: limit = 1
+    if limit > 1000: limit = 1000
+    if since is None: since = int(time.time()) - 86400
+
+    where = [f"created_at >= {int(since)}"]
+    if action:
+        # SQL injection guard: action is a filter keyword, not user-supplied SQL
+        safe_action = action.replace("'", "''")
+        where.append(f"action LIKE '%{safe_action}%'")
+    if actor:
+        safe_actor = actor.replace("'", "''")
+        where.append(f"actor = '{safe_actor}'")
+
+    rows = db_query(
+        f"SELECT id, actor, action, target_type, target_id, payload, created_at "
+        f"FROM audit_log WHERE {' AND '.join(where)} "
+        f"ORDER BY created_at DESC LIMIT {int(limit)};"
+    )
+    # Parse payload JSON, fall back to raw string
+    out = []
+    for r in rows:
+        try:
+            payload = _json.loads(r["payload"]) if r["payload"] else None
+        except (ValueError, TypeError):
+            payload = r["payload"]
+        out.append({
+            "id": r["id"],
+            "actor": r["actor"],
+            "action": r["action"],
+            "target_type": r["target_type"],
+            "target_id": r["target_id"],
+            "payload": payload,
+            "ts": datetime.utcfromtimestamp(r["created_at"]).isoformat() + "Z",
+        })
+    return {"rows": out, "count": len(out), "since": int(since), "limit": int(limit)}
+
+
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request, response: Response):
     # Unix socket requests have no client info (request.client is None).
@@ -666,9 +760,11 @@ def login(req: LoginRequest, request: Request, response: Response):
             "$argon2id$v=19$m=19456,t=2,p=1$YWFhYWFhYWFhYWFhYWFhYQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG",
             req.password or "x",
         )
+        log.info("login FAIL (no user) ip=%s identity=%s", ip, req.username)
         raise HTTPException(401, "Invalid credentials")
     pw_match = portal_auth.verify_operator_password(ADMIN_PASS_HASH, req.password)
     if not pw_match:
+        log.info("login FAIL (bad password) ip=%s identity=%s", ip, req.username)
         raise HTTPException(401, "Invalid credentials")
     ua = request.headers.get("user-agent", "")
     session_id = portal_auth.create_operator_session(req.username, ua, ip)
@@ -684,6 +780,13 @@ def login(req: LoginRequest, request: Request, response: Response):
     )
     log.info("login ok user=%s ip=%s session_id_prefix=%s",
              req.username, ip, session_id[:8])
+    # CP7 — audit_log entry for every login
+    try:
+        payload = _json.dumps({"ip": ip, "ua": ua, "session_id_prefix": session_id[:8]})
+        db_exec(f"""INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
+                    VALUES ('admin', 'operator_login', 'user', 0, '{payload.replace("'", "''")}', strftime('%s','now'));""")
+    except Exception as e:
+        log.warning("audit_log write failed for login: %s", e)
     return {"ok": True, "user": req.username}
 
 
