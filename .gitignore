@@ -54,3 +54,6 @@ rclone.conf
 __pycache__/
 *.pyc
 .env.xneelo
+
+# Test customer credentials (per-test ephemeral, NOT for git)
+host/vpn-portal/test-credentials/
