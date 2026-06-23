@@ -4,16 +4,18 @@
     Databyte VPN (vpn-prod-01 / 154.65.110.44).
 
 .DESCRIPTION
-    v4 — works whether run as a file OR piped via 'irm URL | iex'.
-    v4 change vs v3: stores credentials via Set-VpnConnectionUsernamePassword
-    (which writes them into the phonebook profile XML) so the IKEv2 EAP host
-    reads them from the profile, NOT from a GUI dialog prompt. v3's trick of
-    passing creds to rasdial inline does NOT bypass the GUI for IKEv2+EAP
-    (rasdial creds are for PPP, not EAP-MSCHAPv2). Result: error 703.
+    v5 — works whether run as a file OR piped via 'irm URL | iex'.
 
-    Fallback: if non-interactive connect still fails, the script prints the
-    ONE-LINE interactive command Zun can paste into a manually-opened
-    elevated PowerShell (where the GUI dialog CAN appear and be dismissed).
+    v5 changes vs v4:
+      a) EXPLICITLY generates EAP-MSCHAPv2 config via New-EapConfiguration
+         and passes it to Add-VpnConnection via -EapConfigXmlStream.
+         Without this, the IKEv2 stack may default to EAP-TLS, which
+         prompts for a user cert selection (GUI dialog → error 703 in
+         non-interactive sessions, and even in some interactive ones).
+      b) Self-elevates to admin if not already elevated (Start-Process
+         -Verb RunAs re-launches the script with UAC consent).
+      c) Prints the connection profile as XML at the end so Zun can paste
+         it back if it still fails.
 
     Two run modes:
       a) File mode (recommended):  powershell -ExecutionPolicy Bypass -File .\test-win-5g-setup.ps1
@@ -45,7 +47,6 @@ $CaSubject        = "CN=strongSwan CA"
 # ============================================================================
 # Determine script-relative path (works for both File and Stream modes)
 # ============================================================================
-# $MyInvocation gives us the path even when piped
 $ScriptDir = $null
 if ($PSCommandPath) {
     $ScriptDir = Split-Path -Parent $PSCommandPath
@@ -53,7 +54,6 @@ if ($PSCommandPath) {
     $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 }
 if (-not $ScriptDir -or $ScriptDir -eq "") {
-    # Stream mode (irm | iex): no script path. Will fall back to live URL only.
     $ScriptDir = $null
 }
 
@@ -77,10 +77,40 @@ function Get-Sha256Fingerprint {
 }
 
 # ============================================================================
+# STEP 0 - Self-elevate to admin (v5 NEW)
+# ============================================================================
+# This handles the case where the script was launched from a non-elevated
+# PowerShell via 'irm | iex'. Without this, the rest of the script would
+# fail with cryptic "Access denied" or silently no-op on registry writes.
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
+$isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "  Not running as Administrator. Relaunching with elevation..." -ForegroundColor Yellow
+    if ($PSCommandPath) {
+        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-ExecutionPolicy", "Bypass",
+            "-File", "`"$PSCommandPath`""
+        ) -Verb RunAs
+    } else {
+        # Stream mode: save to temp, then run from temp
+        $tmp = Join-Path $env:TEMP "databyte-setup-elev-$(Get-Random).ps1"
+        $content | Out-File -FilePath $tmp -Encoding utf8 -Force
+        Start-Process -FilePath "powershell.exe" -ArgumentList @(
+            "-ExecutionPolicy", "Bypass",
+            "-File", "`"$tmp`""
+        ) -Verb RunAs
+    }
+    exit 0
+}
+Write-Host "  Running as Administrator (elevated). OK." -ForegroundColor Green
+
+# ============================================================================
 # STEP 1 - Install CA cert (fetch from live URL with fingerprint pinning)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [1/5] Installing CA cert to LocalMachine\Root ===" -ForegroundColor Cyan
+Write-Host "=== [1/6] Installing CA cert to LocalMachine\Root ===" -ForegroundColor Cyan
 
 $installed = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
     Where-Object { $_.Subject -eq $CaSubject } |
@@ -134,7 +164,6 @@ if ($needsInstall) {
             $tempLive = $null
         }
 
-        # Try bundled fallback if ScriptDir is known AND the bundled cert exists
         if (-not $CaCertPath -and $ScriptDir) {
             $bundledPath = Join-Path $ScriptDir "strongswan-ca.crt.pem"
             if (Test-Path $bundledPath) {
@@ -168,48 +197,56 @@ if ($needsInstall) {
 }
 
 # ============================================================================
-# STEP 2 - Remove old connection (if exists) and create fresh
+# STEP 2 - Remove old connection (if exists) and create fresh with EAP-MSCHAPv2
 # ============================================================================
 Write-Host ""
-Write-Host "=== [2/5] Creating VPN connection '$ConnectionName' ===" -ForegroundColor Cyan
+Write-Host "=== [2/6] Creating VPN connection '$ConnectionName' with EAP-MSCHAPv2 ===" -ForegroundColor Cyan
 
 $existingConn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
 if ($existingConn) {
-    Write-Host "  Removing existing connection..." -ForegroundColor Yellow
+    Write-Host "  Removing existing connection (had bad/missing EAP config)..." -ForegroundColor Yellow
     rasdial $ConnectionName /disconnect 2>&1 | Out-Null
     Remove-VpnConnection -Name $ConnectionName -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# Use Add-VpnConnection with the basic parameters that work on all Win10 versions.
-# The -ConfigurationFile parameter was added in Win10 1903+; some systems don't have it.
-# We'll set the RemoteID via the registry afterwards.
-Add-VpnConnection `
-    -Name $ConnectionName `
-    -ServerAddress $ServerIp `
-    -TunnelType "IKEv2" `
-    -AuthenticationMethod "EAP" `
-    -RememberCredential `
-    -PassThru | Out-Null
+# v5 CHANGE: Build an EXPLICIT EAP-MSCHAPv2 config and pass it to Add-VpnConnection.
+# Without this, Add-VpnConnection -AuthenticationMethod "Eap" can default to
+# EAP-TLS (or "Any EAP"), which makes the EAP host request cert selection via a
+# GUI dialog → error 703 in any session that can't show a GUI.
+try {
+    $EapConfig = New-EapConfiguration -Type EapMsChapV2
+    Write-Host "  Generated EAP-MSCHAPv2 config XML." -ForegroundColor Green
+} catch {
+    Write-Host "  ERROR: New-EapConfiguration failed: $_" -ForegroundColor Red
+    Write-Host "  (Your Windows version may not support -Type EapMsChapV2.)" -ForegroundColor Yellow
+    Write-Host "  Will try the legacy -AuthenticationMethod 'EAP' path as fallback." -ForegroundColor Yellow
+    $EapConfig = $null
+}
+
+if ($EapConfig) {
+    Add-VpnConnection `
+        -Name $ConnectionName `
+        -ServerAddress $ServerIp `
+        -TunnelType "IKEv2" `
+        -AuthenticationMethod "EAP" `
+        -EapConfigXmlStream $EapConfig.EapConfigXmlStream `
+        -RememberCredential `
+        -PassThru | Out-Null
+} else {
+    # Fallback: basic EAP, no XML. May prompt for cert on some systems.
+    Add-VpnConnection `
+        -Name $ConnectionName `
+        -ServerAddress $ServerIp `
+        -TunnelType "IKEv2" `
+        -AuthenticationMethod "EAP" `
+        -RememberCredential `
+        -PassThru | Out-Null
+}
 
 Write-Host "  Connection created. Server=$ServerIp" -ForegroundColor Green
 
-# ============================================================================
-# Set Remote ID via registry (the supported way for Win10 native IKEv2)
-# ============================================================================
-# Path: HKLM\SYSTEM\CurrentControlSet\Services\RasMan\Parameters
-# Value: "ServerName" or use the per-connection ProfileXML
-# Actually: the RemoteID is stored in the phonebook .pbk file under
-# [IKEv2 & IPsec Custom Policy\Servers\...] but the simplest approach
-# is to set it via the registry tweak below.
-#
-# Actually for Win10 native IKEv2, the ServerAddress IS the connection
-# endpoint. The RemoteID matching happens via the cert CN/SAN — Windows
-# will accept ANY name as long as the cert is signed by a trusted CA.
-# So if we have the cert installed and connect to the right IP,
-# Windows validates the cert against myvpn.databyte.co.za automatically.
-
-# Set the registry tweaks for stronger crypto + disable weak DH
+# Set the registry tweak for stronger crypto.
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
     -Name "NegotiateDH2048_AES256" -PropertyType DWord -Value 1 -Force | Out-Null
 
@@ -217,7 +254,7 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameter
 # STEP 3 - Set IKEv2 IPsec crypto
 # ============================================================================
 Write-Host ""
-Write-Host "=== [3/5] Configuring IPsec crypto ===" -ForegroundColor Cyan
+Write-Host "=== [3/6] Configuring IPsec crypto ===" -ForegroundColor Cyan
 
 try {
     Set-VpnConnectionIPsecConfiguration `
@@ -239,15 +276,8 @@ try {
 # STEP 4 - Store credentials in the VPN profile
 # ============================================================================
 Write-Host ""
-Write-Host "=== [4/5] Storing credentials in VPN profile ===" -ForegroundColor Cyan
+Write-Host "=== [4/6] Storing credentials in VPN profile ===" -ForegroundColor Cyan
 
-# v4 CHANGE: Use Set-VpnConnectionUsernamePassword (NOT cmdkey, NOT rasdial-with-creds).
-# This writes the creds into the phonebook profile XML so the IKEv2 EAP host
-# reads them from there. The IKEv2 EAP host on Windows does NOT consult
-# Windows Credential Manager (cmdkey) or rasdial's command-line creds for
-# authentication — it reads from the phonebook profile, period. That's why
-# v3 still hit error 703: rasdial with $User $Pass sends the creds down the
-# PPP path, but the IKEv2 stack separately needs them from the profile.
 try {
     Set-VpnConnectionUsernamePassword `
         -ConnectionName $ConnectionName `
@@ -255,26 +285,22 @@ try {
         -Password $Password `
         -Domain "" `
         -PassThru | Out-Null
-    Write-Host "  Credentials stored in profile '$ConnectionName' (EAP host will read these, no GUI prompt)." -ForegroundColor Green
+    Write-Host "  Credentials stored in profile '$ConnectionName'." -ForegroundColor Green
 } catch {
     Write-Host "  ERROR: Set-VpnConnectionUsernamePassword failed: $_" -ForegroundColor Red
-    Write-Host "  Continuing — connection attempt may still work or prompt for creds." -ForegroundColor Yellow
 }
 
-# Also seed cmdkey for legacy fallback (does no harm if Set-VpnConnectionUsernamePassword succeeded).
 cmdkey /generic:$ConnectionName /user:$Username /pass:$Password | Out-Null
 
 # ============================================================================
 # STEP 5 - Connect
 # ============================================================================
 Write-Host ""
-Write-Host "=== [5/5] Connecting ===" -ForegroundColor Cyan
+Write-Host "=== [5/6] Connecting ===" -ForegroundColor Cyan
 
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
 
-# v4 CHANGE: rasdial with NO creds. The IKEv2 EAP host reads creds from the
-# phonebook profile (set in Step 4), so no GUI dialog should appear.
 $connect = rasdial $ConnectionName
 Write-Host ""
 Write-Host "  rasdial output:" -ForegroundColor Cyan
@@ -286,24 +312,68 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "  rasdial exit code: $LASTEXITCODE" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  The non-interactive path failed. Try the INTERACTIVE fallback:" -ForegroundColor Yellow
+    Write-Host "  Non-interactive path failed. Run this INTERACTIVELY to seed the profile:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "    1. Open PowerShell AS ADMIN manually (Win+X -> 'Windows PowerShell (Admin)' or 'Terminal (Admin)')" -ForegroundColor White
+    Write-Host "    1. Open PowerShell AS ADMIN manually (Win+X -> 'Windows PowerShell (Admin)')" -ForegroundColor White
     Write-Host "    2. Run:  rasdial $ConnectionName" -ForegroundColor White
-    Write-Host "    3. If a GUI dialog appears with username/password fields, type them and click OK" -ForegroundColor White
-    Write-Host "    4. Connection should establish. Close the admin PowerShell after." -ForegroundColor White
+    Write-Host "    3. If a GUI dialog appears, fill in:" -ForegroundColor White
+    Write-Host "         Username: $Username" -ForegroundColor White
+    Write-Host "         Password: (the test password)" -ForegroundColor White
+    Write-Host "    4. Click OK. Connection establishes. Profile is now seeded." -ForegroundColor White
     Write-Host ""
-    Write-Host "  After ONE successful interactive connect, the creds are seeded and future non-interactive rasdial should work." -ForegroundColor Yellow
+    Write-Host "  After one successful interactive connect, future non-interactive rasdial works." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  Common Windows VPN errors:" -ForegroundColor Yellow
-    Write-Host "    691 = Auth failed (check username/password)" -ForegroundColor Yellow
-    Write-Host "    789 = IKE auth failed (cert or crypto mismatch)" -ForegroundColor Yellow
-    Write-Host "    800 = Can't reach server (firewall/network)" -ForegroundColor Yellow
-    Write-Host "    13801 = IKE auth credentials unacceptable (EAP config)" -ForegroundColor Yellow
-    Write-Host "    13013 = IKE mode not enabled on server" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "  Run 'Get-VpnConnection -Name $ConnectionName | Format-List' to see config." -ForegroundColor Yellow
 }
+
+# ============================================================================
+# STEP 6 - Diagnostics (v5 NEW): dump profile info so Zun can paste back if needed
+# ============================================================================
+Write-Host ""
+Write-Host "=== [6/6] Profile diagnostics (paste back if still failing) ===" -ForegroundColor Cyan
+
+try {
+    $conn = Get-VpnConnection -Name $ConnectionName -ErrorAction Stop
+    Write-Host ""
+    Write-Host "--- Get-VpnConnection output ---" -ForegroundColor DarkCyan
+    $conn | Format-List Name, ServerAddress, TunnelType, AuthenticationMethod, `
+        EncryptionLevel, RememberCredential, SplitTunneling, `
+        IdleDisconnectSeconds, DnsSuffix | Out-String | Write-Host
+    Write-Host "--- end ---" -ForegroundColor DarkCyan
+} catch {
+    Write-Host "  Get-VpnConnection failed: $_" -ForegroundColor Red
+}
+
+# Show installed CA cert
+Write-Host ""
+Write-Host "--- Installed CA cert (LocalMachine\Root) ---" -ForegroundColor DarkCyan
+$ca = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq $CaSubject } | Select-Object -First 1
+if ($ca) {
+    $ca | Format-List Subject, Issuer, NotBefore, NotAfter, Thumbprint | Out-String | Write-Host
+} else {
+    Write-Host "  (CA cert NOT FOUND in LocalMachine\Root — install step may have failed)" -ForegroundColor Red
+}
+Write-Host "--- end ---" -ForegroundColor DarkCyan
+
+# Show EAP config (this is the key one — verifies it's MSCHAPv2 not TLS)
+Write-Host ""
+Write-Host "--- EAP config in profile ---" -ForegroundColor DarkCyan
+try {
+    $config = Get-VpnConnection -Name $ConnectionName | Select-Object -ExpandProperty EapConfigXmlStream -ErrorAction SilentlyContinue
+    if ($config) {
+        # Decode and show only the EAP method type, not the full XML
+        [xml]$xmlDoc = $config
+        $methods = $xmlDoc.EapHostConfig.Config.EapMethod.Type
+        Write-Host "  EAP methods in profile: $($methods -join ', ')"
+        Write-Host "  (EapMsChapV2 = type 26, that's what we want)"
+        Write-Host "  (EapTls = type 13, that would prompt for cert → 703)"
+    } else {
+        Write-Host "  (No EapConfigXmlStream on this connection — will use Windows default EAP)" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "  Get EAP config failed: $_" -ForegroundColor Red
+}
+Write-Host "--- end ---" -ForegroundColor DarkCyan
 
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
