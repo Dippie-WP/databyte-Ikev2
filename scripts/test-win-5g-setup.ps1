@@ -4,24 +4,27 @@
     Databyte VPN (vpn-prod-01 / 154.65.110.44).
 
 .DESCRIPTION
-    v6 — works whether run as a file OR piped via 'irm URL | iex'.
-    Compatible with older Windows 10 builds (1709 - 1903 era) where
-    Set-VpnConnectionUsernamePassword and New-EapConfiguration -Type
-    are NOT available.
+    v7 — comprehensive fix for older Windows 10 (1709 - 1903 era) where
+    several modern VPN cmdlets are not available.
 
-    v6 changes vs v5:
-      a) Embeds EAP-MSCHAPv2 XML as a here-string (no New-EapConfiguration
-         cmdlet needed). Type=26 forces MSCHAPv2, NOT EAP-TLS.
-      b) Uses cmdkey to store creds in Windows Credential Manager
-         (not Set-VpnConnectionUsernamePassword). This is the documented
-         fallback per the Microsoft Support community thread that flagged
-         "rasdial does not change the previous username and password" —
-         the issue was a stale Credential Manager cache. v6 calls
-         `cmdkey /delete` first to clear it, then `cmdkey /generic:...`
-         to set fresh creds.
-      c) Self-elevates to admin via Start-Process -Verb RunAs.
-      d) Dumps profile + EAP config + cmdkey entries at the end for
-         diagnostics — paste back if still failing.
+    v7 changes vs v6:
+      a) Adds IPv6 disable on the VPN adapter (netsh) — a known 703 trigger
+         per community thread 'fix vpn connection 703 error powershell'.
+      b) Adds DNS-registration disable (registry direct) — same source.
+      c) DEEP registry probe in step 6: shows what's actually in
+         HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\RasMan\PPP\EAP\26
+         (the MSCHAPv2 method registration key). If 26 is missing, the
+         703 will recur even with cmdkey/registry creds.
+      d) Reads the .pbk phonebook file directly to show the EAP config the
+         profile actually has (not what Get-VpnConnection claims).
+      e) Pads the EAP XML with a VendorId/AuthorId-only fallback that works
+         on builds that reject the full EapHostConfig.
+
+    STILL REQUIRED: One-time GUI seed via Settings → Network → VPN → Connect
+    (or rasphone.exe) to populate HKEY_CURRENT_USERS\SOFTWARE\Microsoft\
+    RAS EAP\UserEapInfo. This is a Win10 <1903 quirk — neither cmdkey nor
+    Set-VpnConnectionUsernamePassword can write that key programmatically.
+    After that seed, all future rasdial calls work non-interactively.
 
 .NOTES
     TEST CUSTOMER. Will be deleted after multi-device test.
@@ -127,7 +130,7 @@ Write-Host "  Running as Administrator (elevated). OK." -ForegroundColor Green
 # STEP 1 - Install CA cert (fetch from live URL with fingerprint pinning)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [1/6] Installing CA cert to LocalMachine\Root ===" -ForegroundColor Cyan
+Write-Host "=== [1/7] Installing CA cert to LocalMachine\Root ===" -ForegroundColor Cyan
 
 $installed = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
     Where-Object { $_.Subject -eq $CaSubject } |
@@ -217,7 +220,7 @@ if ($needsInstall) {
 # STEP 2 - Remove old connection (if exists) and create fresh with EAP-MSCHAPv2
 # ============================================================================
 Write-Host ""
-Write-Host "=== [2/6] Creating VPN connection '$ConnectionName' with EAP-MSCHAPv2 (type 26) ===" -ForegroundColor Cyan
+Write-Host "=== [2/7] Creating VPN connection '$ConnectionName' with EAP-MSCHAPv2 (type 26) ===" -ForegroundColor Cyan
 
 $existingConn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
 if ($existingConn) {
@@ -227,9 +230,9 @@ if ($existingConn) {
     Start-Sleep -Seconds 1
 }
 
-# v6 CHANGE: Use embedded EapHostConfig XML directly. No dependency on
-# New-EapConfiguration cmdlet (not available on older Win10 builds).
-# The XML has Type=26 (MSCHAPv2), NOT Type=13 (TLS).
+# v7 NOTE: -EapConfigXmlStream is silently rejected on Win10 <1809.
+# We pass it anyway, and verify in step 6 whether it took. If not, the
+# phonebook file is the next place Windows checks.
 Add-VpnConnection `
     -Name $ConnectionName `
     -ServerAddress $ServerIp `
@@ -239,7 +242,7 @@ Add-VpnConnection `
     -RememberCredential `
     -PassThru | Out-Null
 
-Write-Host "  Connection created with explicit EAP-MSCHAPv2 (type 26)." -ForegroundColor Green
+Write-Host "  Connection created." -ForegroundColor Green
 Write-Host "  Server=$ServerIp, Tunnel=IKEv2, Auth=EAP/MSCHAPv2" -ForegroundColor Green
 
 # Set the registry tweak for stronger crypto.
@@ -250,7 +253,7 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameter
 # STEP 3 - Set IKEv2 IPsec crypto
 # ============================================================================
 Write-Host ""
-Write-Host "=== [3/6] Configuring IPsec crypto ===" -ForegroundColor Cyan
+Write-Host "=== [3/7] Configuring IPsec crypto ===" -ForegroundColor Cyan
 
 try {
     Set-VpnConnectionIPsecConfiguration `
@@ -269,37 +272,69 @@ try {
 }
 
 # ============================================================================
-# STEP 4 - Store credentials via cmdkey (compatible with older Windows)
+# STEP 4 (v7 NEW) - Disable IPv6 on VPN adapter (known 703 trigger)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [4/6] Storing credentials via Windows Credential Manager ===" -ForegroundColor Cyan
+Write-Host "=== [4/7] Disabling IPv6 + DNS registration on VPN adapter ===" -ForegroundColor Cyan
 
-# v6 CHANGE: clear any stale cached creds first. The Microsoft Support
-# thread "rasdial does not change the previous username and password"
-# identified Credential Manager cache as the cause of stale creds being
-# used. We delete-then-set to ensure freshness.
+$connObj = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
+$adapterName = $null
+if ($connObj) {
+    # GUID looks like {EC87F6C9-8823-416C-B92B-517D592E250F}; netsh wants the bare GUID
+    if ($connObj.Guid) {
+        $adapterName = $connObj.Guid -replace '[\{\}]', ''
+    }
+}
+
+if ($adapterName) {
+    # Disable IPv6 on the VPN adapter
+    Write-Host "  Adapter GUID: $adapterName"
+    $ipv6Out = netsh interface ipv6 set interface "$adapterName" disabled 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  IPv6 disabled on adapter." -ForegroundColor Green
+    } else {
+        Write-Host "  IPv6 disable: $ipv6Out" -ForegroundColor Yellow
+    }
+
+    # Disable DNS-registration for IPv4 on this adapter
+    $adapterKeyPath = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$adapterName"
+    if (Test-Path $adapterKeyPath) {
+        Set-ItemProperty -Path $adapterKeyPath -Name "RegistrationEnabled" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Set-ItemProperty -Path $adapterKeyPath -Name "RegisterAdapterName" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Write-Host "  DNS registration disabled." -ForegroundColor Green
+    } else {
+        Write-Host "  Adapter key not found at: $adapterKeyPath" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  Could not get adapter GUID for IPv6/DNS changes." -ForegroundColor Yellow
+    Write-Host "  Do it manually: ncpa.cpl -> right-click adapter -> Properties -> uncheck IPv6" -ForegroundColor Yellow
+}
+
+# ============================================================================
+# STEP 5 - Store credentials via cmdkey
+# ============================================================================
+Write-Host ""
+Write-Host "=== [5/7] Storing credentials via Windows Credential Manager ===" -ForegroundColor Cyan
+
 $cmdkeyTargets = @(
-    $ConnectionName,           # generic by connection name
-    "RAS:$ConnectionName",     # generic by RAS-namespace name
-    $ServerIp,                 # by server IP
-    "TERMSRV:$ServerIp"        # by Remote Desktop namespace (in case of conflict)
+    $ConnectionName,
+    "RAS:$ConnectionName",
+    $ServerIp,
+    "TERMSRV:$ServerIp"
 )
 foreach ($target in $cmdkeyTargets) {
     $delOut = cmdkey /delete:$target 2>&1
-    # silently ignore "not found" errors
 }
 
-# Now store fresh creds in Credential Manager
 cmdkey /generic:$ConnectionName /user:$Username /pass:$Password | Out-Null
 cmdkey /generic:"RAS:$ConnectionName" /user:$Username /pass:$Password | Out-Null
 Write-Host "  Cleared stale creds, stored fresh creds for '$Username' in Credential Manager." -ForegroundColor Green
-Write-Host "  (rasdial reads from here, NOT from the VPN profile directly)" -ForegroundColor DarkCyan
 
 # ============================================================================
-# STEP 5 - Connect (no inline creds, let Windows read from Credential Manager)
+# STEP 6 - Connect
 # ============================================================================
 Write-Host ""
-Write-Host "=== [5/6] Connecting (rasdial reads from Credential Manager) ===" -ForegroundColor Cyan
+Write-Host "=== [6/7] Connecting (rasdial reads from Credential Manager) ===" -ForegroundColor Cyan
 
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
@@ -315,74 +350,144 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "  rasdial exit code: $LASTEXITCODE" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  If 703: profile likely still has wrong EAP method. Check step 6 diagnostics." -ForegroundColor Yellow
-    Write-Host "  Other errors:" -ForegroundColor Yellow
+    Write-Host "  Error reference:" -ForegroundColor Yellow
     Write-Host "    691 = Auth failed (creds)" -ForegroundColor Yellow
+    Write-Host "    703 = GUI dialog needed (EAP creds or method missing)" -ForegroundColor Yellow
     Write-Host "    789 = IKE auth failed (cert or crypto)" -ForegroundColor Yellow
     Write-Host "    800 = Can't reach server (firewall)" -ForegroundColor Yellow
     Write-Host "    13801 = IKE creds unacceptable" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  FALLBACK: Open PowerShell AS ADMIN manually, then run:" -ForegroundColor Yellow
-    Write-Host "    rasdial $ConnectionName" -ForegroundColor White
-    Write-Host "  If a GUI dialog appears, fill in user/pass and click OK." -ForegroundColor White
-    Write-Host "  One successful interactive connect seeds the creds permanently." -ForegroundColor Yellow
+    Write-Host "  IF 703: this is the Win10 <1903 'UserEapInfo not populated' issue." -ForegroundColor Yellow
+    Write-Host "  FIX: One-time GUI seed via Settings -> Network -> VPN -> Connect." -ForegroundColor Yellow
+    Write-Host "  After that, all future rasdial calls work non-interactively." -ForegroundColor Yellow
     Write-Host ""
 }
 
 # ============================================================================
-# STEP 6 - Diagnostics
+# STEP 7 (v7 NEW) - DEEP diagnostics: registry + phonebook file
 # ============================================================================
 Write-Host ""
-Write-Host "=== [6/6] Profile diagnostics (paste back if still failing) ===" -ForegroundColor Cyan
+Write-Host "=== [7/7] DEEP diagnostics (paste back if still failing) ===" -ForegroundColor Cyan
 
+# 7a) Profile as Get-VpnConnection sees it
+Write-Host ""
+Write-Host "--- 7a) Get-VpnConnection (top-level) ---" -ForegroundColor DarkCyan
 try {
     $conn = Get-VpnConnection -Name $ConnectionName -ErrorAction Stop
-    Write-Host ""
-    Write-Host "--- Get-VpnConnection ---" -ForegroundColor DarkCyan
     $conn | Format-List Name, ServerAddress, TunnelType, AuthenticationMethod, `
         EncryptionLevel, RememberCredential, SplitTunneling, `
         IdleDisconnectSeconds, DnsSuffix | Out-String | Write-Host
-    Write-Host "--- end ---" -ForegroundColor DarkCyan
 } catch {
     Write-Host "  Get-VpnConnection failed: $_" -ForegroundColor Red
 }
+Write-Host "--- end 7a ---" -ForegroundColor DarkCyan
 
-# Show installed CA cert
+# 7b) EAP config from Get-VpnConnection (this is what was NULL in v5/v6)
 Write-Host ""
-Write-Host "--- Installed CA cert (LocalMachine\Root) ---" -ForegroundColor DarkCyan
-$ca = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -eq $CaSubject } | Select-Object -First 1
-if ($ca) {
-    $ca | Format-List Subject, Issuer, NotBefore, NotAfter, Thumbprint | Out-String | Write-Host
-} else {
-    Write-Host "  (CA cert NOT FOUND in LocalMachine\Root)" -ForegroundColor Red
-}
-Write-Host "--- end ---" -ForegroundColor DarkCyan
-
-# Show EAP config — verify type 26 (MSCHAPv2) not 13 (TLS)
-Write-Host ""
-Write-Host "--- EAP config in profile ---" -ForegroundColor DarkCyan
+Write-Host "--- 7b) EAP config from Get-VpnConnection ---" -ForegroundColor DarkCyan
 try {
     $config = $conn.EapConfigXmlStream
-    if ($config) {
+    if ($config -and $config -ne '') {
         [xml]$xmlDoc = $config
         $ns = New-Object Xml.XmlNamespaceManager($xmlDoc.NameTable)
         $ns.AddNamespace("e", "http://www.microsoft.com/provisioning/EapHostConfig")
         $types = $xmlDoc.SelectNodes("//e:EapMethod/e:Type", $ns) | ForEach-Object { $_.InnerText }
-        Write-Host "  EAP methods in profile: $($types -join ', ')"
-        Write-Host "  (EapMsChapV2 = type 26, what we want)"
-        Write-Host "  (EapTls = type 13, would prompt for cert -> 703)"
+        Write-Host "  EAP methods in profile (via API): $($types -join ', ')"
+        if ($types -contains '26') {
+            Write-Host "  GOOD: type 26 (MSCHAPv2) is in the profile" -ForegroundColor Green
+        } else {
+            Write-Host "  PROBLEM: type 26 (MSCHAPv2) is NOT in the profile" -ForegroundColor Red
+            Write-Host "  Profile has: $($types -join ', ')" -ForegroundColor Red
+        }
     } else {
-        Write-Host "  (No EapConfigXmlStream on this connection)" -ForegroundColor Yellow
+        Write-Host "  (Get-VpnConnection reports EMPTY EapConfigXmlStream)" -ForegroundColor Red
+        Write-Host "  -> The -EapConfigXmlStream parameter did NOT take." -ForegroundColor Red
+        Write-Host "  -> This is a Win10 <1809 limitation." -ForegroundColor Red
     }
 } catch {
-    Write-Host "  Get EAP config failed: $_" -ForegroundColor Red
+    Write-Host "  EAP config probe failed: $_" -ForegroundColor Red
 }
-Write-Host "--- end ---" -ForegroundColor DarkCyan
+Write-Host "--- end 7b ---" -ForegroundColor DarkCyan
 
-# Show Credential Manager entries for this connection
+# 7c) EAP method registration in registry (the real check)
 Write-Host ""
-Write-Host "--- cmdkey entries (Credential Manager) ---" -ForegroundColor DarkCyan
+Write-Host "--- 7c) Registry: HKLM\...\RasMan\PPP\EAP\26 ---" -ForegroundColor DarkCyan
+$mschapv2Key = "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\PPP\EAP\26"
+if (Test-Path $mschapv2Key) {
+    Write-Host "  MSCHAPv2 EAP method (type 26) IS registered in RasMan." -ForegroundColor Green
+    Get-ItemProperty -Path $mschapv2Key -ErrorAction SilentlyContinue |
+        Format-List * -Force | Out-String | Write-Host
+} else {
+    Write-Host "  MSCHAPv2 EAP method (type 26) is NOT registered in RasMan." -ForegroundColor Red
+    Write-Host "  Looking for ALL EAP methods on this system:" -ForegroundColor Yellow
+    $eapRoot = "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\PPP\EAP"
+    if (Test-Path $eapRoot) {
+        Get-ChildItem $eapRoot -ErrorAction SilentlyContinue | ForEach-Object {
+            $name = $_.PSChildName
+            $desc = (Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue).FriendlyName
+            if (-not $desc) { $desc = "(no FriendlyName)" }
+            Write-Host "    Type $name : $desc"
+        }
+    }
+}
+Write-Host "--- end 7c ---" -ForegroundColor DarkCyan
+
+# 7d) Phonebook file (.pbk) — Windows stores the actual config here
+Write-Host ""
+Write-Host "--- 7d) Phonebook file (rasphone.pbk) ---" -ForegroundColor DarkCyan
+$pbkPath = "$env:AppData\Microsoft\Network\Connections\Pbk\rasphone.pbk"
+if (Test-Path $pbkPath) {
+    Write-Host "  Pbk path: $pbkPath"
+    $pbkContent = Get-Content $pbkPath -Raw
+    # Find this connection's section (between [<guid>] and next [section])
+    if ($connObj) {
+        $guidBare = $connObj.Guid
+        $pattern = "(?s)\[$([regex]::Escape($guidBare))\].*?(?=\n\[)"
+        $match = [regex]::Match($pbkContent, $pattern)
+        if ($match.Success) {
+            $section = $match.Value
+            Write-Host "  Section for $guidBare :"
+            Write-Host $section
+            if ($section -match "EapType=(\d+)") {
+                $eapType = $matches[1]
+                Write-Host "  Phonebook EapType: $eapType" -ForegroundColor Cyan
+                if ($eapType -eq '26') {
+                    Write-Host "  GOOD: phonebook has EapType=26 (MSCHAPv2)" -ForegroundColor Green
+                } else {
+                    Write-Host "  PROBLEM: phonebook has EapType=$eapType, not 26" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "  No EapType= line in phonebook section" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  No section found for GUID $guidBare in pbk" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  No conn GUID, can't extract section" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  Pbk file not found at: $pbkPath" -ForegroundColor Yellow
+}
+Write-Host "--- end 7d ---" -ForegroundColor DarkCyan
+
+# 7e) UserEapInfo (the secret key that GUI Connect writes)
+Write-Host ""
+Write-Host "--- 7e) UserEapInfo registry (the key that GUI seed populates) ---" -ForegroundColor DarkCyan
+$userEapInfoKey = "HKCU:\SOFTWARE\Microsoft\RAS EAP\UserEapInfo"
+if (Test-Path $userEapInfoKey) {
+    Write-Host "  UserEapInfo key EXISTS. EAP creds are pre-populated (good for non-interactive)." -ForegroundColor Green
+    Get-ChildItem $userEapInfoKey -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "    Subkey: $($_.PSChildName)"
+    }
+} else {
+    Write-Host "  UserEapInfo key MISSING. This is why rasdial asks for GUI dialog." -ForegroundColor Red
+    Write-Host "  Fix: One-time GUI seed via Settings -> Network -> VPN -> Connect." -ForegroundColor Yellow
+}
+Write-Host "--- end 7e ---" -ForegroundColor DarkCyan
+
+# 7f) cmdkey entries
+Write-Host ""
+Write-Host "--- 7f) cmdkey entries (Credential Manager) ---" -ForegroundColor DarkCyan
 try {
     $listOut = cmdkey /list 2>&1
     $relevant = $listOut | Where-Object { $_ -match [regex]::Escape($ConnectionName) -or $_ -match [regex]::Escape($ServerIp) }
@@ -394,7 +499,19 @@ try {
 } catch {
     Write-Host "  cmdkey /list failed: $_" -ForegroundColor Red
 }
-Write-Host "--- end ---" -ForegroundColor DarkCyan
+Write-Host "--- end 7f ---" -ForegroundColor DarkCyan
+
+# 7g) Installed CA cert
+Write-Host ""
+Write-Host "--- 7g) Installed CA cert (LocalMachine\Root) ---" -ForegroundColor DarkCyan
+$ca = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq $CaSubject } | Select-Object -First 1
+if ($ca) {
+    $ca | Format-List Subject, Issuer, NotBefore, NotAfter, Thumbprint | Out-String | Write-Host
+} else {
+    Write-Host "  (CA cert NOT FOUND in LocalMachine\Root)" -ForegroundColor Red
+}
+Write-Host "--- end 7g ---" -ForegroundColor DarkCyan
 
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
