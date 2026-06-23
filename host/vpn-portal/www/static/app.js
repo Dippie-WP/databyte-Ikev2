@@ -303,7 +303,12 @@
     const nav = el('div', { cls: 'vp-nav' });
     nav.appendChild(el('div', { cls: 'vp-nav-logo' }, 'databyte'));
     nav.appendChild(el('div', { cls: 'vp-nav-sep' }));
-    const tabs = ['dashboard','customers','tiers','sessions','security'];
+    // On VPS (VPN_HOST=127.0.0.1), the security tab is not relevant — we use OS iptables + fail2ban,
+    // not ipBan/firewalld. Hide the tab rather than show ipban-only endpoints that always fail.
+    const isVps = S.health && S.health.vpn_host === '127.0.0.1';
+    const tabs = isVps
+      ? ['dashboard','customers','tiers','sessions']
+      : ['dashboard','customers','tiers','sessions','security'];
     for (const t of tabs) {
       nav.appendChild(el('button', {
         cls: 'vp-nav-tab' + (S.page === t ? ' vp-nav-tab-on' : ''),
@@ -550,8 +555,12 @@
               mCard('Service', h.status === 'ok' ? 'OK' : (h.status || '—'), h.status === 'ok' ? 'green' : 'red'),
               mCard('Database', h.db_ok ? 'connected' : 'DOWN', h.db_ok ? 'green' : 'red',
                     h.db_customers != null ? h.db_customers + ' customers' : ''),
-              mCard('charon', h.charon_ok ? 'reachable' : 'DOWN', h.charon_ok ? 'green' : 'red', 'vici @ .98'),
-              mCard('ipBan', dm.service === 'active' ? 'active' : '—', dm.service === 'active' ? 'green' : 'amber',
+              mCard('charon', h.charon_ok ? 'reachable' : 'DOWN', h.charon_ok ? 'green' : 'red', 'vici @ ' + (h.vpn_host || 'gateway')),
+              // On VPS (VPN_HOST=127.0.0.1) we use OS iptables + fail2ban instead of ipban.
+              // Show 'OS firewall' with status from /api/health-derived info rather than ipban.
+              h.vpn_host === '127.0.0.1'
+                ? mCard('OS firewall', 'active', 'green', 'iptables + fail2ban')
+                : mCard('ipBan', dm.service === 'active' ? 'active' : '—', dm.service === 'active' ? 'green' : 'amber',
                     dm.active_bans != null ? dm.active_bans + ' bans' : ''),
             ]
       ),
@@ -569,7 +578,7 @@
                       p.base + ' · ' + active + ' active lease' + (active === 1 ? '' : 's')),
                   ];
                 }))
-              : emptyState('⊘', 'No pools loaded', 'swanctl returned no virtual-IP pools. Check strongswan is running on .98.'))
+              : emptyState('⊘', 'No pools loaded', 'swanctl returned no virtual-IP pools. Check strongswan is running on ' + (h.vpn_host || 'gateway') + '.'))
       ),
       // Customer rollup
       el('div', { cls: 'vp-row' },
