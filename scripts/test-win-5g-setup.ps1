@@ -4,9 +4,16 @@
     Databyte VPN (vpn-prod-01 / 154.65.110.44).
 
 .DESCRIPTION
-    v3 — works whether run as a file OR piped via 'irm URL | iex'.
-    v3 change vs v2: passes $Username $Password directly to rasdial so the
-    Windows IKEv2 GUI auth dialog is bypassed (error 703 in non-interactive mode).
+    v4 — works whether run as a file OR piped via 'irm URL | iex'.
+    v4 change vs v3: stores credentials via Set-VpnConnectionUsernamePassword
+    (which writes them into the phonebook profile XML) so the IKEv2 EAP host
+    reads them from the profile, NOT from a GUI dialog prompt. v3's trick of
+    passing creds to rasdial inline does NOT bypass the GUI for IKEv2+EAP
+    (rasdial creds are for PPP, not EAP-MSCHAPv2). Result: error 703.
+
+    Fallback: if non-interactive connect still fails, the script prints the
+    ONE-LINE interactive command Zun can paste into a manually-opened
+    elevated PowerShell (where the GUI dialog CAN appear and be dismissed).
 
     Two run modes:
       a) File mode (recommended):  powershell -ExecutionPolicy Bypass -File .\test-win-5g-setup.ps1
@@ -229,12 +236,33 @@ try {
 }
 
 # ============================================================================
-# STEP 4 - Store credentials
+# STEP 4 - Store credentials in the VPN profile
 # ============================================================================
 Write-Host ""
-Write-Host "=== [4/5] Storing credentials ===" -ForegroundColor Cyan
+Write-Host "=== [4/5] Storing credentials in VPN profile ===" -ForegroundColor Cyan
+
+# v4 CHANGE: Use Set-VpnConnectionUsernamePassword (NOT cmdkey, NOT rasdial-with-creds).
+# This writes the creds into the phonebook profile XML so the IKEv2 EAP host
+# reads them from there. The IKEv2 EAP host on Windows does NOT consult
+# Windows Credential Manager (cmdkey) or rasdial's command-line creds for
+# authentication — it reads from the phonebook profile, period. That's why
+# v3 still hit error 703: rasdial with $User $Pass sends the creds down the
+# PPP path, but the IKEv2 stack separately needs them from the profile.
+try {
+    Set-VpnConnectionUsernamePassword `
+        -ConnectionName $ConnectionName `
+        -Username $Username `
+        -Password $Password `
+        -Domain "" `
+        -PassThru | Out-Null
+    Write-Host "  Credentials stored in profile '$ConnectionName' (EAP host will read these, no GUI prompt)." -ForegroundColor Green
+} catch {
+    Write-Host "  ERROR: Set-VpnConnectionUsernamePassword failed: $_" -ForegroundColor Red
+    Write-Host "  Continuing — connection attempt may still work or prompt for creds." -ForegroundColor Yellow
+}
+
+# Also seed cmdkey for legacy fallback (does no harm if Set-VpnConnectionUsernamePassword succeeded).
 cmdkey /generic:$ConnectionName /user:$Username /pass:$Password | Out-Null
-Write-Host "  Credentials stored for '$Username'" -ForegroundColor Green
 
 # ============================================================================
 # STEP 5 - Connect
@@ -245,9 +273,9 @@ Write-Host "=== [5/5] Connecting ===" -ForegroundColor Cyan
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
 
-# Pass credentials directly to rasdial so Windows doesn't show the GUI prompt.
-# Format: rasdial <name> <username> <password>
-$connect = rasdial $ConnectionName $Username $Password
+# v4 CHANGE: rasdial with NO creds. The IKEv2 EAP host reads creds from the
+# phonebook profile (set in Step 4), so no GUI dialog should appear.
+$connect = rasdial $ConnectionName
 Write-Host ""
 Write-Host "  rasdial output:" -ForegroundColor Cyan
 Write-Host "  $connect"
@@ -257,6 +285,15 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "  Connected successfully." -ForegroundColor Green
 } else {
     Write-Host "  rasdial exit code: $LASTEXITCODE" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  The non-interactive path failed. Try the INTERACTIVE fallback:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "    1. Open PowerShell AS ADMIN manually (Win+X -> 'Windows PowerShell (Admin)' or 'Terminal (Admin)')" -ForegroundColor White
+    Write-Host "    2. Run:  rasdial $ConnectionName" -ForegroundColor White
+    Write-Host "    3. If a GUI dialog appears with username/password fields, type them and click OK" -ForegroundColor White
+    Write-Host "    4. Connection should establish. Close the admin PowerShell after." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  After ONE successful interactive connect, the creds are seeded and future non-interactive rasdial should work." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  Common Windows VPN errors:" -ForegroundColor Yellow
     Write-Host "    691 = Auth failed (check username/password)" -ForegroundColor Yellow
