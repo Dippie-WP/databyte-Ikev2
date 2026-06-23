@@ -216,3 +216,52 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Lesson:**
 - **Don't try to outsmart charon's lifecycle.** Let charon manage loading.
 - The start-scripts option is exactly the right hook.
+
+## 2026-06-23 — CP4 + CP5 audit findings (commit dcc0676, audit follow-up)
+
+### 🔴 CRITICAL — Portal unreachable from Cloudflare (open)
+
+**Bug:** OS firewall `iptables-legacy` INPUT chain has policy DROP and **no rules for TCP 80 or 443**. The Xneelo cloud firewall is open (verified by Zun), but the OS firewall then blocks all external traffic. The portal is currently unreachable from the internet.
+
+**Evidence:**
+- `iptables-legacy -L INPUT -n` — 9 rules, none for 80/443
+- `policy DROP 62 packets, 4146 bytes` — 62 packets dropped
+- `ss conntrack` — zero external connections (only 127.0.0.1 and self-to-self)
+- `tcpdump -i any "tcp[tcpflags] & tcp-syn != 0 and tcp dst port 443"` — 0 packets in 12s
+- VPS's public IP (154.65.110.44) is on `ens3` (verified via `ip -4 addr`)
+
+**Why missed in CP4:** Self-tests used `curl 127.0.0.1` and `curl <own public IP>` from the VPS itself — both succeed via the kernel's local routing table. The OS firewall is only consulted for external source IPs.
+
+**Proposed fix (AWAITING ZUN APPROVAL):**
+- Insert two rules in the correct position:
+  ```
+  -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
+  -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
+  ```
+- Persist via `netfilter-persistent save` (apt) or restore in `/etc/rc.local`
+- Defense in depth: Xneelo cloud firewall remains the primary filter (Cloudflare IP allowlist); OS firewall just opens the port on the host
+
+### 🟠 HIGH (next session, not blocking CP4 acceptance)
+
+1. **Customer portal cookie missing `secure` flag** — `/api/portal/login` `set_cookie` call. Fix: add `secure=secure_cookie` parameter.
+2. **`/certs/` exposes `strongswan-ca.crt.srl` and `.gitkeep`** — return 404 for non-`.pem`/`.crt` files via nginx `location ~ \.(srl|gitkeep)$ { return 404; }`.
+3. **Operator session cleanup is lazy-only** — `purge_expired_sessions()` exists for customer sessions but is never called. Add systemd timer + sqlite query, OR call from auth middleware.
+
+### 🟡 MEDIUM (CP7 scope)
+
+4. **No fail2ban portal jail** — only sshd jail exists. Add portal-login jail with logpath `/var/log/nginx/vpn-portal.access.log`, 3 retries → 24h ban.
+5. **No AIDE** — critical files (`/opt/vpn-portal/app.py`, `/etc/vpn-portal.env`, `/etc/ssl/cloudflare/*`, `/etc/nginx/sites-enabled/vpn-portal`) have no integrity baseline.
+6. **No backup of `/etc/vpn-portal.env` or `/etc/ssl/cloudflare/*`** — extend `strongswan-db-backup.sh` to include these, push to RustFS encrypted bucket.
+7. **No cert expiry monitoring** — Origin Cert valid until 2041-06-19. Add `/opt/scripts/check-cert-expiry.sh` + cron.
+8. **Over-broad INPUT rules** — `ACCEPT 0.0.0.0/0 :4502` (charon is 127.0.0.1 only); `ACCEPT 10.99.0.0/24` on INPUT (should be FORWARD only).
+9. **iptables-nft empty + policy ACCEPT** — currently using legacy backend, but nft is the default. Consolidate to one backend, document in DEPLOYMENT.md.
+
+### 🟢 LOW (polish, not blocking)
+
+10. **systemd `RuntimeDirectoryMode` duplicate** (0750 in main unit + 0755 in drop-in). Remove 0750 from main unit.
+11. **CSP no `report-uri`** — add `report-uri /api/csp-report` + implement endpoint.
+12. **logrotate for portal logs not explicitly documented** — covered by `nginx` config `/var/log/nginx/*.log` glob, but no explicit entry.
+
+### New lessons
+- **#55:** Self-testing a network service via `curl <own public IP>` succeeds via kernel local routing even when OS firewall would block external sources. The real test is from an external IP. For services behind a cloud firewall, this means asking the user to test from a phone.
+- **#56:** "Ports are open" at the cloud layer doesn't imply OS-level iptables is open. The two are independent defense-in-depth layers; both must be configured.
