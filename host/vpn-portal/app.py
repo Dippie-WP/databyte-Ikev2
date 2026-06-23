@@ -839,6 +839,7 @@ def list_customers(
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
                c.over_quota, c.billing_id, c.email, c.max_devices,
+               c.bandwidth_down_mbps, c.bandwidth_up_mbps,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -866,6 +867,8 @@ def list_customers(
             "billing_id": r.get("billing_id"),
             "email": r.get("email"),
             "max_devices": r.get("max_devices"),
+            "bandwidth_down_mbps": r.get("bandwidth_down_mbps") or 20,
+            "bandwidth_up_mbps": r.get("bandwidth_up_mbps") or 20,
             "used_bytes": used,
             "quota_bytes": quota,
             "pct": round(used / quota * 100, 1) if quota else 0,
@@ -1114,6 +1117,7 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
                c.is_operator, c.is_active, c.status, c.data_used_bytes,
                c.data_limit_bytes, c.over_quota, c.notes, c.created_at, c.updated_at,
                c.billing_id, c.email,
+               c.bandwidth_down_mbps, c.bandwidth_up_mbps, c.max_devices,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -1571,6 +1575,8 @@ class CustomerUpdate(BaseModel):
     tier_name: Optional[str] = None  # change tier
     custom_cap_mb: Optional[int] = None  # if tier_name='custom'
     max_devices: Optional[int] = None  # 1..10
+    bandwidth_down_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
+    bandwidth_up_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
 
 
 class BulkAction(BaseModel):
@@ -1646,6 +1652,14 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         if not 1 <= req.max_devices <= 10:
             raise HTTPException(400, "max_devices must be 1..10")
         sets.append(f"max_devices = {int(req.max_devices)}")
+    if req.bandwidth_down_mbps is not None:
+        if not 1 <= req.bandwidth_down_mbps <= 1000:
+            raise HTTPException(400, "bandwidth_down_mbps must be 1..1000")
+        sets.append(f"bandwidth_down_mbps = {int(req.bandwidth_down_mbps)}")
+    if req.bandwidth_up_mbps is not None:
+        if not 1 <= req.bandwidth_up_mbps <= 1000:
+            raise HTTPException(400, "bandwidth_up_mbps must be 1..1000")
+        sets.append(f"bandwidth_up_mbps = {int(req.bandwidth_up_mbps)}")
 
     # Tier change
     if req.tier_name is not None:

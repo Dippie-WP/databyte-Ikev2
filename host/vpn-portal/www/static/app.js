@@ -1643,6 +1643,8 @@
               labeledField('Email', el('input', { type: 'email', cls: 'vp-input', id: 'ed-email', value: c.email || '' })),
               labeledField('Billing ID', el('input', { type: 'text', cls: 'vp-input', id: 'ed-bill', value: c.billing_id || '' })),
               labeledField('Max devices (1–10)', el('input', { type: 'number', min: 1, max: 10, cls: 'vp-input', id: 'ed-mdev', value: c.max_devices || 1 })),
+              labeledField('Bandwidth down (Mbps, 1–1000)', el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-down', value: c.bandwidth_down_mbps || 20 })),
+              labeledField('Bandwidth up (Mbps, 1–1000)', el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-up', value: c.bandwidth_up_mbps || 20 })),
               labeledField('Tier',
                 el('select', { cls: 'vp-input', id: 'ed-tier' },
                   ...allTiers.map(t => el('option', { value: t.name, selected: t.name === c.tier }, t.display_name || t.name)),
@@ -1663,8 +1665,9 @@
                 const $ = id => document.getElementById(id);
                 const $d = $('ed-disp'), $tg = $('ed-tg'), $em = $('ed-email'),
                       $bi = $('ed-bill'), $md = $('ed-mdev'), $ti = $('ed-tier'),
-                      $cm = $('ed-custom-mb'), $nt = $('ed-notes');
-                if (!$d || !$tg || !$em || !$bi || !$md || !$ti) {
+                      $cm = $('ed-custom-mb'), $nt = $('ed-notes'),
+                      $bwd = $('ed-bw-down'), $bwu = $('ed-bw-up');
+                if (!$d || !$tg || !$em || !$bi || !$md || !$ti || !$bwd || !$bwu) {
                   toast('Edit form is broken — fields missing. Reload the page.', 'err');
                   return;
                 }
@@ -1674,6 +1677,8 @@
                   email: $em.value.trim() || null,
                   billing_id: $bi.value.trim() || null,
                   max_devices: parseInt($md.value || '1', 10),
+                  bandwidth_down_mbps: parseInt($bwd.value || '20', 10),
+                  bandwidth_up_mbps: parseInt($bwu.value || '20', 10),
                   tier_name: $ti.value,
                   notes: $nt.value.trim() || null,
                 };
