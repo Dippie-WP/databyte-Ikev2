@@ -45,8 +45,8 @@ $xmlPath = Join-Path $env:TEMP "databyte-vpn.xml"
             <Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
               <EapMsChapV2Config>
                 <ServerValidation>
-                  <DisableUserPromptForServerValidation>false</DisableUserPromptForServerValidation>
-                  <ServerNames></ServerNames>
+                  <DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation>
+                  <ServerNames>myvpn.databyte.co.za</ServerNames>
                 </ServerValidation>
               </EapMsChapV2Config>
             </Config>
