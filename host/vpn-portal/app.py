@@ -1901,6 +1901,34 @@ class PortalLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
 
 
+@app.post("/api/csp-report")
+async def csp_report(request: Request):
+    """CP7/LOW2 — CSP violation report endpoint.
+
+    Browsers POST a JSON report to this URL when CSP blocks a resource.
+    Body format: {"csp-report": {"violated-directive": "...", "blocked-uri": "...", ...}}.
+
+    We log at WARN level so they show up in fail2ban-style alerts later.
+    No auth (reports are from browsers of unauthenticated visitors).
+
+    Returns 204 No Content to prevent client retries.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return Response(status_code=204)
+    report = body.get("csp-report", body) if isinstance(body, dict) else {}
+    violated = report.get("violated-directive", "?")
+    blocked = report.get("blocked-uri", "?")
+    doc_uri = report.get("document-uri", "?")
+    log.warning(
+        "CSP report: violated=%s blocked=%s doc=%s ua=%s",
+        violated, blocked, doc_uri,
+        request.headers.get("user-agent", "?")[:120],
+    )
+    return Response(status_code=204)
+
+
 @app.post("/api/portal/login")
 def portal_login(req: PortalLoginRequest, request: Request, response: Response):
     """Customer logs in with their VPN credentials (EAP identity + password).
