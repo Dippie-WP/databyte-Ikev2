@@ -4,26 +4,24 @@
     Databyte VPN (vpn-prod-01 / 154.65.110.44).
 
 .DESCRIPTION
-    v5 — works whether run as a file OR piped via 'irm URL | iex'.
+    v6 — works whether run as a file OR piped via 'irm URL | iex'.
+    Compatible with older Windows 10 builds (1709 - 1903 era) where
+    Set-VpnConnectionUsernamePassword and New-EapConfiguration -Type
+    are NOT available.
 
-    v5 changes vs v4:
-      a) EXPLICITLY generates EAP-MSCHAPv2 config via New-EapConfiguration
-         and passes it to Add-VpnConnection via -EapConfigXmlStream.
-         Without this, the IKEv2 stack may default to EAP-TLS, which
-         prompts for a user cert selection (GUI dialog → error 703 in
-         non-interactive sessions, and even in some interactive ones).
-      b) Self-elevates to admin if not already elevated (Start-Process
-         -Verb RunAs re-launches the script with UAC consent).
-      c) Prints the connection profile as XML at the end so Zun can paste
-         it back if it still fails.
-
-    Two run modes:
-      a) File mode (recommended):  powershell -ExecutionPolicy Bypass -File .\test-win-5g-setup.ps1
-      b) Stream mode (one-liner):  irm https://myvpn.databyte.co.za/static/test-win-5g-setup.ps1 | iex
-
-    In stream mode $PSScriptRoot is empty. This script uses $PSCommandPath
-    with a fallback to a known location, OR runs the bundle from a temp
-    download in either case.
+    v6 changes vs v5:
+      a) Embeds EAP-MSCHAPv2 XML as a here-string (no New-EapConfiguration
+         cmdlet needed). Type=26 forces MSCHAPv2, NOT EAP-TLS.
+      b) Uses cmdkey to store creds in Windows Credential Manager
+         (not Set-VpnConnectionUsernamePassword). This is the documented
+         fallback per the Microsoft Support community thread that flagged
+         "rasdial does not change the previous username and password" —
+         the issue was a stale Credential Manager cache. v6 calls
+         `cmdkey /delete` first to clear it, then `cmdkey /generic:...`
+         to set fresh creds.
+      c) Self-elevates to admin via Start-Process -Verb RunAs.
+      d) Dumps profile + EAP config + cmdkey entries at the end for
+         diagnostics — paste back if still failing.
 
 .NOTES
     TEST CUSTOMER. Will be deleted after multi-device test.
@@ -43,6 +41,29 @@ $Password         = "a1V5M2Cd1oE0TNWY9wORsg"
 $ExpectedCaSha256 = "5C:10:B9:6A:97:06:10:29:7C:8D:8F:B3:6B:E3:5A:98:58:CF:F4:10:C8:1E:72:78:7E:25:08:43:B2:71:CE:06"
 $CaCertUrl        = "https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
 $CaSubject        = "CN=strongSwan CA"
+
+# ============================================================================
+# EAP-MSCHAPv2 EapHostConfig XML (canonical, from MS Learn)
+# Type 26 = EapMsChapV2 (NOT 13 = EapTls which would prompt for cert)
+# ============================================================================
+$EapMschapv2Xml = @"
+<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+  <EapMethod>
+    <Type xmlns="http://www.microsoft.com/provisioning/EapCommon">26</Type>
+    <VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>
+    <VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>
+    <AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId>
+  </EapMethod>
+  <Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+    <Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">
+      <Type>26</Type>
+      <EapType xmlns="http://www.microsoft.com/provisioning/MsChapV2ConnectionPropertiesV1">
+        <UseWinLogonCredentials>false</UseWinLogonCredentials>
+      </EapType>
+    </Eap>
+  </Config>
+</EapHostConfig>
+"@
 
 # ============================================================================
 # Determine script-relative path (works for both File and Stream modes)
@@ -77,11 +98,8 @@ function Get-Sha256Fingerprint {
 }
 
 # ============================================================================
-# STEP 0 - Self-elevate to admin (v5 NEW)
+# STEP 0 - Self-elevate to admin
 # ============================================================================
-# This handles the case where the script was launched from a non-elevated
-# PowerShell via 'irm | iex'. Without this, the rest of the script would
-# fail with cryptic "Access denied" or silently no-op on registry writes.
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )
@@ -94,7 +112,6 @@ if (-not $isAdmin) {
             "-File", "`"$PSCommandPath`""
         ) -Verb RunAs
     } else {
-        # Stream mode: save to temp, then run from temp
         $tmp = Join-Path $env:TEMP "databyte-setup-elev-$(Get-Random).ps1"
         $content | Out-File -FilePath $tmp -Encoding utf8 -Force
         Start-Process -FilePath "powershell.exe" -ArgumentList @(
@@ -200,51 +217,30 @@ if ($needsInstall) {
 # STEP 2 - Remove old connection (if exists) and create fresh with EAP-MSCHAPv2
 # ============================================================================
 Write-Host ""
-Write-Host "=== [2/6] Creating VPN connection '$ConnectionName' with EAP-MSCHAPv2 ===" -ForegroundColor Cyan
+Write-Host "=== [2/6] Creating VPN connection '$ConnectionName' with EAP-MSCHAPv2 (type 26) ===" -ForegroundColor Cyan
 
 $existingConn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
 if ($existingConn) {
-    Write-Host "  Removing existing connection (had bad/missing EAP config)..." -ForegroundColor Yellow
+    Write-Host "  Removing existing connection..." -ForegroundColor Yellow
     rasdial $ConnectionName /disconnect 2>&1 | Out-Null
     Remove-VpnConnection -Name $ConnectionName -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
 }
 
-# v5 CHANGE: Build an EXPLICIT EAP-MSCHAPv2 config and pass it to Add-VpnConnection.
-# Without this, Add-VpnConnection -AuthenticationMethod "Eap" can default to
-# EAP-TLS (or "Any EAP"), which makes the EAP host request cert selection via a
-# GUI dialog → error 703 in any session that can't show a GUI.
-try {
-    $EapConfig = New-EapConfiguration -Type EapMsChapV2
-    Write-Host "  Generated EAP-MSCHAPv2 config XML." -ForegroundColor Green
-} catch {
-    Write-Host "  ERROR: New-EapConfiguration failed: $_" -ForegroundColor Red
-    Write-Host "  (Your Windows version may not support -Type EapMsChapV2.)" -ForegroundColor Yellow
-    Write-Host "  Will try the legacy -AuthenticationMethod 'EAP' path as fallback." -ForegroundColor Yellow
-    $EapConfig = $null
-}
+# v6 CHANGE: Use embedded EapHostConfig XML directly. No dependency on
+# New-EapConfiguration cmdlet (not available on older Win10 builds).
+# The XML has Type=26 (MSCHAPv2), NOT Type=13 (TLS).
+Add-VpnConnection `
+    -Name $ConnectionName `
+    -ServerAddress $ServerIp `
+    -TunnelType "IKEv2" `
+    -AuthenticationMethod "EAP" `
+    -EapConfigXmlStream $EapMschapv2Xml `
+    -RememberCredential `
+    -PassThru | Out-Null
 
-if ($EapConfig) {
-    Add-VpnConnection `
-        -Name $ConnectionName `
-        -ServerAddress $ServerIp `
-        -TunnelType "IKEv2" `
-        -AuthenticationMethod "EAP" `
-        -EapConfigXmlStream $EapConfig.EapConfigXmlStream `
-        -RememberCredential `
-        -PassThru | Out-Null
-} else {
-    # Fallback: basic EAP, no XML. May prompt for cert on some systems.
-    Add-VpnConnection `
-        -Name $ConnectionName `
-        -ServerAddress $ServerIp `
-        -TunnelType "IKEv2" `
-        -AuthenticationMethod "EAP" `
-        -RememberCredential `
-        -PassThru | Out-Null
-}
-
-Write-Host "  Connection created. Server=$ServerIp" -ForegroundColor Green
+Write-Host "  Connection created with explicit EAP-MSCHAPv2 (type 26)." -ForegroundColor Green
+Write-Host "  Server=$ServerIp, Tunnel=IKEv2, Auth=EAP/MSCHAPv2" -ForegroundColor Green
 
 # Set the registry tweak for stronger crypto.
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
@@ -273,30 +269,37 @@ try {
 }
 
 # ============================================================================
-# STEP 4 - Store credentials in the VPN profile
+# STEP 4 - Store credentials via cmdkey (compatible with older Windows)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [4/6] Storing credentials in VPN profile ===" -ForegroundColor Cyan
+Write-Host "=== [4/6] Storing credentials via Windows Credential Manager ===" -ForegroundColor Cyan
 
-try {
-    Set-VpnConnectionUsernamePassword `
-        -ConnectionName $ConnectionName `
-        -Username $Username `
-        -Password $Password `
-        -Domain "" `
-        -PassThru | Out-Null
-    Write-Host "  Credentials stored in profile '$ConnectionName'." -ForegroundColor Green
-} catch {
-    Write-Host "  ERROR: Set-VpnConnectionUsernamePassword failed: $_" -ForegroundColor Red
+# v6 CHANGE: clear any stale cached creds first. The Microsoft Support
+# thread "rasdial does not change the previous username and password"
+# identified Credential Manager cache as the cause of stale creds being
+# used. We delete-then-set to ensure freshness.
+$cmdkeyTargets = @(
+    $ConnectionName,           # generic by connection name
+    "RAS:$ConnectionName",     # generic by RAS-namespace name
+    $ServerIp,                 # by server IP
+    "TERMSRV:$ServerIp"        # by Remote Desktop namespace (in case of conflict)
+)
+foreach ($target in $cmdkeyTargets) {
+    $delOut = cmdkey /delete:$target 2>&1
+    # silently ignore "not found" errors
 }
 
+# Now store fresh creds in Credential Manager
 cmdkey /generic:$ConnectionName /user:$Username /pass:$Password | Out-Null
+cmdkey /generic:"RAS:$ConnectionName" /user:$Username /pass:$Password | Out-Null
+Write-Host "  Cleared stale creds, stored fresh creds for '$Username' in Credential Manager." -ForegroundColor Green
+Write-Host "  (rasdial reads from here, NOT from the VPN profile directly)" -ForegroundColor DarkCyan
 
 # ============================================================================
-# STEP 5 - Connect
+# STEP 5 - Connect (no inline creds, let Windows read from Credential Manager)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [5/6] Connecting ===" -ForegroundColor Cyan
+Write-Host "=== [5/6] Connecting (rasdial reads from Credential Manager) ===" -ForegroundColor Cyan
 
 rasdial $ConnectionName /disconnect 2>&1 | Out-Null
 Start-Sleep -Seconds 1
@@ -312,21 +315,22 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "  rasdial exit code: $LASTEXITCODE" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  Non-interactive path failed. Run this INTERACTIVELY to seed the profile:" -ForegroundColor Yellow
+    Write-Host "  If 703: profile likely still has wrong EAP method. Check step 6 diagnostics." -ForegroundColor Yellow
+    Write-Host "  Other errors:" -ForegroundColor Yellow
+    Write-Host "    691 = Auth failed (creds)" -ForegroundColor Yellow
+    Write-Host "    789 = IKE auth failed (cert or crypto)" -ForegroundColor Yellow
+    Write-Host "    800 = Can't reach server (firewall)" -ForegroundColor Yellow
+    Write-Host "    13801 = IKE creds unacceptable" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "    1. Open PowerShell AS ADMIN manually (Win+X -> 'Windows PowerShell (Admin)')" -ForegroundColor White
-    Write-Host "    2. Run:  rasdial $ConnectionName" -ForegroundColor White
-    Write-Host "    3. If a GUI dialog appears, fill in:" -ForegroundColor White
-    Write-Host "         Username: $Username" -ForegroundColor White
-    Write-Host "         Password: (the test password)" -ForegroundColor White
-    Write-Host "    4. Click OK. Connection establishes. Profile is now seeded." -ForegroundColor White
-    Write-Host ""
-    Write-Host "  After one successful interactive connect, future non-interactive rasdial works." -ForegroundColor Yellow
+    Write-Host "  FALLBACK: Open PowerShell AS ADMIN manually, then run:" -ForegroundColor Yellow
+    Write-Host "    rasdial $ConnectionName" -ForegroundColor White
+    Write-Host "  If a GUI dialog appears, fill in user/pass and click OK." -ForegroundColor White
+    Write-Host "  One successful interactive connect seeds the creds permanently." -ForegroundColor Yellow
     Write-Host ""
 }
 
 # ============================================================================
-# STEP 6 - Diagnostics (v5 NEW): dump profile info so Zun can paste back if needed
+# STEP 6 - Diagnostics
 # ============================================================================
 Write-Host ""
 Write-Host "=== [6/6] Profile diagnostics (paste back if still failing) ===" -ForegroundColor Cyan
@@ -334,7 +338,7 @@ Write-Host "=== [6/6] Profile diagnostics (paste back if still failing) ===" -Fo
 try {
     $conn = Get-VpnConnection -Name $ConnectionName -ErrorAction Stop
     Write-Host ""
-    Write-Host "--- Get-VpnConnection output ---" -ForegroundColor DarkCyan
+    Write-Host "--- Get-VpnConnection ---" -ForegroundColor DarkCyan
     $conn | Format-List Name, ServerAddress, TunnelType, AuthenticationMethod, `
         EncryptionLevel, RememberCredential, SplitTunneling, `
         IdleDisconnectSeconds, DnsSuffix | Out-String | Write-Host
@@ -351,27 +355,44 @@ $ca = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
 if ($ca) {
     $ca | Format-List Subject, Issuer, NotBefore, NotAfter, Thumbprint | Out-String | Write-Host
 } else {
-    Write-Host "  (CA cert NOT FOUND in LocalMachine\Root — install step may have failed)" -ForegroundColor Red
+    Write-Host "  (CA cert NOT FOUND in LocalMachine\Root)" -ForegroundColor Red
 }
 Write-Host "--- end ---" -ForegroundColor DarkCyan
 
-# Show EAP config (this is the key one — verifies it's MSCHAPv2 not TLS)
+# Show EAP config — verify type 26 (MSCHAPv2) not 13 (TLS)
 Write-Host ""
 Write-Host "--- EAP config in profile ---" -ForegroundColor DarkCyan
 try {
-    $config = Get-VpnConnection -Name $ConnectionName | Select-Object -ExpandProperty EapConfigXmlStream -ErrorAction SilentlyContinue
+    $config = $conn.EapConfigXmlStream
     if ($config) {
-        # Decode and show only the EAP method type, not the full XML
         [xml]$xmlDoc = $config
-        $methods = $xmlDoc.EapHostConfig.Config.EapMethod.Type
-        Write-Host "  EAP methods in profile: $($methods -join ', ')"
-        Write-Host "  (EapMsChapV2 = type 26, that's what we want)"
-        Write-Host "  (EapTls = type 13, that would prompt for cert → 703)"
+        $ns = New-Object Xml.XmlNamespaceManager($xmlDoc.NameTable)
+        $ns.AddNamespace("e", "http://www.microsoft.com/provisioning/EapHostConfig")
+        $types = $xmlDoc.SelectNodes("//e:EapMethod/e:Type", $ns) | ForEach-Object { $_.InnerText }
+        Write-Host "  EAP methods in profile: $($types -join ', ')"
+        Write-Host "  (EapMsChapV2 = type 26, what we want)"
+        Write-Host "  (EapTls = type 13, would prompt for cert -> 703)"
     } else {
-        Write-Host "  (No EapConfigXmlStream on this connection — will use Windows default EAP)" -ForegroundColor Yellow
+        Write-Host "  (No EapConfigXmlStream on this connection)" -ForegroundColor Yellow
     }
 } catch {
     Write-Host "  Get EAP config failed: $_" -ForegroundColor Red
+}
+Write-Host "--- end ---" -ForegroundColor DarkCyan
+
+# Show Credential Manager entries for this connection
+Write-Host ""
+Write-Host "--- cmdkey entries (Credential Manager) ---" -ForegroundColor DarkCyan
+try {
+    $listOut = cmdkey /list 2>&1
+    $relevant = $listOut | Where-Object { $_ -match [regex]::Escape($ConnectionName) -or $_ -match [regex]::Escape($ServerIp) }
+    if ($relevant) {
+        $relevant | ForEach-Object { Write-Host "  $_" }
+    } else {
+        Write-Host "  (No cmdkey entries for '$ConnectionName' or '$ServerIp')" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "  cmdkey /list failed: $_" -ForegroundColor Red
 }
 Write-Host "--- end ---" -ForegroundColor DarkCyan
 
