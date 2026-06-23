@@ -4,7 +4,9 @@
     Databyte VPN (vpn-prod-01 / 154.65.110.44).
 
 .DESCRIPTION
-    v2 — works whether run as a file OR piped via 'irm URL | iex'.
+    v3 — works whether run as a file OR piped via 'irm URL | iex'.
+    v3 change vs v2: passes $Username $Password directly to rasdial so the
+    Windows IKEv2 GUI auth dialog is bypassed (error 703 in non-interactive mode).
 
     Two run modes:
       a) File mode (recommended):  powershell -ExecutionPolicy Bypass -File .\test-win-5g-setup.ps1
