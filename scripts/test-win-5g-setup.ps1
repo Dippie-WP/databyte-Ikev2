@@ -198,26 +198,32 @@ if ($connectionObj) {
     }
 }
 
-# Set IPsec crypto to match the strongSwan server
-try {
-    Set-VpnConnectionIPsecConfiguration -ConnectionName $ConnectionName `
-        -AuthenticationTransformConstants "SHA256128" `
-        -CipherTransformConstants "AES256" `
-        -DHGroup "Group14" `
-        -EncryptionMethod "AES256" `
-        -IntegrityCheckMethod "SHA256" `
-        -PfsGroup "ECP384" `
-        -Force | Out-Null
-    Write-Host "  IPsec crypto: AES256/SHA256/Group14/ECP384" -ForegroundColor Green
-} catch {
-    Write-Host "  Set-VpnConnectionIPsecConfiguration failed: $_" -ForegroundColor Yellow
-    Write-Host "  (continuing — Windows defaults may work)" -ForegroundColor Yellow
-}
+# Set IPsec crypto to match what the Windows IKEv2 client actually accepts.
+#
+# SOURCE: Microsoft Learn "How to configure cryptographic settings for IKEv2
+# VPN connections" (learn.microsoft.com/en-us/windows/security/operating-system-security/network-and-data-center-security/configuring-ikev2-vpn-connections).
+# Windows defaults are DES3/SHA1/DH2 which strongSwan rejects as insecure.
+# The article's canonical example uses AES128/SHA256/Group14/PFS2048 — these
+# values are accepted across Win10 versions including the pre-1903 build
+# Zun's homelab test ran on. Earlier versions of this script used AES256/
+# ECP384 to "match the server", but ECP384 is silently rejected on older
+# Windows builds, causing the cmdlet to fall back to defaults — which then
+# fail IKE_AUTH with the server.
+Set-VpnConnectionIPsecConfiguration -ConnectionName $ConnectionName `
+    -AuthenticationTransformConstants "SHA256128" `
+    -CipherTransformConstants "AES128" `
+    -DHGroup "Group14" `
+    -EncryptionMethod "AES128" `
+    -IntegrityCheckMethod "SHA256" `
+    -PfsGroup "PFS2048" `
+    -Force | Out-Null
+Write-Host "  IPsec crypto: AES128/SHA256/Group14/PFS2048 (MS Learn canonical)" -ForegroundColor Green
 
-# Enable strong DH (Group14+) registry tweak
+# Strong DH (Group14+) registry tweak — required for MSCHAPv2 to negotiate
+# Group14 instead of the default DH2 (1024-bit).
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
     -Name "NegotiateDH2048_AES256" -PropertyType DWord -Value 1 -Force | Out-Null
-Write-Host "  Registry: NegotiateDH2048_AES256 = 1 (enables Group14+)" -ForegroundColor Green
+Write-Host "  Registry: NegotiateDH2048_AES256 = 1 (Group14+ enabled)" -ForegroundColor Green
 
 # Store creds so the GUI auto-fills (avoids typing)
 cmdkey /delete:$ConnectionName 2>&1 | Out-Null

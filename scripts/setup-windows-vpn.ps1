@@ -238,18 +238,18 @@ try
     Set-VpnConnectionIPsecConfiguration `
         -ConnectionName $ConnectionName `
         -AuthenticationTransformConstants "SHA256128" `
-        -CipherTransformConstants "AES256" `
+        -CipherTransformConstants "AES128" `
         -DHGroup "Group14" `
-        -EncryptionMethod "AES256" `
+        -EncryptionMethod "AES128" `
         -IntegrityCheckMethod "SHA256" `
-        -PfsGroup "ECP384" `
+        -PfsGroup "PFS2048" `
         -Force | Out-Null
-    Write-Host "  IPsec crypto: AES256/SHA256/Group14/ECP384" -ForegroundColor Green
+    Write-Host "  IPsec crypto: AES128/SHA256/Group14/PFS2048 (MS Learn canonical)" -ForegroundColor Green
 }
 catch
 {
     Write-Warning "Set-VpnConnectionIPsecConfiguration failed: $_"
-    Write-Warning "The connection will use Windows defaults (this may not work)."
+    Write-Warning "The connection will use Windows defaults (DES3/SHA1/DH2 — strongSwan will reject as insecure)."
 }
 
 # Also set the registry key that enables strong DH (Group14+) for EAP-MSCHAPv2.
