@@ -263,11 +263,13 @@ Reference rules snapshot committed at `host/firewall/rules.v4`.
 - Persist via `netfilter-persistent save` (apt) or restore in `/etc/rc.local`
 - Defense in depth: Xneelo cloud firewall remains the primary filter (Cloudflare IP allowlist); OS firewall just opens the port on the host
 
-### 🟠 HIGH (next session, not blocking CP4 acceptance)
+### 🟠 HIGH
 
-1. **Customer portal cookie missing `secure` flag** — `/api/portal/login` `set_cookie` call. Fix: add `secure=secure_cookie` parameter.
-2. **`/certs/` exposes `strongswan-ca.crt.srl` and `.gitkeep`** — return 404 for non-`.pem`/`.crt` files via nginx `location ~ \.(srl|gitkeep)$ { return 404; }`.
-3. **Operator session cleanup is lazy-only** — `purge_expired_sessions()` exists for customer sessions but is never called. Add systemd timer + sqlite query, OR call from auth middleware.
+1. **Customer portal cookie missing `secure` flag.** The `/api/portal/login` `set_cookie` call doesn't include `secure=secure_cookie`. Cookie is HttpOnly + SameSite=strict, so risk is limited, but on HTTPS the Secure flag should be set. Fix: add `secure=secure_cookie` to the customer portal set_cookie call.
+
+2. **`/certs/` exposes `strongswan-ca.crt.srl` and `.gitkeep`.** Curl shows `/certs/strongswan-ca.crt.srl` returns 200 (41 bytes). The .srl is just a CA serial number (not sensitive) and .gitkeep is empty, but neither is meant to be public. Fix: in nginx `/certs/` location, add `location ~ \.(srl|gitkeep)$ { return 404; }` OR add `try_files $uri =404` + restrict to specific filenames (less flexible).
+
+3. **Operator session cleanup is lazy-only.** `customer_portal_sessions` has `purge_expired_sessions()` defined at line 308 but it's **never called**. Operator sessions are only deleted when accessed after expiry (line 288-289 in `validate_operator_session`). Sessions never re-accessed stay forever. Current count: 3 total, 3 expired (all from my password rotation test). Fix: add a background cleanup task (systemd timer + sqlite query) OR call `purge_expired_sessions()` from the auth middleware.
 
 ### 🟡 MEDIUM (CP7 scope)
 
@@ -287,3 +289,46 @@ Reference rules snapshot committed at `host/firewall/rules.v4`.
 ### New lessons
 - **#55:** Self-testing a network service via `curl <own public IP>` succeeds via kernel local routing even when OS firewall would block external sources. The real test is from an external IP. For services behind a cloud firewall, this means asking the user to test from a phone.
 - **#56:** "Ports are open" at the cloud layer doesn't imply OS-level iptables is open. The two are independent defense-in-depth layers; both must be configured.
+
+## 2026-06-23 07:58 UTC — Additional bugs found during dashboard smoke
+
+### ✅ FIXED — Customers table missing billing_id + email columns (commit ef43444)
+
+**Bug:** `/api/customers` SELECT references `c.billing_id` and `c.email` columns
+that don't exist in strongSwan's base customers schema. SQL fails with
+"Error: in prepare, no such column: c.billing_id". Endpoint returns 502.
+
+**Why missed in CP3:** CP3 verification tested login + health, not /api/customers.
+
+**Resolution:** 
+- `host/vpn-portal/portal_customers_extensions.sql` — idempotent ALTER TABLE
+- `host/vpn-portal/apply_customers_extensions.sh` — column-presence check + safe re-run
+
+### ✅ FIXED — Portal SSH fails to write known_hosts under systemd hardening (commit ef43444)
+
+**Bug:** systemd `ProtectSystem=strict` makes `/` read-only except for explicit
+`ReadWritePaths`. `/var/lib/vpn-portal` (where SSH `known_hosts` lives) was
+not in ReadWritePaths, so first SSH connection from portal to localhost
+fails with "mkstemp: Read-only file system".
+
+**Why missed in CP3:** The error was masked by a different SQL bug. Once SQL
+was fixed, this one surfaced.
+
+**Resolution:** Drop-in at `host/systemd/vpn-portal.service.d/readwrite-paths.conf`
+adds `/var/lib/vpn-portal` to ReadWritePaths. Idempotent (drop-ins overlay
+on the main unit).
+
+### 🔵 Cloudflare proxy confirmed ACTIVE
+
+DNS for myvpn.databyte.co.za now resolves to Cloudflare anycast IPs
+(172.67.219.8, 104.21.83.87) — Zun toggled between 07:46-07:54 UTC.
+Browser cert error resolved (Cloudflare presents publicly trusted cert).
+
+### Lessons
+- **#57:** When debugging cascading failures, isolate each layer. The SSH
+  known_hosts error and the SQL column missing were both real, but only
+  one was the actual cause of the 502. Reproduce the exact command from
+  app.py to find which error is the FIRST and real one.
+- **#58:** When app.py references columns not in the schema, it's a
+  deployment bug — code was deployed without the schema migration it
+  needed. Keep these in a separate extensions SQL file.
