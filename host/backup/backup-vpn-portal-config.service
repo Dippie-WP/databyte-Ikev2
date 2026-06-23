@@ -1,0 +1,15 @@
+[Unit]
+Description=Backup VPN portal config + DB to RustFS
+Documentation=file:///root/projects/strongswan-vpn-gateway/host/backup/backup-vpn-portal-config.sh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# rclone + ssh live in /usr/local or /usr/bin on OpenClaw host
+Environment=VPS_SSH_KEY=/root/.ssh/id_ed25519_xneelo
+ExecStart=/root/projects/strongswan-vpn-gateway/host/backup/backup-vpn-portal-config.sh
+# Capture stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backup-vpn-portal-config
