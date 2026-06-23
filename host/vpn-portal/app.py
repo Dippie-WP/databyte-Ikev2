@@ -44,6 +44,8 @@ import hashlib
 import secrets
 import subprocess
 import logging
+import asyncio
+import contextlib
 from collections import defaultdict
 from datetime import datetime
 from typing import Optional
@@ -85,6 +87,38 @@ if os.path.isdir(WWW_DIR):
     @app.get("/portal/", include_in_schema=False)
     def portal_index():
         return FileResponse(os.path.join(WWW_DIR, "portal", "index.html"))
+
+# ---------- Session cleanup (HIGH #3 fix) ----------
+# Both purge_expired_sessions() (customer) and purge_expired_operator_sessions()
+# (operator) are defined in portal_auth.py but were never called, so expired
+# sessions accumulated indefinitely. Fix: asyncio background task that runs
+# every 5 min, deletes expired rows from both tables. Idempotent + safe to run
+# concurrently with reads (SQLite WAL mode allows concurrent readers + 1 writer).
+async def _session_cleanup_loop():
+    while True:
+        try:
+            await asyncio.sleep(300)  # 5 min
+            c = portal_auth.purge_expired_sessions()
+            o = portal_auth.purge_expired_operator_sessions()
+            if c or o:
+                log.info("session cleanup: deleted customer=%d operator=%d", c, o)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning("session cleanup error: %s", e)
+
+@app.on_event("startup")
+async def _start_session_cleanup():
+    app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
+    log.info("session cleanup task scheduled (every 5 min)")
+
+@app.on_event("shutdown")
+async def _stop_session_cleanup():
+    task = getattr(app.state, "session_cleanup_task", None)
+    if task:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 # ---------- Rate limit (in-memory, per-IP) ----------
 _login_attempts: dict[str, list[float]] = defaultdict(list)
@@ -1788,12 +1822,15 @@ def portal_login(req: PortalLoginRequest, request: Request, response: Response):
         user_agent=ua,
         ip_address=ip,
     )
-    # Cookie scoped to /portal/ — browser does NOT send this to /api/*
+    # Cookie scoped to /api/portal/ — browser does NOT send this to /api/*
+    # Secure flag controlled by COOKIE_SECURE env (set to true behind HTTPS).
+    secure_cookie = os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
     response.set_cookie(
         key=portal_auth.PORTAL_COOKIE,
         value=session_id,
         httponly=True,
         samesite="strict",
+        secure=secure_cookie,
         max_age=portal_auth.PORTAL_TTL,
         path="/api/portal/",
     )
