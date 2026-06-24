@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.3
+    Version:        2.0.4
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -47,8 +47,9 @@ $ErrorActionPreference = 'Stop'
 $ServerAddress  = "myvpn.databyte.co.za"
 $RemoteId       = "myvpn.databyte.co.za"   # must match cert CN/SAN; pins server identity
 $ConnectionName = "DatabyteVPN"
-# Legacy connection names from earlier manual setups — nuke them so the OS
-# doesn't try PPTP first and fail with 13843 ("VPN failed").
+# Legacy connection names from earlier manual setups — kept as a fallback
+# hint for the human reader; actual cleanup is by ServerAddress (see STEP 2)
+# because name lists miss leftovers from prior tests.
 $LegacyNames    = @(
     "Databyte vpn","Databyte VPN","DatabyteVPN",
     "myvpn","MyVPN","vpn.homelab.local","HomelabVPN","homelab vpn"
@@ -112,23 +113,60 @@ if ($cert) {
 # ============================================================================
 # STEP 2 — Clean slate: remove all Databyte-related connections
 # ============================================================================
+# Lesson (2026-06-24): a NAME list (e.g., "databyte","DatabyteVPN","myvpn")
+# misses leftover profiles from prior tests. Windows will then use the stale
+# one (with its old cmdkey creds) instead of the new profile we create here.
+# Fix: enumerate ALL VPN connections and remove any whose ServerAddress points
+# at our server, regardless of name. This catches "databyte" (lowercase,
+# from Android test), "test-iphone-5g-iphone", "vpn.homelab.local", etc.
 Write-Host ""
 Write-Host "=== [2/7] Removing legacy VPN connections ===" -ForegroundColor Cyan
 
-foreach ($n in (@($ConnectionName) + $LegacyNames)) {
-    foreach ($scope in @($false, $true)) {  # user-scope, then all-user-scope
-        $existing = Get-VpnConnection -Name $n -AllUserConnection:$scope -ErrorAction SilentlyContinue
-        if ($existing) {
-            Write-Host "  Removing: '$n' (TunnelType=$($existing.TunnelType), scope=$(if($scope){'all-user'}else{'user'}))" -ForegroundColor Yellow
-            try { rasdial $n /disconnect 2>&1 | Out-Null } catch {}
+$removed = 0
+foreach ($scope in @($false, $true)) {  # user-scope, then all-user-scope
+    $scopeLabel = if ($scope) { 'all-user' } else { 'user' }
+    $stale = Get-VpnConnection -AllUserConnection:$scope -ErrorAction SilentlyContinue |
+        Where-Object { $_.ServerAddress -match [regex]::Escape($ServerAddress) }
+    foreach ($s in $stale) {
+        Write-Host "  Removing stale profile: '$($s.Name)' (ServerAddress=$($s.ServerAddress), scope=$scopeLabel)" -ForegroundColor Yellow
+        try { rasdial $s.Name /disconnect 2>&1 | Out-Null } catch {}
+        try {
+            Remove-VpnConnection -Name $s.Name -AllUserConnection:$scope -Force -ErrorAction Stop
+            $removed++
+        } catch {
+            Write-Warning "  Remove failed for '$($s.Name)': $_"
+        }
+    }
+}
+if ($removed -eq 0) {
+    Write-Host "  (no leftover profiles found)" -ForegroundColor DarkGray
+}
+
+# Wipe stale Windows Credential Manager entries whose target matches our server.
+# cmdkey /generic:<target> only replaces exact target matches — variants like
+# LEGACYAPPS\myvpn.databyte.co.za or test-iphone-5g-iphone won't be overwritten
+# and Windows will keep using them for EAP.
+$cmdkeyRemoved = 0
+$cmdkeyList = cmdkey /list 2>&1 | Out-String
+$targetRegex = [regex]'Target:\s*(?<t>.+?)\s*$'
+foreach ($line in ($cmdkeyList -split "`r?`n")) {
+    if ($line -match $targetRegex) {
+        $t = $Matches['t'].Trim()
+        if ($t -match 'databyte|myvpn|test-android|test-iphone|test-win') {
+            Write-Host "  Deleting cmdkey: $t" -ForegroundColor Yellow
             try {
-                Remove-VpnConnection -Name $n -AllUserConnection:$scope -Force -ErrorAction Stop
+                cmdkey /delete:$t 2>&1 | Out-Null
+                $cmdkeyRemoved++
             } catch {
-                Write-Warning "  Remove failed for '$n': $_"
+                Write-Warning "  cmdkey delete failed for '$t': $_"
             }
         }
     }
 }
+if ($cmdkeyRemoved -eq 0) {
+    Write-Host "  (no stale cmdkey entries found)" -ForegroundColor DarkGray
+}
+
 Start-Sleep -Seconds 1
 
 # ============================================================================
