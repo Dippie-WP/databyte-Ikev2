@@ -216,16 +216,20 @@ Write-Host ""
 Write-Host "=== [4/5] Configuring IPsec crypto ===" -ForegroundColor Cyan
 
 try {
+    # Per Microsoft Learn: -AuthenticationTransformConstants valid values are
+    # MD596, SHA196, SHA256128, GCMAES128, GCMAES192, GCMAES256, None.
+    # "SHA256" is NOT a valid value — using it causes the cmdlet to throw and
+    # leaves the connection on Windows' insecure defaults (DES3/SHA1/DH2).
     Set-VpnConnectionIPsecConfiguration `
         -ConnectionName $ConnectionName `
-        -AuthenticationTransformConstants "SHA256" `
+        -AuthenticationTransformConstants "SHA256128" `
         -CipherTransformConstants "AES128" `
-        -DHGroup "ECP384" `
+        -DHGroup "Group14" `
         -EncryptionMethod "AES128" `
         -IntegrityCheckMethod "SHA256" `
-        -PfsGroup "ECP384" `
+        -PfsGroup "PFS2048" `
         -Force -ErrorAction Stop | Out-Null
-    Write-Host "  IPsec: SHA256 / AES128 / ECP384 (matches strongSwan server)" -ForegroundColor Green
+    Write-Host "  IPsec: SHA256128 / AES128 / Group14 / SHA256 / PFS2048 (Microsoft Learn secure IKEv2 template)" -ForegroundColor Green
 } catch {
     Write-Warning "Set-VpnConnectionIPsecConfiguration failed: $_"
     Write-Warning "Connection will use Windows defaults (insecure). strongSwan will likely reject."
@@ -273,7 +277,7 @@ Write-Host ""
 Write-Host "Click Connect in the GUI:" -ForegroundColor Yellow
 Write-Host "  Settings -> Network & Internet -> VPN -> $ConnectionName -> Connect" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Server:        $ServerAddress (raw IP, Cloudflare proxy can't relay IKEv2)" -ForegroundColor White
+Write-Host "Server:        $ServerAddress (hostname, grey-cloud DNS, resolves to VPS)" -ForegroundColor White
 Write-Host "Remote ID:     $RemoteId (matches cert CN/SAN)" -ForegroundColor White
 Write-Host "Username:      $Username (auto-filled)" -ForegroundColor White
 Write-Host ""
