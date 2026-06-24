@@ -908,6 +908,11 @@
           onclick: () => openEditCustomerModal(c),
           'data-label': 'Edit customer',
         }, '✎ Edit'),
+        c.is_operator ? null : el('button', {
+          cls: 'vp-btn vp-btn-primary',
+          onclick: () => generateInstallerLink(c),
+          'data-label': 'Generate one-time installer link (7-day expiry)',
+        }, '🔗 Installer'),
         c.is_operator ? null : (c.status === 'archived'
           ? el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doUnarchive(c.id) }, '↩ Unarchive')
           : el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doArchive(c.id, c.display_name || c.name) }, '🗄 Archive')),
@@ -1456,6 +1461,97 @@
       toast('Archived.');
     } catch (e) {
       toast('Archive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  // v1.5.0 — Generate one-time installer link for customer onboarding
+  async function generateInstallerLink(c) {
+    try {
+      const r = await post(`/api/customers/${c.id}/installer-token`);
+      showInstallerLinkModal(c, r);
+    } catch (e) {
+      toast('Failed to generate installer link: ' + (e.message || e), 'err');
+    }
+  }
+
+  function showInstallerLinkModal(c, data) {
+    // Remove any existing modal
+    document.querySelectorAll('.vp-modal-bg').forEach(m => m.remove());
+
+    const psCmd = data.powershell_cmd;
+    const url = data.installer_url;
+    const expires = data.expires_in_days + ' days';
+
+    const modal = el('div', {
+      cls: 'vp-modal-bg',
+      onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
+    },
+      el('div', { cls: 'vp-modal vp-modal-wide' },
+        el('div', { cls: 'vp-modal-title' }, '🔗 Installer link — ' + (c.display_name || c.name)),
+        el('div', { cls: 'vp-modal-body' },
+          el('p', {},
+            'Send this PowerShell one-liner to the customer. They run it in ',
+            el('code', {}, 'Windows PowerShell (Admin)'),
+            ' and the script will fetch their credentials, bind to the VPN profile, ',
+            'and connect. The link expires in ', el('strong', {}, expires),
+            ' and is single-use (burned on first fetch).',
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', {}, 'PowerShell command (copy + send):'),
+            el('textarea', {
+              readonly: true,
+              rows: 3,
+              style: 'width:100%; font-family: monospace; font-size: 12px; padding: 8px;',
+              onclick: (e) => e.target.select(),
+              id: 'vp-installer-cmd',
+            }, psCmd),
+          ),
+          el('div', { cls: 'vp-row', style: 'margin-top: 12px;' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: () => copyToClipboard(psCmd, 'PowerShell command'),
+            }, '📋 Copy PS command'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => copyToClipboard(url, 'Installer URL'),
+            }, '📋 Copy URL'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => window.open(url, '_blank').close(),  // test fetch (burns token!)
+              title: 'WARNING: this consumes the token!',
+            }, '⚠ Test fetch (burns token)'),
+          ),
+          el('div', { cls: 'vp-info', style: 'margin-top: 16px; font-size: 12px; color: #888;' },
+            'Details: device=', el('code', {}, data.device_name),
+            ' (' + data.device_type + '), tier=', el('code', {}, data.tier || 'none'),
+            ', token prefix=', el('code', {}, data.token_prefix),
+            ', expires ', new Date(data.expires_at * 1000).toISOString(),
+          ),
+        ),
+        el('div', { cls: 'vp-modal-foot' },
+          el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => closeModal() }, 'Close'),
+        ),
+      ),
+    );
+    document.body.appendChild(modal);
+    // Auto-select the textarea content for easy keyboard copy
+    const ta = modal.querySelector('#vp-installer-cmd');
+    if (ta) { ta.focus(); ta.select(); }
+  }
+
+  async function copyToClipboard(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Copied ' + (label || 'to') + ' clipboard', 'ok');
+    } catch (e) {
+      // Fallback: select the textarea
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('Copied (fallback)', 'ok'); }
+      catch { toast('Copy failed — select text manually', 'err'); }
+      document.body.removeChild(ta);
     }
   }
 
