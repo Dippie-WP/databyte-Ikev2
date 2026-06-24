@@ -4,11 +4,59 @@
 |---|---|
 | Document ID | DAT-VPN-WINDOWS-CLIENT-MASTER-001 |
 | Title | Windows IKEv2 + EAP-MSCHAPv2 VPN Client Build Manual |
-| Rev | v1.0.0 |
+| Rev | v1.1.0 |
 | Date | 2026-06-24 |
 | Author | Misha (AI Agent) for Zun |
-| Status | APPROVED — EMPIRICALLY VALIDATED |
+| Status | APPROVED — HARDLOCKED |
 | Classification | Internal — Homelab Infrastructure |
+
+**v1.1.0 change (2026-06-24):**
+- Promoted script to **v2.6.0** (was v2.3.0)
+- Added **THE CANONICAL 3-LINE BLOCK** at the top — there is now ONE way
+- Removed all references to: `setup-windows-vpn.ps1`, `connect-databyte-vpn.ps1`, `test-win-5g-setup.ps1`, `setup-databyte-vpn-zun.ps1`
+- All those variants are DELETED from VPS `/static/` (moved to `/tmp/_trash-20260624-2035/`) and archived locally in `scripts/_archive-2026-06-24/`
+- ONE filename (`setup-databyte-vpn.ps1`), TWO URLs (portal primary, myvpn.* fallback with `-k`)
+- Single STEP 6 (RasSetCredentials P/Invoke) — duplicate WMI methods block removed
+
+---
+
+## THE CANONICAL 3-LINE BLOCK (save this — it is the ONLY way)
+
+**Open PowerShell as Administrator. Copy/paste this. Press Enter three times.**
+
+```powershell
+# Primary (LE cert, no -k):
+curl.exe -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1
+& $env:TEMP\setup.ps1
+rasdial DatabyteVPN
+```
+
+**Fallback (myvpn.databyte.co.za, has Cloudflare Origin Cert, needs -k):**
+```powershell
+curl.exe -k -o $env:TEMP\setup.ps1 https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1
+& $env:TEMP\setup.ps1
+rasdial DatabyteVPN
+```
+
+**Rules (do not deviate, ever):**
+- ONE filename: `setup-databyte-vpn.ps1`
+- TWO URLs serve the SAME file (md5 must match: `2ba69a109facad6dd53f1c13ab39654a`)
+- NO `-zun`, NO `-windows`, NO `-test`, NO `-v1.5.0`, NO `-v2.3.0` suffixes
+- NO archived script in /tmp or workspace
+- NO personal copies
+- If you find a script with a different name, it's rot. Delete it.
+
+| Property | Value |
+|---|---|
+| Canonical filename | `setup-databyte-vpn.ps1` |
+| Version | **2.6.0** (HARDLOCKED — no more versions) |
+| MD5 | `2ba69a109facad6dd53f1c13ab39654a` |
+| Size | 20630 bytes |
+| Primary URL | `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` |
+| Fallback URL | `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (needs `-k`) |
+| Git tag | `v2.6.0` at commit `2732215` |
+| Connection name | `DatabyteVPN` |
+| Server | `myvpn.databyte.co.za` → 154.65.110.44 |
 
 ---
 
@@ -347,10 +395,12 @@ networks:
 
 ### 3.2 The Script — Complete Annotated Source
 
-**File:** `setup-databyte-vpn.ps1` v2.3.0
-**Location:** `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1?v=N` (CF-proxied, WAF-protected)
-**Git:** `github.com/Dippie-WP/databyte-Ikev2` tag `v2.3.0`
-**Lines:** 517
+**File:** `setup-databyte-vpn.ps1` v2.6.0 (HARDLOCKED)
+**Location (primary):** `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` (CF-proxied, LE cert, WAF-protected, no `-k` needed)
+**Location (fallback):** `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (grey-cloud, Cloudflare Origin Cert, needs `-k`)
+**Git:** `github.com/Dippie-WP/databyte-Ikev2` tag `v2.6.0` (commit `2732215`)
+**MD5:** `2ba69a109facad6dd53f1c13ab39654a`
+**Lines:** 436
 
 ```powershell
 <#
@@ -362,6 +412,13 @@ networks:
     Server: myvpn.databyte.co.za
 
     CHANGE LOG:
+    v2.6.0 (2026-06-24): HARDLOCK
+      The rot: 12+ script variants floating around (setup-windows-vpn,
+      connect-databyte-vpn, test-win-5g-setup, setup-databyte-vpn-zun,
+      _archived-*, v1.5.0, v2.0.x, v2.3.0, v2.5.0). All deleted except one.
+      Fix: ONE filename, ONE invocation, ONE credential binding method.
+    v2.5.0 (2026-06-24): Installer token + lab creds
+    v2.4.0 (2026-06-24): Switched portal URL to vpn-portal.databyte.co.za
     v2.3.0 (2026-06-24): RasSetCredentials P/Invoke — the canonical fix
       The 2-day problem: v2.0.7-v2.2.0 all failed to bind creds.
       Root cause: Wrong WMI namespace, hallucinated cmdlets, DPAPI format issues.
@@ -1032,7 +1089,20 @@ iex (irm 'https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=latest')
 | 2.0.9 | 2026-06-24 | f45a5f5 | WMI `SetCredentials` + `rasdial` | ❌ |
 | 2.1.0 | 2026-06-24 | 9eec5a2 | Multi-class WMI sweep | ❌ |
 | 2.2.0 | 2026-06-24 | 1ec66cc | DPAPI direct pbk write | ❌ |
-| **2.3.0** | **2026-06-24** | **5d9b602** | **`RasSetCredentials` P/Invoke (THE FIX)** | **✅** |
+| 2.3.0 | 2026-06-24 | 5d9b602 | `RasSetCredentials` P/Invoke (THE FIX) | ✅ |
+| 2.4.0 | 2026-06-24 | 27ee293 | Switched portal URL to vpn-portal.databyte.co.za | ✅ |
+| 2.5.0 | 2026-06-24 | 0ad6dc0 | Installer token + lab creds (had STEP 6 merge rot) | ⚠️ |
+| **2.6.0** | **2026-06-24** | **2732215** | **HARDLOCK: ONE filename, ONE URL, ONE method, ROT REMOVED** | **✅** |
+
+**All versions ≤ v2.5.0 are DELETED. v2.6.0 is the canonical version.** If a prior version is needed for historical reference, it is in `scripts/_archive-2026-06-24/` in git — do NOT deploy.
+
+**ROT REMOVED 2026-06-24 (on VPS `/opt/vpn-portal/www/static/`):**
+- `setup-databyte-vpn-zun.ps1` (Zun's personal working copy) → trashed
+- `_archived-setup-windows-vpn-v1.5.0.ps1` → trashed
+- `connect-databyte-vpn.ps1` → trashed
+- `test-win-5g-setup.ps1`, `test-win-5g-setup-v3.ps1` → trashed
+- `diag-vpn.ps1` → trashed
+- All moved to `/tmp/_trash-20260624-2035/` on VPS (recoverable for 30 days)
 
 ---
 
