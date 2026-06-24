@@ -10,10 +10,18 @@
 # 5A.6 — install_virtual_ip = no (gateway-mode, NOT client default)
 # 5A.7 — server-side MSS clamp at 1260 (5G PMTUD fix; lives on LXC, not here)
 #
+# v1.5.0 — LE cert migration (2026-06-24):
+#   - certs = server.pem (was server.crt.pem) — canonical LE cert name
+#   - cacerts REMOVED — LE server cert chains via public trust
+#     (ISRG Root X1/X2 in client system trust stores). No CA install
+#     needed on clients. Eliminates the chicken-and-egg CA cert
+#     install step in client setup scripts and mobileconfig.
+#   - proposals add ecp256 — iOS 18+ defaults to ECP_256 KE; without
+#     this, iOS gets N(INVAL_KE) and silently gives up.
+#
 # Notable choices:
 #   - send_cert = always (NOT inside local{}) — forces charon to send the
 #     cert in every IKE_AUTH response, even when not requested
-#   - cacerts = strongswan-ca.crt.pem — clients verify chain
 #   - eap_id = %any — any EAP username accepted (the secrets block matches)
 #   - fragmentation = yes — large EAP packets (cert chain exchange)
 #   - pools = rw-pool — references the pool in swanctl.conf
@@ -25,7 +33,7 @@ connections {
     local_addrs  = 0.0.0.0
     remote_addrs = %any
     pools        = rw-pool
-    proposals    = aes256-sha256-modp2048,aes128-sha256-modp2048
+    proposals    = aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256
     unique       = replace
     rekey_time   = 24h
     reauth_time  = 24h
@@ -36,8 +44,7 @@ connections {
 
     local {
       auth = pubkey
-      certs = server.crt.pem
-      cacerts = strongswan-ca.crt.pem
+      certs = server.pem
       id    = "vpn.homelab.local"
     }
     remote {
@@ -53,7 +60,7 @@ connections {
         dpd_action   = clear
         start_action = start
         rekey_time   = 1h
-        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+        esp_proposals = aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256
       }
     }
   }
