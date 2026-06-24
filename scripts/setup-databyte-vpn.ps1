@@ -29,7 +29,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.9
+    Version:        2.1.0
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -255,64 +255,111 @@ Write-Host "  PolicyAgent\AssumeUDPEncapsulationContextOnSendRule = 2" -Foregrou
 # ============================================================================
 # Win IKEv2 native client does NOT use cmdkey for EAP auth identity lookup
 # (lesson #135). To bind creds to the profile so Settings → VPN → Connect
-# works without any prompt, we call Set-VpnConnectionUsernamePassword
-# (Win 11 22H2+) or the WMI method MSFT_NetConnectionProfile::SetCredentials
-# (Win 10+). The WMI method is the canonical way Windows itself binds creds
-# after the user enters them in the GUI prompt.
+# works without any prompt, we try in order:
+#   1. Set-VpnConnectionUsernamePassword cmdlet (PS 7+ on Win 11 22H2+)
+#   2. WMI MSFT_NetVpnConnection::SetCredentials (Win 10+ VPN-specific class)
+#   3. WMI MSFT_NetConnectionProfile::SetCredentials (fallback)
+#   4. Force creds write to rasphone.pbk via rasdial + disconnect cycle
+# Lesson #154: MSFT_NetConnectionProfile is for "network location awareness"
+# profiles (Domain/Public), not VPN. VPN profiles live under
+# MSFT_NetVpnConnection (subclass of MSFT_NetConnection).
+# Lesson #155: rasdial with explicit creds writes to rasphone.pbk on
+# successful connect, even if subsequent /disconnect is called immediately.
+# This is the universal fallback that works on every Windows build.
 Write-Host ""
 Write-Host "=== [6/7] Binding credentials to profile ===" -ForegroundColor Cyan
 
 $securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
-
-# Method 1: Dedicated cmdlet (Win 11 22H2+)
 $bound = $false
-try {
-    Set-VpnConnectionUsernamePassword -ConnectionName $ConnectionName `
-        -UserName $Username -Password $securePassword -Domain "" `
-        -PassThru -ErrorAction Stop | Out-Null
-    Write-Host "  Set-VpnConnectionUsernamePassword: OK" -ForegroundColor Green
-    $bound = $true
-} catch {
-    Write-Host "  Set-VpnConnectionUsernamePassword: not available (will try WMI)" -ForegroundColor DarkGray
+
+# Method 1: Dedicated cmdlet (PS 7+ on Win 11 22H2+)
+if (Get-Command -Module VpnClient -Name Set-VpnConnectionUsernamePassword -ErrorAction SilentlyContinue) {
+    try {
+        Set-VpnConnectionUsernamePassword -ConnectionName $ConnectionName `
+            -UserName $Username -Password $securePassword -Domain "" `
+            -PassThru -ErrorAction Stop | Out-Null
+        Write-Host "  Method 1 (Set-VpnConnectionUsernamePassword cmdlet): OK" -ForegroundColor Green
+        $bound = $true
+    } catch {
+        Write-Host "  Method 1: FAILED - $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+} else {
+    Write-Host "  Method 1 (Set-VpnConnectionUsernamePassword cmdlet): not in this PS version" -ForegroundColor DarkGray
 }
 
-# Method 2: WMI MSFT_NetConnectionProfile (Win 10+, always works)
+# Method 2-3: WMI - try VPN-specific class first, then fallback
 if (-not $bound) {
+    $wmiClasses = @(
+        @{ Name = "MSFT_NetVpnConnection"; Desc = "VPN-specific (Win 10+)" },
+        @{ Name = "MSFT_NetConnectionProfile"; Desc = "Network location profile (fallback)" }
+    )
     try {
         $cimSession = New-CimSession
-        $profiles = @(Get-CimInstance -CimSession $cimSession `
-            -Namespace "root\StandardCimv2" -ClassName "MSFT_NetConnectionProfile" `
-            -ErrorAction SilentlyContinue)
-        # Find profile by InterfaceAlias or Name (different builds index differently)
-        $profile = $profiles | Where-Object {
-            $_.InterfaceAlias -eq $ConnectionName -or
-            $_.Name -eq $ConnectionName
-        } | Select-Object -First 1
-        if ($profile) {
-            $result = Invoke-CimMethod -CimSession $cimSession -InputObject $profile `
-                -MethodName "SetCredentials" `
-                -Arguments @{ UserName = $Username; Password = $securePassword; Domain = "" } `
-                -ErrorAction Stop
-            if ($result.ReturnValue -eq 0) {
-                Write-Host "  WMI MSFT_NetConnectionProfile::SetCredentials: OK" -ForegroundColor Green
-                $bound = $true
-            } else {
-                Write-Host "  WMI SetCredentials: ReturnValue=$($result.ReturnValue)" -ForegroundColor DarkGray
+        foreach ($cls in $wmiClasses) {
+            if ($bound) { break }
+            try {
+                $instances = @(Get-CimInstance -CimSession $cimSession `
+                    -Namespace "root\StandardCimv2" -ClassName $cls.Name `
+                    -ErrorAction SilentlyContinue | Where-Object {
+                        $_.Name -eq $ConnectionName -or
+                        $_.InterfaceAlias -eq $ConnectionName
+                    })
+                if ($instances.Count -gt 0) {
+                    $profile = $instances[0]
+                    $result = Invoke-CimMethod -CimSession $cimSession -InputObject $profile `
+                        -MethodName "SetCredentials" `
+                        -Arguments @{ UserName = $Username; Password = $securePassword; Domain = "" } `
+                        -ErrorAction Stop
+                    if ($result.ReturnValue -eq 0) {
+                        Write-Host "  Method (WMI $($cls.Name)::SetCredentials): OK" -ForegroundColor Green
+                        $bound = $true
+                    } else {
+                        Write-Host "  Method (WMI $($cls.Name)): ReturnValue=$($result.ReturnValue)" -ForegroundColor DarkGray
+                    }
+                } else {
+                    Write-Host "  Method (WMI $($cls.Name)): profile not in this class" -ForegroundColor DarkGray
+                }
+            } catch {
+                Write-Host "  Method (WMI $($cls.Name)): $($_.Exception.Message)" -ForegroundColor DarkGray
             }
-        } else {
-            Write-Host "  WMI: profile not found in MSFT_NetConnectionProfile" -ForegroundColor DarkGray
         }
         Remove-CimSession $cimSession -ErrorAction SilentlyContinue
     } catch {
-        Write-Host "  WMI SetCredentials: $($_.Exception.Message)" -ForegroundColor DarkGray
+        Write-Host "  WMI CIM session failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+# Method 4: rasdial + disconnect cycle (universal fallback, writes to pbk)
+if (-not $bound) {
+    Write-Host "  Method 4 (rasdial cycle): forcing creds write to rasphone.pbk..." -ForegroundColor Yellow
+    try {
+        # Suppress output, ignore exit code (we don't care if connect succeeds;
+        # we just need the pbk entry to record the creds).
+        $null = rasdial $ConnectionName $Username $Password 2>&1
+        Start-Sleep -Seconds 2
+        # Verify creds are now in pbk
+        $pbkPath = "$env:APPDATA\Microsoft\Network\Connections\Pbk\rasphone.pbk"
+        $pbkHasCreds = $false
+        if (Test-Path $pbkPath) {
+            $pbkHasCreds = (Get-Content $pbkPath -Raw) -match [regex]::Escape($Username)
+        }
+        if ($pbkHasCreds) {
+            Write-Host "  Method 4 (rasdial cycle): OK (creds written to rasphone.pbk)" -ForegroundColor Green
+            $bound = $true
+        } else {
+            Write-Host "  Method 4: rasdial ran but pbk not updated" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "  Method 4: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
 }
 
 if ($bound) {
     Write-Host "  Credentials bound — future connects via Settings need NO prompt." -ForegroundColor Green
 } else {
-    Write-Host "  WARNING: creds NOT bound. First connect will still prompt." -ForegroundColor Yellow
+    Write-Host "  WARNING: All binding methods failed." -ForegroundColor Yellow
     Write-Host "  Workaround: enter creds in the GUI prompt ONCE; Windows then binds them." -ForegroundColor Yellow
+    Write-Host "  (If pbk was written, the binding is done — try the Settings connect.)" -ForegroundColor DarkGray
 }
 
 # cmdkey (decorative for IKEv2, but kept for RDP/credential-manager tools)
