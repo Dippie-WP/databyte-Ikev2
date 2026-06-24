@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.6
+    Version:        2.0.7
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -172,51 +172,25 @@ Start-Sleep -Seconds 1
 # ============================================================================
 # STEP 3 — Create profile (IKEv2 + EAP-MSCHAPv2)
 # ============================================================================
-# Hand-written VPNProfile XML. Proven pattern (was in connect-databyte-vpn.ps1
-# which actually worked). New-EapConfiguration's default output does NOT set
-# <UseWinLogonCredentials>false</UseWinLogonCredentials> or <ServerNames>, so
-# Windows shows credential/cert prompts at connect time. This XML pre-sets both.
+# Use New-EapConfiguration (built-in Windows cmdlet) to generate the EAP XML.
+# This is the canonical, schema-correct path — hand-writing the XML has
+# repeatedly failed against Win 11 24H2's stricter parser (lesson 2026-06-24:
+# even with correct element casing and the minimal MSCHAPv2 schema elements,
+# Windows rejected the hand-written XML with "Element not found").
+#
+# New-EapConfiguration default: EAP-MSCHAPv2 with <UseWinLogonCredentials>false</UseWinLogonCredentials>.
+# It does NOT set <ServerNames>, but for IKEv2+EAP-MSCHAPv2 the server cert is
+# validated at the IKE layer (Windows trusts the LE root natively), so no
+# cert-trust GUI prompt is needed.
 Write-Host ""
 Write-Host "=== [3/7] Creating VPN profile (IKEv2 + EAP-MSCHAPv2) ===" -ForegroundColor Cyan
 
-$profileXml = @"
-<VPNProfile>
-  <NativeProfile>
-    <Servers>$ServerAddress</Servers>
-    <NativeProtocolType>IKEv2</NativeProtocolType>
-    <Authentication>
-      <UserMethod>Eap</UserMethod>
-      <Eap>
-        <Configuration>
-          <EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
-            <EapMethod>
-              <Type xmlns="http://www.microsoft.com/provisioning/EapCommon">26</Type>
-              <VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>
-              <VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>
-              <AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">311</AuthorId>
-            </EapMethod>
-            <Config>
-              <EapMsChapV2 xmlns="http://www.microsoft.com/provisioning/EapMsChapV2ConnectionPropertiesV1">
-                <UseWinLogonCredentials>false</UseWinLogonCredentials>
-              </EapMsChapV2>
-            </Config>
-          </EapHostConfig>
-        </Configuration>
-      </Eap>
-    </Authentication>
-    <RoutingPolicyType>ForceTunnel</RoutingPolicyType>
-  </NativeProfile>
-</VPNProfile>
-"@
-
-# MS Learn: -EapConfigXmlStream type is System.Xml.XmlDocument (NOT XmlReader).
-# Verified empirically on Windows 11 24H2 — XmlReader causes a coercion error:
-#   "Cannot convert value 'System.Xml.XmlTextReaderImpl' to type
-#    'System.Xml.XmlDocument'."
-$xmlDoc = New-Object System.Xml.XmlDocument
-$xmlDoc.LoadXml($profileXml)
-
 try {
+    # Built-in cmdlet generates schema-correct MSCHAPv2 EAP XML.
+    $eap = New-EapConfiguration -ErrorAction Stop
+    $xmlDoc = $eap.EapConfigXmlStream
+    Write-Host "  EAP config generated via New-EapConfiguration" -ForegroundColor DarkGray
+
     Add-VpnConnection `
         -Name $ConnectionName `
         -ServerAddress $ServerAddress `
@@ -227,7 +201,10 @@ try {
     Write-Host "  Profile created: $ConnectionName" -ForegroundColor Green
 } catch {
     Write-Host "  ERROR: Add-VpnConnection failed: $($_.Exception.Message)" -ForegroundColor Red
-    Write-Host $profileXml -ForegroundColor DarkGray
+    if ($xmlDoc) {
+        Write-Host "  Generated EAP XML:" -ForegroundColor DarkGray
+        Write-Host $xmlDoc.OuterXml -ForegroundColor DarkGray
+    }
     exit 1
 }
 
