@@ -38,12 +38,21 @@ try {
 # ============================================================================
 # CONFIG (edit these for your environment)
 # ============================================================================
-# Server = raw IP, NOT hostname. Cloudflare proxy does not relay IKEv2 (UDP 500/4500),
-# so DNS for the hostname points at a Cloudflare edge IP and the tunnel fails.
-# Remote ID = cert CN/SAN. Must match the cert, not the ServerAddress.
-$ServerAddress    = "154.65.110.44"
+# Server = myvpn.databyte.co.za (grey-cloud DNS, resolves directly to VPS 154.65.110.44).
+# Cloudflare proxy only proxies vpn-portal.* (orange), not myvpn.* (grey), so the
+# hostname works for IKEv2 here. Use the hostname (not raw IP) so the server
+# identity matches the cert CN/SAN.
+#
+# - vpn-portal.databyte.co.za = orange-cloud, CF proxy in front, CANNOT relay IKEv2
+# - myvpn.databyte.co.za      = grey-cloud, direct to VPS, works for IKEv2
+#
+# Remote ID = cert CN/SAN. Must match the cert subject, not the ServerAddress.
+$ServerAddress    = "myvpn.databyte.co.za"
 $RemoteId         = "myvpn.databyte.co.za"
 $ConnectionName   = "DatabyteVPN"
+# Also clean up the common names people (or the OS) might leave around, especially
+# the old PPTP "Databyte vpn" connection from earlier manual setups.
+$LegacyNames      = @("Databyte vpn", "Databyte VPN", "DatabyteVPN", "myvpn", "MyVPN")
 $Username         = "zun-operator"
 $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
@@ -89,19 +98,43 @@ if ($cert) {
 }
 
 # ============================================================================
-# STEP 2 - Remove any existing connection (clean slate)
+# STEP 2 - Clean slate: remove ALL Databyte-related connections
 # ============================================================================
+# Critical: a leftover PPTP connection (e.g. "Databyte vpn" from an earlier
+# manual setup) will be tried FIRST when you click Connect, fail with error
+# 13843, and Windows will report "VPN failed" even though the IKEv2 connection
+# we create below is fine. So we nuke EVERYTHING matching before creating fresh.
 Write-Host ""
-Write-Host "=== [2/5] Removing old connection (if any) ===" -ForegroundColor Cyan
+Write-Host "=== [2/5] Cleaning up old connections ===" -ForegroundColor Cyan
 
-$existing = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
-if ($existing) {
-    rasdial $ConnectionName /disconnect 2>&1 | Out-Null
-    Remove-VpnConnection -Name $ConnectionName -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
-    Write-Host "  Old connection removed." -ForegroundColor Yellow
+foreach ($nameToRemove in @($ConnectionName) + $LegacyNames) {
+    foreach ($scope in @($false, $true)) {  # user-scope then all-user-scope
+        $existing = Get-VpnConnection -Name $nameToRemove -AllUserConnection:$scope -ErrorAction SilentlyContinue
+        if ($existing) {
+            Write-Host "  Removing: '$nameToRemove' (TunnelType=$($existing.TunnelType), scope=$(if($scope){'all-user'}else{'user'}))" -ForegroundColor Yellow
+            try {
+                rasdial $nameToRemove /disconnect 2>&1 | Out-Null
+                Remove-VpnConnection -Name $nameToRemove -AllUserConnection:$scope -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "  Remove failed for '$nameToRemove' (scope=$(if($scope){'all-user'}else{'user'})): $_"
+            }
+        }
+    }
+}
+Start-Sleep -Seconds 1
+
+# Show what survives
+$remaining = @()
+foreach ($scope in @($false, $true)) {
+    $remaining += Get-VpnConnection -AllUserConnection:$scope -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match "databyte|vpn" } |
+                  ForEach-Object { "$($_.Name) ($($_.TunnelType), $(if($scope){'all-user'}else{'user'}))" }
+}
+if ($remaining.Count -eq 0) {
+    Write-Host "  No old Databyte/VPN connections remain. Clean slate." -ForegroundColor Green
 } else {
-    Write-Host "  No existing connection. Good." -ForegroundColor Green
+    Write-Host "  Remaining Databyte/VPN connections (will create fresh anyway):" -ForegroundColor Yellow
+    $remaining | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
 }
 
 # ============================================================================
@@ -148,15 +181,17 @@ $profileXml = @"
 </VPNProfile>
 "@
 
-# PS 5.1's Add-VpnConnection takes -EapConfigXmlStream (a byte array), NOT -ConfigurationFile.
-$xmlBytes = [System.Text.Encoding]::UTF8.GetBytes($profileXml)
+# Per Microsoft Learn docs, -EapConfigXmlStream expects an XmlDocument, NOT a byte array.
+# Passing byte[] is type-coerced on PS 7 but can silently fail or throw on PS 5.1.
+$xmlDoc = New-Object System.Xml.XmlDocument
+$xmlDoc.LoadXml($profileXml)
 
 try {
     Add-VpnConnection `
         -Name $ConnectionName `
         -ServerAddress $ServerAddress `
         -TunnelType "IKEv2" `
-        -EapConfigXmlStream $xmlBytes `
+        -EapConfigXmlStream $xmlDoc `
         -RememberCredential `
         -PassThru -ErrorAction Stop | Out-Null
     Write-Host "  Connection created. Server=$ServerAddress, RemoteID=$RemoteId" -ForegroundColor Green
@@ -165,8 +200,11 @@ try {
     Write-Host "  ERROR: Add-VpnConnection failed: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "  Common causes:" -ForegroundColor Yellow
     Write-Host "    - Not running as Administrator" -ForegroundColor Yellow
-    Write-Host "    - PowerShell 5.1 issue (this script supports 5.1 + 7)" -ForegroundColor Yellow
-    Write-Host "    - Corrupted phone book (try: Remove-VpnConnection -Name $ConnectionName -Force)" -ForegroundColor Yellow
+    Write-Host "    - PS 5.1 + XML escaping issue (check the script source for stray characters)" -ForegroundColor Yellow
+    Write-Host "    - Corrupted phone book (the cleanup in Step 2 should prevent this)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Full XML being passed:" -ForegroundColor DarkGray
+    Write-Host $profileXml -ForegroundColor DarkGray
     Write-Host ""
     exit 1
 }
