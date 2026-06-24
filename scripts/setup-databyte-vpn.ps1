@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.2
+    Version:        2.0.3
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -70,9 +70,22 @@ Write-Host "=== [1/7] Verifying server TLS cert ===" -ForegroundColor Cyan
 
 # Raw SslStream does a real TLS handshake. (HttpWebRequest.ServicePoint.Certificate
 # returns null on a fresh request — this is the workaround.)
+# Bounded by 10s timeout so a firewall/NAT issue fails fast (lesson from
+# 2026-06-24 VPS reboot: UFW lost TCP 80/443 rules, script hung on
+# New-TcpClient(443) forever waiting for SYN-ACK).
 $cert = $null
 try {
-    $tcp = New-Object System.Net.Sockets.TcpClient($ServerAddress, 443)
+    $tcp = New-Object System.Net.Sockets.TcpClient
+    $tcp.SendTimeout    = 5000
+    $tcp.ReceiveTimeout = 5000
+    $iar = $tcp.BeginConnect($ServerAddress, 443, $null, $null)
+    $ok  = $iar.AsyncWaitHandle.WaitOne(10000)
+    if (-not $ok) {
+        $tcp.Close()
+        throw "TCP connect to ${ServerAddress}:443 timed out after 10s (firewall or network issue?)"
+    }
+    $tcp.EndConnect($iar)
+
     $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, {[System.Net.Security.RemoteCertificateValidationCallback]{ $true }})
     $ssl.AuthenticateAsClient($ServerAddress)
     if ($ssl.RemoteCertificate) {
