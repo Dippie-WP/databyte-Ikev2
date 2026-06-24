@@ -28,8 +28,16 @@
 # ============================================================================
 # CONFIG (edit these for your environment)
 # ============================================================================
+# Server = myvpn.databyte.co.za (grey-cloud DNS, resolves to VPS 154.65.110.44).
+# Cloudflare proxy only proxies vpn-portal.* (orange), not myvpn.* (grey), so
+# the hostname works for IKEv2.
+# - vpn-portal.databyte.co.za = orange-cloud, CF proxy in front, CANNOT relay IKEv2
+# - myvpn.databyte.co.za      = grey-cloud, direct to VPS, works for IKEv2
 $ServerHostname   = "myvpn.databyte.co.za"
 $ConnectionName   = "DatabyteVPN"
+# Also clean up the common names people (or the OS) might leave around, especially
+# the old PPTP "Databyte vpn" connection from earlier manual setups.
+$LegacyNames      = @("Databyte vpn", "Databyte VPN", "DatabyteVPN", "myvpn", "MyVPN")
 $Username         = "zun-operator"
 $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
@@ -73,28 +81,62 @@ if ($cert) {
 }
 
 # ============================================================================
-# STEP 2 - Remove old connection (if exists) and create fresh one
+# STEP 2 - Clean slate: remove ALL Databyte-related connections
 # ============================================================================
+# Critical: a leftover PPTP connection (e.g. "Databyte vpn" from an earlier
+# manual setup) will be tried FIRST when you click Connect, fail with error
+# 13843, and Windows will report "VPN failed" even though the IKEv2 connection
+# we create below is fine. So we nuke EVERYTHING matching before creating fresh.
 Write-Host ""
-Write-Host "=== [2/4] Creating VPN connection '$ConnectionName' ===" -ForegroundColor Cyan
+Write-Host "=== [2/4] Cleaning up old connections ===" -ForegroundColor Cyan
 
-$existingConn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
-if ($existingConn) {
-    Write-Host "  Removing existing connection..." -ForegroundColor Yellow
-    rasdial $ConnectionName /disconnect 2>&1 | Out-Null
-    Remove-VpnConnection -Name $ConnectionName -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
+foreach ($nameToRemove in @($ConnectionName) + $LegacyNames) {
+    foreach ($scope in @($false, $true)) {  # user-scope then all-user-scope
+        $existingConn = Get-VpnConnection -Name $nameToRemove -AllUserConnection:$scope -ErrorAction SilentlyContinue
+        if ($existingConn) {
+            Write-Host "  Removing: '$nameToRemove' (TunnelType=$($existingConn.TunnelType), scope=$(if($scope){'all-user'}else{'user'}))" -ForegroundColor Yellow
+            try {
+                rasdial $nameToRemove /disconnect 2>&1 | Out-Null
+                Remove-VpnConnection -Name $nameToRemove -AllUserConnection:$scope -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "  Remove failed for '$nameToRemove' (scope=$(if($scope){'all-user'}else{'user'})): $_"
+            }
+        }
+    }
+}
+Start-Sleep -Seconds 1
+
+# Show what survives
+$remaining = @()
+foreach ($scope in @($false, $true)) {
+    $remaining += Get-VpnConnection -AllUserConnection:$scope -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Name -match "databyte|vpn" } |
+                  ForEach-Object { "$($_.Name) ($($_.TunnelType), $(if($scope){'all-user'}else{'user'}))" }
+}
+if ($remaining.Count -eq 0) {
+    Write-Host "  No old Databyte/VPN connections remain. Clean slate." -ForegroundColor Green
+} else {
+    Write-Host "  Remaining Databyte/VPN connections (will create fresh anyway):" -ForegroundColor Yellow
+    $remaining | ForEach-Object { Write-Host "    - $_" -ForegroundColor Yellow }
 }
 
 # IMPORTANT: do NOT pass -SplitTunneling (omitted = full tunnel = all traffic
 # goes through VPN, including internet).
-Add-VpnConnection `
-    -Name $ConnectionName `
-    -ServerAddress $ServerHostname `
-    -TunnelType "IKEv2" `
-    -AuthenticationMethod "EAP" `
-    -RememberCredential `
-    -PassThru | Out-Null
+Write-Host "  Creating new IKEv2 connection..." -ForegroundColor Cyan
+try {
+    Add-VpnConnection `
+        -Name $ConnectionName `
+        -ServerAddress $ServerHostname `
+        -TunnelType "IKEv2" `
+        -AuthenticationMethod "EAP" `
+        -RememberCredential `
+        -PassThru -ErrorAction Stop | Out-Null
+} catch {
+    Write-Host ""
+    Write-Host "  ERROR: Add-VpnConnection failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    exit 1
+}
 
 # Store the credentials so the connection auto-fills username/password
 # and uses them on the next connect (avoids the GUI prompt).
