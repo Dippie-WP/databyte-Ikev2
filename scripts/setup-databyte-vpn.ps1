@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.7
+    Version:        2.0.8
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -54,8 +54,8 @@ $LegacyNames    = @(
     "Databyte vpn","Databyte VPN","DatabyteVPN",
     "myvpn","MyVPN","vpn.homelab.local","HomelabVPN","homelab vpn"
 )
-$Username       = "zun-operator"
-$Password       = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
+$Username       = "test-win-5g-laptop"
+$Password       = "a1V5M2Cd1oE0TNWY9wORsg"
 
 # ============================================================================
 # Transcript (logs to %TEMP% for post-mortem)
