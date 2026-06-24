@@ -30,7 +30,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.4.0
+    Version:        2.5.0
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -56,8 +56,71 @@ $LegacyNames    = @(
     "Databyte vpn","Databyte VPN","DatabyteVPN",
     "myvpn","MyVPN","vpn.homelab.local","HomelabVPN","homelab vpn"
 )
-$Username       = "test-win-5g-laptop"
-$Password       = "a1V5M2Cd1oE0TNWY9wORsg"
+# Credentials — populated either by STEP 0 (production installer token) or by
+# the hardcoded fallback below (lab / single-tenant test).
+$Username       = $null
+$Password       = $null
+
+# ============================================================================
+# STEP 0 (NEW v2.5.0) — Fetch credentials via installer token
+# ============================================================================
+# If this script was invoked with `?slug=X&token=Y` in the URL (operator-
+# generated installer link), fetch real customer credentials from the portal.
+# If no token, fall back to the hardcoded test credentials (lab mode).
+$PortalBase     = "https://vpn-portal.databyte.co.za"
+$scriptUrl      = $MyInvocation.MyCommand.Definition
+if (-not $scriptUrl) { $scriptUrl = "" }
+
+# The token comes from the URL the script was invoked with. When run via
+#   iex (irm 'https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1?slug=acme&token=xyz')
+# PowerShell's $MyInvocation.MyCommand.Definition doesn't include the query
+# string. So we extract from $script:MyCommand if available, or use $args.
+$InstallerSlug  = $null
+$InstallerToken = $null
+try {
+    # When invoked via iex (irm ...), $script:MyCommand or $args may have it.
+    # Try multiple sources.
+    if ($args.Count -ge 2) {
+        $InstallerSlug  = $args[0]
+        $InstallerToken = $args[1]
+    } elseif ($MyInvocation.MyCommand.Definition -match '\?slug=([^&]+)&token=([^&\s"]+)') {
+        $InstallerSlug  = $Matches[1]
+        $InstallerToken = $Matches[2]
+    }
+} catch {}
+
+if ($InstallerToken) {
+    Write-Host ""
+    Write-Host "=== [0/8] Fetching customer credentials via installer token ===" -ForegroundColor Cyan
+    Write-Host "  slug:  $InstallerSlug"
+    Write-Host "  token: $($InstallerToken.Substring(0,8))..." -ForegroundColor DarkGray
+    try {
+        $resp = Invoke-RestMethod -Uri "$PortalBase/api/installer/$InstallerToken" `
+                                   -Method Get -TimeoutSec 15 -ErrorAction Stop
+        if ($resp.ok) {
+            $Username = $resp.username
+            $Password = $resp.password
+            # Override server from portal response if provided (lets us A/B test endpoints)
+            if ($resp.server) { $ServerAddress = $resp.server }
+            Write-Host "  customer: $($resp.customer_name) ($($resp.customer_display))" -ForegroundColor Green
+            Write-Host "  device:   $($resp.device_name) [$($resp.device_type)]" -ForegroundColor Green
+            if ($resp.tier) { Write-Host "  tier:     $($resp.tier_display)" -ForegroundColor Green }
+            Write-Host "  credentials fetched + token burned (single-use)" -ForegroundColor Green
+        } else {
+            throw "portal returned ok=false"
+        }
+    } catch {
+        Write-Warning "Failed to fetch credentials from portal: $($_.Exception.Message)"
+        Write-Warning "Falling back to hardcoded test credentials (lab mode)."
+        $Username = "test-win-5g-laptop"
+        $Password = "a1V5M2Cd1oE0TNWY9wORsg"
+    }
+} else {
+    Write-Host ""
+    Write-Host "=== [0/8] No installer token — using hardcoded test creds (lab mode) ===" -ForegroundColor DarkGray
+    $Username = "test-win-5g-laptop"
+    $Password = "a1V5M2Cd1oE0TNWY9wORsg"
+}
 
 # ============================================================================
 # Transcript (logs to %TEMP% for post-mortem)
@@ -69,7 +132,7 @@ try { Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContin
 # STEP 1 — Verify server cert is publicly trusted
 # ============================================================================
 Write-Host ""
-Write-Host "=== [1/7] Verifying server TLS cert ===" -ForegroundColor Cyan
+Write-Host "=== [1/8] Verifying server TLS cert ===" -ForegroundColor Cyan
 
 # Raw SslStream does a real TLS handshake. (HttpWebRequest.ServicePoint.Certificate
 # returns null on a fresh request — this is the workaround.)
@@ -122,7 +185,7 @@ if ($cert) {
 # at our server, regardless of name. This catches "databyte" (lowercase,
 # from Android test), "test-iphone-5g-iphone", "vpn.homelab.local", etc.
 Write-Host ""
-Write-Host "=== [2/7] Removing legacy VPN connections ===" -ForegroundColor Cyan
+Write-Host "=== [2/8] Removing legacy VPN connections ===" -ForegroundColor Cyan
 
 $removed = 0
 foreach ($scope in @($false, $true)) {  # user-scope, then all-user-scope
@@ -185,7 +248,7 @@ Start-Sleep -Seconds 1
 # validated at the IKE layer (Windows trusts the LE root natively), so no
 # cert-trust GUI prompt is needed.
 Write-Host ""
-Write-Host "=== [3/7] Creating VPN profile (IKEv2 + EAP-MSCHAPv2) ===" -ForegroundColor Cyan
+Write-Host "=== [3/8] Creating VPN profile (IKEv2 + EAP-MSCHAPv2) ===" -ForegroundColor Cyan
 
 try {
     # Built-in cmdlet generates schema-correct MSCHAPv2 EAP XML.
@@ -216,7 +279,7 @@ try {
 # Source: learn.microsoft.com/.../how-to-configure-diffie-hellman-protocol-over-ikev2-vpn-connections
 # strongSwan server accepts: aes256-sha256-modp2048, aes128-sha256-modp2048
 Write-Host ""
-Write-Host "=== [4/7] Configuring IPsec crypto ===" -ForegroundColor Cyan
+Write-Host "=== [4/8] Configuring IPsec crypto ===" -ForegroundColor Cyan
 
 try {
     Set-VpnConnectionIPsecConfiguration `
@@ -240,7 +303,7 @@ try {
 # NegotiateDH2048_AES256: 0=disable, 1=enable, 2=ENFORCE
 # Without this, Win 10/11 proposes weak DH2 (1024-bit) by default.
 Write-Host ""
-Write-Host "=== [5/7] Registry tweaks ===" -ForegroundColor Cyan
+Write-Host "=== [5/8] Registry tweaks ===" -ForegroundColor Cyan
 
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
     -Name "NegotiateDH2048_AES256" -PropertyType DWord -Value 2 -Force | Out-Null
@@ -265,7 +328,7 @@ Write-Host "  PolicyAgent\AssumeUDPEncapsulationContextOnSendRule = 2" -Foregrou
 # The classes there (PS_VpnConnection, VpnConnection) have a Set method
 # but no credentials parameter; credential binding is via RasSetCredentials.
 Write-Host ""
-Write-Host "=== [6/7] Binding credentials to profile (RasSetCredentials) ===" -ForegroundColor Cyan
+Write-Host "=== [6/8] Binding credentials to profile (RasSetCredentials) ===" -ForegroundColor Cyan
 
 $securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
 $bound = $false
@@ -353,7 +416,7 @@ cmdkey /generic:$ConnectionName     /user:$Username /pass:$Password | Out-Null
 # successful connect, even if subsequent /disconnect is called immediately.
 # This is the universal fallback that works on every Windows build.
 Write-Host ""
-Write-Host "=== [6/7] Binding credentials to profile ===" -ForegroundColor Cyan
+Write-Host "=== [6/8] Binding credentials to profile (methods A+B+C) ===" -ForegroundColor Cyan
 
 $securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
 $bound = $false
@@ -427,7 +490,7 @@ cmdkey /generic:$ConnectionName     /user:$Username /pass:$Password | Out-Null
 # If it fails, open Settings so the user can click Connect there, then
 # POLL for status change instead of exiting silently.
 Write-Host ""
-Write-Host "=== [7/7] Connecting to $ServerAddress ===" -ForegroundColor Cyan
+Write-Host "=== [7/8] Connecting to $ServerAddress ===" -ForegroundColor Cyan
 
 Start-Sleep -Seconds 1
 

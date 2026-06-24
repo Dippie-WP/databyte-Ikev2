@@ -176,6 +176,20 @@ def rate_limit(ip: str):
 require_session = portal_auth.require_operator_session
 
 
+# ---------- installer_tokens (v1.5.0) ----------
+# One-time installer tokens for production customer onboarding.
+# See installer_tokens.py for full design notes.
+import installer_tokens  # noqa: E402
+installer_tokens.register(
+    app,
+    db_query=db_query,
+    db_exec=db_exec,
+    q=_q,
+    audit_fn=_audit,
+    require_session_dep=require_session,
+)
+
+
 # ---------- SSH + DB helpers ----------
 def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") -> str:
     """Run a command on the VPN gateway. cmd_args is a list.
