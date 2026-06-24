@@ -235,11 +235,13 @@ Write-Host "To reconnect:  powershell -ExecutionPolicy Bypass -File connect-data
 Write-Host "To disconnect: rasdial $ConnectionName /disconnect"
 Write-Host ""
 
-# Stop transcript + keep window open so the user can read the output.
+# Stop transcript before pausing (so the transcript captures the pause message)
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host "---" -ForegroundColor DarkGray
 Write-Host "Full log: $transcriptPath" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "Press Enter to close..." -ForegroundColor Yellow
-Read-Host | Out-Null
+
+# `cmd /c pause` works reliably in `irm | iex` piped contexts (Read-Host doesn't)
+# This keeps the window open so the user can read the output before closing.
+cmd /c pause | Out-Null
