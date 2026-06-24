@@ -12,7 +12,8 @@
          (no CA install needed — Windows trusts LE natively via ISRG Root X1/X2)
       2. Removes all stale Databyte-related VPN connections (PPTP/IKEv2/etc.)
       3. Creates a fresh IKEv2 connection with EAP-MSCHAPv2 auth
-         (canonical MS Learn pattern — no hand-written XML)
+         (proven hand-written XML — pins cert to ServerNames, suppresses creds
+         and cert-trust GUI prompts)
       4. Sets IPsec crypto to match the strongSwan server
          (AES128/SHA256/Group14/PFS2048 — Microsoft Learn canonical, 2025-01-27)
       5. Configures Windows registry for strong DH (ENFORCE) and NAT-T
@@ -27,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.0
+    Version:        2.0.1
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -44,6 +45,7 @@ $ErrorActionPreference = 'Stop'
 # CONFIG (edit these per deployment)
 # ============================================================================
 $ServerAddress  = "myvpn.databyte.co.za"
+$RemoteId       = "myvpn.databyte.co.za"   # must match cert CN/SAN; pins server identity
 $ConnectionName = "DatabyteVPN"
 # Legacy connection names from earlier manual setups — nuke them so the OS
 # doesn't try PPTP first and fail with 13843 ("VPN failed").
@@ -119,30 +121,66 @@ Start-Sleep -Seconds 1
 # ============================================================================
 # STEP 3 — Create profile (IKEv2 + EAP-MSCHAPv2)
 # ============================================================================
-# New-EapConfiguration (no flags) generates the canonical MSCHAPv2 EAP XML.
-# It does NOT force Winlogon creds — Windows prompts at connect time, which
-# we pre-fill via cmdkey in step 6. (UseWinlogonCredential would force it.)
+# Hand-written VPNProfile XML. Proven pattern (was in connect-databyte-vpn.ps1
+# which actually worked). New-EapConfiguration's default output does NOT set
+# <UseWinLogonCredentials>false</UseWinLogonCredentials> or <ServerNames>, so
+# Windows shows credential/cert prompts at connect time. This XML pre-sets both.
 Write-Host ""
 Write-Host "=== [3/7] Creating VPN profile (IKEv2 + EAP-MSCHAPv2) ===" -ForegroundColor Cyan
 
-$EAP = New-EapConfiguration
-if (-not $EAP -or -not $EAP.EapConfigXmlStream) {
-    Write-Host "  ERROR: New-EapConfiguration returned no XML." -ForegroundColor Red
-    exit 1
-}
+$profileXml = @"
+<VPNProfile>
+  <NativeProfile>
+    <Servers>$ServerAddress</Servers>
+    <NativeProtocolType>IKEv2</NativeProtocolType>
+    <Authentication>
+      <UserMethod>Eap</UserMethod>
+      <Eap>
+        <Configuration>
+          <EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+            <EapMethod>
+              <Type xmlns="http://www.microsoft.com/provisioning/EapCommon">26</Type>
+              <VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>
+              <VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>
+              <AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">311</AuthorId>
+            </EapMethod>
+            <Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
+              <EapMSChapV2 xmlns="http://www.microsoft.com/provisioning/EapMsChapV2ConnectionPropertiesV1">
+                <UseWinLogonCredentials>false</UseWinLogonCredentials>
+                <ServerValidation>
+                  <DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation>
+                  <ServerNames>$RemoteId</ServerNames>
+                </ServerValidation>
+              </EapMSChapV2>
+            </Config>
+          </EapHostConfig>
+        </Configuration>
+      </Eap>
+    </Authentication>
+    <RoutingPolicyType>ForceTunnel</RoutingPolicyType>
+  </NativeProfile>
+</VPNProfile>
+"@
+
+# MS Learn: -EapConfigXmlStream type is System.Xml.XmlDocument (NOT XmlReader).
+# Verified empirically on Windows 11 24H2 — XmlReader causes a coercion error:
+#   "Cannot convert value 'System.Xml.XmlTextReaderImpl' to type
+#    'System.Xml.XmlDocument'."
+$xmlDoc = New-Object System.Xml.XmlDocument
+$xmlDoc.LoadXml($profileXml)
 
 try {
     Add-VpnConnection `
         -Name $ConnectionName `
         -ServerAddress $ServerAddress `
         -TunnelType "IKEv2" `
-        -AuthenticationMethod "Eap" `
-        -EapConfigXmlStream $EAP.EapConfigXmlStream `
+        -EapConfigXmlStream $xmlDoc `
         -RememberCredential `
         -PassThru -ErrorAction Stop | Out-Null
     Write-Host "  Profile created: $ConnectionName" -ForegroundColor Green
 } catch {
     Write-Host "  ERROR: Add-VpnConnection failed: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $profileXml -ForegroundColor DarkGray
     exit 1
 }
 
