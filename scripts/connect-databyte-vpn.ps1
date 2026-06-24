@@ -32,7 +32,7 @@ try { Start-Transcript -Path $transcriptPath -Append -ErrorAction SilentlyContin
 $ServerAddress = "myvpn.databyte.co.za"
 $RemoteId = "myvpn.databyte.co.za"
 $ConnectionName = "DatabyteVPN"
-$LegacyNames = @("Databyte vpn","Databyte VPN","DatabyteVPN","myvpn","MyVPN")
+$LegacyNames = @("Databyte vpn","Databyte VPN","DatabyteVPN","myvpn","MyVPN","vpn.homelab.local","HomelabVPN","homelab vpn")
 $Username = "zun-operator"
 $Password = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
@@ -117,16 +117,21 @@ $profileXml = @"
 "@
 
 try {
+ # -EapConfigXmlStream parameter type is System.Xml.XmlDocument (NOT XmlReader).
+ # Passing an XmlReader causes PS to attempt a coercion that fails with:
+ #   "Cannot convert value 'System.Xml.XmlTextReaderImpl' to type
+ #   'System.Xml.XmlDocument'. The specified node cannot be inserted
+ #   as the valid child of this node, because the specified node is the
+ #   wrong type."
+ # Verified empirically on Windows 11 24H2 (build 26200) via Tee-Object output.
  $xmlDoc = New-Object System.Xml.XmlDocument
  $xmlDoc.LoadXml($profileXml)
- $xmlStream = New-Object System.IO.StringReader($profileXml)
- $xmlReader = [System.Xml.XmlReader]::Create($xmlStream)
 
  Add-VpnConnection `
  -Name $ConnectionName `
  -ServerAddress $ServerAddress `
  -TunnelType "IKEv2" `
- -EapConfigXmlStream $xmlReader `
+ -EapConfigXmlStream $xmlDoc `
  -RememberCredential `
  -PassThru -ErrorAction Stop | Out-Null
 
