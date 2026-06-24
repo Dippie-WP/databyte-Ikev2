@@ -25,7 +25,7 @@ connections {
     dpd_timeout  = 120s
     local {
       auth = psk
-      id   = "vpn.homelab.local"
+      id   = "myvpn.databyte.co.za"
     }
     remote {
       auth = psk
@@ -45,7 +45,7 @@ connections {
   }
 }
 
-# secrets { ike-psk { id = "vpn.homelab.local"; id-remote = %any; secret = "REPLACE_ME_BASE64"; } }
+# secrets { ike-psk { id = "myvpn.databyte.co.za"; id-remote = %any; secret = "REPLACE_ME_BASE64"; } }
 #
 # Generate a strong PSK:
 #   openssl rand -base64 32

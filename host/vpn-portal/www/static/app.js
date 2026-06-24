@@ -2072,8 +2072,8 @@
   function renderOneshotPanel(r) {
     const c = r.customer, d = r.device;
     const eapId = r.eap_identity, pw = r.password;
-    const server    = '102.182.117.43';
-    const remoteId  = 'vpn.homelab.local';
+    const server    = 'myvpn.databyte.co.za';
+    const remoteId  = 'myvpn.databyte.co.za';
     const localId   = eapId;
 
     function fieldRow(label, value, copy = true) {

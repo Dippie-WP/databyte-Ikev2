@@ -45,7 +45,7 @@ connections {
     local {
       auth = pubkey
       certs = server.pem
-      id    = "vpn.homelab.local"
+      id    = "myvpn.databyte.co.za"
     }
     remote {
       auth = eap-mschapv2
