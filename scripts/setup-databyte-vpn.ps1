@@ -17,7 +17,8 @@
       4. Sets IPsec crypto to match the strongSwan server
          (AES128/SHA256/Group14/PFS2048 — Microsoft Learn canonical, 2025-01-27)
       5. Configures Windows registry for strong DH (ENFORCE) and NAT-T
-      6. Stores credentials via cmdkey (auto-fills on GUI connect)
+      6. Binds credentials to the profile via MSFT_NetConnectionProfile WMI
+         (so Settings → VPN → Connect works without any prompt)
       7. Attempts rasdial; falls back to Settings GUI on failure
 
     Usage:
@@ -28,7 +29,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.8
+    Version:        2.0.9
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -250,19 +251,73 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\PolicyAgent" `
 Write-Host "  PolicyAgent\AssumeUDPEncapsulationContextOnSendRule = 2" -ForegroundColor Green
 
 # ============================================================================
-# STEP 6 — Store credentials (cmdkey)
+# STEP 6 — Bind credentials to the profile
 # ============================================================================
-# Store under BOTH the server address AND the connection name.
-# Different Windows builds look up VPN creds by different keys:
-#   - Win 10 1809 / Server 2019: keyed by ServerAddress
-#   - Win 11 21H2+: keyed by ConnectionName
-# Storing under both = works everywhere.
+# Win IKEv2 native client does NOT use cmdkey for EAP auth identity lookup
+# (lesson #135). To bind creds to the profile so Settings → VPN → Connect
+# works without any prompt, we call Set-VpnConnectionUsernamePassword
+# (Win 11 22H2+) or the WMI method MSFT_NetConnectionProfile::SetCredentials
+# (Win 10+). The WMI method is the canonical way Windows itself binds creds
+# after the user enters them in the GUI prompt.
 Write-Host ""
-Write-Host "=== [6/7] Storing credentials ===" -ForegroundColor Cyan
+Write-Host "=== [6/7] Binding credentials to profile ===" -ForegroundColor Cyan
 
+$securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
+
+# Method 1: Dedicated cmdlet (Win 11 22H2+)
+$bound = $false
+try {
+    Set-VpnConnectionUsernamePassword -ConnectionName $ConnectionName `
+        -UserName $Username -Password $securePassword -Domain "" `
+        -PassThru -ErrorAction Stop | Out-Null
+    Write-Host "  Set-VpnConnectionUsernamePassword: OK" -ForegroundColor Green
+    $bound = $true
+} catch {
+    Write-Host "  Set-VpnConnectionUsernamePassword: not available (will try WMI)" -ForegroundColor DarkGray
+}
+
+# Method 2: WMI MSFT_NetConnectionProfile (Win 10+, always works)
+if (-not $bound) {
+    try {
+        $cimSession = New-CimSession
+        $profiles = @(Get-CimInstance -CimSession $cimSession `
+            -Namespace "root\StandardCimv2" -ClassName "MSFT_NetConnectionProfile" `
+            -ErrorAction SilentlyContinue)
+        # Find profile by InterfaceAlias or Name (different builds index differently)
+        $profile = $profiles | Where-Object {
+            $_.InterfaceAlias -eq $ConnectionName -or
+            $_.Name -eq $ConnectionName
+        } | Select-Object -First 1
+        if ($profile) {
+            $result = Invoke-CimMethod -CimSession $cimSession -InputObject $profile `
+                -MethodName "SetCredentials" `
+                -Arguments @{ UserName = $Username; Password = $securePassword; Domain = "" } `
+                -ErrorAction Stop
+            if ($result.ReturnValue -eq 0) {
+                Write-Host "  WMI MSFT_NetConnectionProfile::SetCredentials: OK" -ForegroundColor Green
+                $bound = $true
+            } else {
+                Write-Host "  WMI SetCredentials: ReturnValue=$($result.ReturnValue)" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "  WMI: profile not found in MSFT_NetConnectionProfile" -ForegroundColor DarkGray
+        }
+        Remove-CimSession $cimSession -ErrorAction SilentlyContinue
+    } catch {
+        Write-Host "  WMI SetCredentials: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+}
+
+if ($bound) {
+    Write-Host "  Credentials bound — future connects via Settings need NO prompt." -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: creds NOT bound. First connect will still prompt." -ForegroundColor Yellow
+    Write-Host "  Workaround: enter creds in the GUI prompt ONCE; Windows then binds them." -ForegroundColor Yellow
+}
+
+# cmdkey (decorative for IKEv2, but kept for RDP/credential-manager tools)
 cmdkey /generic:$ServerAddress      /user:$Username /pass:$Password | Out-Null
 cmdkey /generic:$ConnectionName     /user:$Username /pass:$Password | Out-Null
-Write-Host "  Credentials stored for $ServerAddress AND $ConnectionName" -ForegroundColor Green
 
 # ============================================================================
 # STEP 7 — Connect (rasdial, with GUI fallback + poll loop)
