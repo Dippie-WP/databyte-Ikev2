@@ -22,7 +22,7 @@
 
 set -euo pipefail
 
-SERVER_ID="${SERVER_ID:-vpn.homelab.local}"
+SERVER_ID="${SERVER_ID:-myvpn.databyte.co.za}"
 CERT_DIR="docker/swanctl"
 
 echo "=== Generating strongSwan CA + server cert for ${SERVER_ID} ==="
