@@ -348,7 +348,7 @@ networks:
 ### 3.2 The Script — Complete Annotated Source
 
 **File:** `setup-databyte-vpn.ps1` v2.3.0
-**Location:** `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=N`
+**Location:** `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1?v=N` (CF-proxied, WAF-protected)
 **Git:** `github.com/Dippie-WP/databyte-Ikev2` tag `v2.3.0`
 **Lines:** 517
 
