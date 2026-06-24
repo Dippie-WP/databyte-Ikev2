@@ -203,8 +203,8 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
             "c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
             "c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
             "FROM devices d JOIN customers c ON c.id = d.customer_id "
-            "WHERE d.device_name = ?",
-            (identity,)
+            "WHERE d.strongswan_user_id = ?",
+            (user_row["id"],)
         ).fetchone()
         if not device_row:
             return None
