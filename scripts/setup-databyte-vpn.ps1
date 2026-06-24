@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.4
+    Version:        2.0.5
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -196,13 +196,13 @@ $profileXml = @"
               <AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">311</AuthorId>
             </EapMethod>
             <Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">
-              <EapMSChapV2 xmlns="http://www.microsoft.com/provisioning/EapMsChapV2ConnectionPropertiesV1">
+              <EapMsChapV2 xmlns="http://www.microsoft.com/provisioning/EapMsChapV2ConnectionPropertiesV1">
                 <UseWinLogonCredentials>false</UseWinLogonCredentials>
                 <ServerValidation>
                   <DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation>
                   <ServerNames>$RemoteId</ServerNames>
                 </ServerValidation>
-              </EapMSChapV2>
+              </EapMsChapV2>
             </Config>
           </EapHostConfig>
         </Configuration>
