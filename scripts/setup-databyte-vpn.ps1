@@ -17,7 +17,7 @@
       4. Sets IPsec crypto to match the strongSwan server
          (AES128/SHA256/Group14/PFS2048 — Microsoft Learn canonical, 2025-01-27)
       5. Configures Windows registry for strong DH (ENFORCE) and NAT-T
-      6. Binds credentials to the profile via MSFT_NetConnectionProfile WMI
+      6. Binds credentials to the profile via DPAPI-encrypted pbk write
          (so Settings → VPN → Connect works without any prompt)
       7. Attempts rasdial; falls back to Settings GUI on failure
 
@@ -29,7 +29,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.1.0
+    Version:        2.2.0
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -329,28 +329,112 @@ if (-not $bound) {
     }
 }
 
-# Method 4: rasdial + disconnect cycle (universal fallback, writes to pbk)
+# Method 4: DPAPI-encrypted direct pbk write (universal, every Windows build)
+# This is what Windows does internally when the user checks "Save password"
+# in the GUI prompt. The password is encrypted with DPAPI using the user's
+# master key, then base64-encoded into the Password= field of the pbk.
+# Lesson #156: rasdial $Name $User $Pass returns 703 for IKEv2 + EAP-MSCHAPv2
+# because the EAP layer needs more than just username — it needs the password
+# in the profile-bound pbk store. Writing directly to the pbk bypasses this.
 if (-not $bound) {
-    Write-Host "  Method 4 (rasdial cycle): forcing creds write to rasphone.pbk..." -ForegroundColor Yellow
+    Write-Host "  Method 4 (DPAPI-encrypted pbk write): trying..." -ForegroundColor Yellow
     try {
-        # Suppress output, ignore exit code (we don't care if connect succeeds;
-        # we just need the pbk entry to record the creds).
-        $null = rasdial $ConnectionName $Username $Password 2>&1
-        Start-Sleep -Seconds 2
-        # Verify creds are now in pbk
-        $pbkPath = "$env:APPDATA\Microsoft\Network\Connections\Pbk\rasphone.pbk"
-        $pbkHasCreds = $false
-        if (Test-Path $pbkPath) {
-            $pbkHasCreds = (Get-Content $pbkPath -Raw) -match [regex]::Escape($Username)
+        Add-Type -AssemblyName System.Security -ErrorAction Stop
+        $plaintext = [System.Text.Encoding]::Unicode.GetBytes($Password)
+        $encrypted = [System.Security.Cryptography.ProtectedData]::Protect(
+            $plaintext, $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        $base64Password = [Convert]::ToBase64String($encrypted)
+
+        $pbkDir = Join-Path $env:APPDATA "Microsoft\Network\Connections\Pbk"
+        if (-not (Test-Path $pbkDir)) {
+            New-Item -Path $pbkDir -ItemType Directory -Force | Out-Null
         }
-        if ($pbkHasCreds) {
-            Write-Host "  Method 4 (rasdial cycle): OK (creds written to rasphone.pbk)" -ForegroundColor Green
+        $pbkPath = Join-Path $pbkDir "rasphone.pbk"
+        if (-not (Test-Path $pbkPath)) {
+            [System.IO.File]::WriteAllText($pbkPath, "", [System.Text.Encoding]::Unicode)
+        }
+
+        # Parse pbk, find/update [DatabyteVPN] section
+        $lines = [System.IO.File]::ReadAllLines($pbkPath, [System.Text.Encoding]::Unicode)
+        $newLines = New-Object System.Collections.Generic.List[string]
+        $inSection = $false
+        $sectionFound = $false
+        $foundUsername = $false; $foundPassword = $false; $foundDomain = $false; $foundRemember = $false
+
+        foreach ($line in $lines) {
+            if ($line -match '^\[(.+)\]$') {
+                if ($inSection) {
+                    if (-not $foundUsername) { $newLines.Add("Username=$Username") }
+                    if (-not $foundPassword) { $newLines.Add("Password=$base64Password") }
+                    if (-not $foundDomain) { $newLines.Add("Domain=") }
+                    if (-not $foundRemember) { $newLines.Add("RememberPassword=1") }
+                }
+                $inSection = ($Matches[1] -eq $ConnectionName)
+                if ($inSection) { $sectionFound = $true }
+                $foundUsername = $false; $foundPassword = $false
+                $foundDomain = $false; $foundRemember = $false
+                $newLines.Add($line)
+                continue
+            }
+            if ($inSection) {
+                if ($line -match '^Username=') { $newLines.Add("Username=$Username"); $foundUsername = $true }
+                elseif ($line -match '^Password=') { $newLines.Add("Password=$base64Password"); $foundPassword = $true }
+                elseif ($line -match '^Domain=') { $newLines.Add("Domain="); $foundDomain = $true }
+                elseif ($line -match '^RememberPassword=') { $newLines.Add("RememberPassword=1"); $foundRemember = $true }
+                else { $newLines.Add($line) }
+            } else {
+                $newLines.Add($line)
+            }
+        }
+        if ($inSection) {
+            if (-not $foundUsername) { $newLines.Add("Username=$Username") }
+            if (-not $foundPassword) { $newLines.Add("Password=$base64Password") }
+            if (-not $foundDomain) { $newLines.Add("Domain=") }
+            if (-not $foundRemember) { $newLines.Add("RememberPassword=1") }
+        }
+        if (-not $sectionFound) {
+            $newLines.Add("[$ConnectionName]")
+            $newLines.Add("Encoding=1")
+            $newLines.Add("Type=2")
+            $newLines.Add("Username=$Username")
+            $newLines.Add("Domain=")
+            $newLines.Add("Password=$base64Password")
+            $newLines.Add("RememberPassword=1")
+        }
+        [System.IO.File]::WriteAllLines($pbkPath, $newLines, [System.Text.Encoding]::Unicode)
+
+        # Verify: check that the pbk now has the username
+        $verify = Get-Content $pbkPath -Raw
+        if ($verify -match [regex]::Escape("Username=$Username")) {
+            Write-Host "  Method 4 (DPAPI pbk write): OK — pbk has Username+Password" -ForegroundColor Green
             $bound = $true
         } else {
-            Write-Host "  Method 4: rasdial ran but pbk not updated" -ForegroundColor DarkGray
+            Write-Host "  Method 4: write succeeded but verification failed" -ForegroundColor Yellow
         }
     } catch {
-        Write-Host "  Method 4: $($_.Exception.Message)" -ForegroundColor DarkGray
+        Write-Host "  Method 4: FAILED - $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Method 5: Force rasdial disconnect then reconnect (final fallback)
+if (-not $bound) {
+    Write-Host "  Method 5 (rasdial cycle): trying..." -ForegroundColor Yellow
+    try {
+        rasdial $ConnectionName /disconnect 2>&1 | Out-Null
+        Start-Sleep -Seconds 1
+        $null = rasdial $ConnectionName $Username $Password 2>&1
+        Start-Sleep -Seconds 2
+        $pbkPath = "$env:APPDATA\Microsoft\Network\Connections\Pbk\rasphone.pbk"
+        if ((Test-Path $pbkPath) -and ((Get-Content $pbkPath -Raw) -match [regex]::Escape("Username=$Username"))) {
+            Write-Host "  Method 5 (rasdial cycle): OK" -ForegroundColor Green
+            $bound = $true
+        } else {
+            Write-Host "  Method 5: ran but pbk still not updated" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "  Method 5: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
 }
 
