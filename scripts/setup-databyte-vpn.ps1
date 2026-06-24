@@ -28,7 +28,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.0.1
+    Version:        2.0.2
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -228,19 +228,25 @@ Write-Host "  PolicyAgent\AssumeUDPEncapsulationContextOnSendRule = 2" -Foregrou
 # ============================================================================
 # STEP 6 — Store credentials (cmdkey)
 # ============================================================================
-# Generic creds keyed by server address. Windows GUI auto-fills on Connect.
+# Store under BOTH the server address AND the connection name.
+# Different Windows builds look up VPN creds by different keys:
+#   - Win 10 1809 / Server 2019: keyed by ServerAddress
+#   - Win 11 21H2+: keyed by ConnectionName
+# Storing under both = works everywhere.
 Write-Host ""
 Write-Host "=== [6/7] Storing credentials ===" -ForegroundColor Cyan
 
-cmdkey /generic:$ServerAddress /user:$Username /pass:$Password | Out-Null
-Write-Host "  Credentials stored for $ServerAddress" -ForegroundColor Green
+cmdkey /generic:$ServerAddress      /user:$Username /pass:$Password | Out-Null
+cmdkey /generic:$ConnectionName     /user:$Username /pass:$Password | Out-Null
+Write-Host "  Credentials stored for $ServerAddress AND $ConnectionName" -ForegroundColor Green
 
 # ============================================================================
-# STEP 7 — Connect (rasdial, with GUI fallback)
+# STEP 7 — Connect (rasdial, with GUI fallback + poll loop)
 # ============================================================================
-# rasdial is a legacy RAS dialer (PPTP/L2TP era). It does NOT properly
+# rasdial is a legacy RAS dialer (PPPT/L2TP era). It does NOT reliably
 # speak EAP-MSCHAPv2 inside IKEv2 — success depends on Windows build.
-# If it fails, we open Settings so the user can click Connect.
+# If it fails, open Settings so the user can click Connect there, then
+# POLL for status change instead of exiting silently.
 Write-Host ""
 Write-Host "=== [7/7] Connecting to $ServerAddress ===" -ForegroundColor Cyan
 
@@ -248,30 +254,68 @@ Start-Sleep -Seconds 1
 
 $connectOutput = rasdial $ConnectionName $Username $Password 2>&1
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "  Connected!" -ForegroundColor Green
+    Write-Host "  rasdial: CONNECTED" -ForegroundColor Green
 } else {
     Write-Host "  rasdial exit code: $LASTEXITCODE" -ForegroundColor Yellow
-    Write-Host ($connectOutput -join "`n") -ForegroundColor Yellow
+    Write-Host ($connectOutput -join "`n") -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  rasdial can't reliably handle EAP-MSCHAPv2 in IKEv2." -ForegroundColor Yellow
     Write-Host "  Opening Settings -> VPN. Click 'Connect' next to '$ConnectionName'." -ForegroundColor Yellow
+    Write-Host "  Polling for connection state (up to 90s)..." -ForegroundColor Yellow
     Start-Process ms-settings:network-vpn
 }
 
 # ============================================================================
-# VERIFY
+# VERIFY — poll for Connected state
 # ============================================================================
 Write-Host ""
 Write-Host "=== Verifying ===" -ForegroundColor Cyan
-Start-Sleep -Seconds 2
 
-$conn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
+$maxWait = 90
+$pollSec = 3
+$elapsed = 0
+$connected = $false
+$conn      = $null
+
+while ($elapsed -lt $maxWait) {
+    $conn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
+    if ($conn -and $conn.ConnectionStatus -eq "Connected") {
+        $connected = $true
+        break
+    }
+    Start-Sleep -Seconds $pollSec
+    $elapsed += $pollSec
+    Write-Host ("  ...waiting ({0}s/{1}s) — status: {2}" -f `
+        $elapsed, $maxWait, $(if($conn){$conn.ConnectionStatus}else{'unknown'})).PadRight(60) -NoNewline
+    Write-Host "`r" -NoNewline
+}
+
+Write-Host ""
+Write-Host ""
+
 if ($conn) {
     Write-Host "  Profile:     $($conn.Name)" -ForegroundColor Green
     Write-Host "  Server:      $($conn.ServerAddress)" -ForegroundColor Green
     Write-Host "  TunnelType:  $($conn.TunnelType)" -ForegroundColor Green
     Write-Host "  AuthMethod:  $($conn.AuthenticationMethod -join ',')" -ForegroundColor Green
-    Write-Host "  Status:      $($conn.ConnectionStatus)" -ForegroundColor Green
+    $statusColor = if ($connected) { "Green" } else { "Red" }
+    Write-Host "  Status:      $($conn.ConnectionStatus)" -ForegroundColor $statusColor
+    if ($connected) {
+        Write-Host ""
+        Write-Host "  [OK] CONNECTED to $ServerAddress" -ForegroundColor Green
+        Write-Host "       First test:  tracert 8.8.8.8   (first hop should be VPS)" -ForegroundColor Cyan
+        Write-Host "       Public IP:   Invoke-WebRequest https://ifconfig.me" -ForegroundColor Cyan
+    } else {
+        Write-Host ""
+        Write-Host "  [FAIL] Still disconnected after ${maxWait}s." -ForegroundColor Red
+        Write-Host "         Possible causes:" -ForegroundColor Yellow
+        Write-Host "           1. Settings VPN page still showing a prompt (click Connect there)" -ForegroundColor Yellow
+        Write-Host "           2. Server unreachable from your network" -ForegroundColor Yellow
+        Write-Host "           3. Credentials wrong (rerun to overwrite cmdkey)" -ForegroundColor Yellow
+        Write-Host "         Re-run this script to retry, or:" -ForegroundColor Yellow
+        Write-Host "           rasdial $ConnectionName /disconnect   (reset)" -ForegroundColor Cyan
+        Write-Host "           Start-Process ms-settings:network-vpn" -ForegroundColor Cyan
+    }
 } else {
     Write-Warning "Profile not visible. Refresh VPN settings."
 }
@@ -289,8 +333,7 @@ Write-Host ""
 
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch {}
 
-# Keep window open when run from File Explorer (not from terminal)
-if ($Host.Name -eq "ConsoleHost" -and [Environment]::UserInteractive) {
-    Write-Host "Press any key to exit..." -ForegroundColor DarkGray
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-}
+# Keep window open. Read-Host works in ALL hosts (Console, ISE, irm|iex).
+# ReadKey silently fails in some PowerShell hosts.
+Write-Host ""
+Read-Host "Press Enter to exit"
