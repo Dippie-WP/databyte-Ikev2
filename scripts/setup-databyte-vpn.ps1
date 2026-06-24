@@ -26,11 +26,11 @@
       PS> powershell -ExecutionPolicy Bypass -File setup-databyte-vpn.ps1
 
     Or one-shot from the portal:
-      PS> iex (irm https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1)
+      PS> iex (irm https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1)
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.3.0
+    Version:        2.4.0
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
