@@ -54,14 +54,16 @@ Write-Host ""
 Write-Host "=== [1/5] Verifying server TLS cert (Let's Encrypt) ===" -ForegroundColor Cyan
 
 try {
-    $cert = $(echo | Invoke-WebRequest -Uri "https://$RemoteId" -UseBasicParsing -TimeoutSec 10).Certificate
+    # Use .NET directly to avoid PS 5.1 parsing bugs with `echo | Invoke-WebRequest`
+    $req = [System.Net.HttpWebRequest]::Create("https://$RemoteId")
+    $req.Timeout = 10000
+    $req.GetResponse().Close()
+    $cert = $req.ServicePoint.Certificate
     Write-Host "  Server cert subject: $($cert.Subject)" -ForegroundColor Green
     Write-Host "  Issuer:               $($cert.Issuer)" -ForegroundColor Green
     Write-Host "  Valid from:           $($cert.GetEffectiveDateString())" -ForegroundColor Green
     Write-Host "  Expires:              $($cert.GetExpirationDateString())" -ForegroundColor Green
 
-    # Verify it's a Let's Encrypt chain (ISRG Root X1/X2 are in Windows trust store)
-    $leTrusted = $cert.Thumbprint -ne $null
     if ($cert.Issuer -match "Let's Encrypt" -or $cert.Issuer -match "ISRG") {
         Write-Host "  Chain: Let's Encrypt (ISRG Root) — publicly trusted by Windows." -ForegroundColor Green
     } else {

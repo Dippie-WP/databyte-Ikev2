@@ -40,7 +40,11 @@ Write-Host ""
 Write-Host "=== [1/4] Verifying server TLS cert (Let's Encrypt) ===" -ForegroundColor Cyan
 
 try {
-    $cert = $(echo | Invoke-WebRequest -Uri "https://$ServerHostname" -UseBasicParsing -TimeoutSec 10).Certificate
+    # Use .NET directly to avoid PS 5.1 parsing bugs with `echo | Invoke-WebRequest`
+    $req = [System.Net.HttpWebRequest]::Create("https://$ServerHostname")
+    $req.Timeout = 10000
+    $req.GetResponse().Close()
+    $cert = $req.ServicePoint.Certificate
     Write-Host "  Server cert subject: $($cert.Subject)" -ForegroundColor Green
     Write-Host "  Issuer:               $($cert.Issuer)" -ForegroundColor Green
     Write-Host "  Valid from:           $($cert.GetEffectiveDateString())" -ForegroundColor Green
