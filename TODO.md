@@ -43,6 +43,25 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - [ ] **Per-tier bandwidth limits** (replace flat 20/20 with tier-based) — 1h
 - [ ] **CP7 security hardening** (6 items: fail2ban portal jail, AIDE, backups, cert expiry monitor, INPUT rule tightening, iptables-nft consolidation) — 3-4h total
 - [ ] **ipBan service to VPS** (currently INACTIVE on VPS, only active on LXC 903) — 30m
+- [ ] **Customer portal idle expiry split** (operator 30d OK, customer must be ≤24h idle / ≤7d absolute) — 30m. Surfaced 2026-06-24 by friend-overseas Android test
+- [ ] **Explicit `user_id` FK on `customers` table** — currently portal maps `users.name` (EAP) ↔ `customers.name` (portal) by silent name fuzzy-match (e.g. strip `-laptop`). Brittle. Add FK column + migration. — 1-2h. Surfaced 2026-06-24
+
+## 🟢 Low Priority (polish)
+
+- [ ] systemd `RuntimeDirectoryMode` duplicate key cleanup
+- [ ] CSP `report-uri` endpoint
+- [ ] logrotate config for vpn-portal
+- [ ] DAT-VPN-CLIENT-WINDOWS-INSTALLER-001 SOP (formal customer-facing doc)
+- [ ] nftables migration
+- [ ] **Tier label ↔ cap mismatch in customer portal** — `demo_100mb` shows "Demo 100MB" but per-customer override is 500 MiB. Rename tier OR drop override. — 5 min. Surfaced 2026-06-24
+
+## 🔵 Future
+
+- [ ] 5G CGNAT for iPhone clients
+- [ ] HA failover (PLAN-5H-HA-LB.md)
+- [ ] Let's Encrypt DNS-01 (DONE 2026-06-24, just renewal automation)
+- [ ] **Tracker** (spreadsheet / markdown / CSV) — Zun hasn't picked A/B/C yet. Pending format decision.
+- [ ] **Known limitation: Netflix (and other anti-VPN streaming services) won't work through tunnel.** Xneelo IP range (AS37153, 154.65.110.44) returns non-ZA CDN IPs (Dublin/Virginia/Oregon) from Netflix GeoDNS instead of af-south-1 Cape Town. Streaming will buffer, fail, or show "unblocker/proxy" error. Workaround: friend turns off VPN for streaming only. Add to DAT-VPN-SOP-001 v1.0.4 customer doc when next revised. Surfaced 2026-06-24 by Lagos/Starlink friend.
 
 ## 🟢 Low Priority (polish)
 
@@ -72,6 +91,8 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - **2026-06-24 18:27** — `test-android-2-phone` customer created.
 - **2026-06-24 18:34** — **Customer portal login bug FIXED** (portal_auth.py). Commit `49895dc`.
 - **2026-06-24 18:36** — Testing/alignment plan logged as TODO (this file).
+- **2026-06-24 19:01** — **First overseas Android client (friend) connected to production VPN** (`test-android-friend-laptop` @ 98.97.77.223 → 10.99.0.4, EAP-MSCHAPv2 + AES-256, 20/20 mbit). End-to-end confirmed working. Surfaced 3 portal bugs (idle expiry, tier label, name-based user↔customer mapping) — added to TODO.
+- **2026-06-24 19:11** — Live VPN monitor (PID 52437, 30s poll) deployed during friend test. Logs `/tmp/vpn_monitor.log`.
 
 ## 📚 Reference
 
