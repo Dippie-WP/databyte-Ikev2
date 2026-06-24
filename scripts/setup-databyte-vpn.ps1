@@ -17,8 +17,9 @@
       4. Sets IPsec crypto to match the strongSwan server
          (AES128/SHA256/Group14/PFS2048 — Microsoft Learn canonical, 2025-01-27)
       5. Configures Windows registry for strong DH (ENFORCE) and NAT-T
-      6. Binds credentials to the profile via DPAPI-encrypted pbk write
-         (so Settings → VPN → Connect works without any prompt)
+      6. Binds credentials to the profile via RasSetCredentials API
+         (rasapi32.dll — the same API Windows uses internally for
+         'Save password' in the GUI prompt; works on every Windows build)
       7. Attempts rasdial; falls back to Settings GUI on failure
 
     Usage:
@@ -29,7 +30,7 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.2.0
+    Version:        2.3.0
     Replaces:       setup-windows-vpn.ps1, connect-databyte-vpn.ps1
     Server:         myvpn.databyte.co.za (grey-cloud DNS → 154.65.110.44)
     Auth:           EAP-MSCHAPv2 (operator credentials, baked in)
@@ -251,19 +252,104 @@ New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\PolicyAgent" `
 Write-Host "  PolicyAgent\AssumeUDPEncapsulationContextOnSendRule = 2" -ForegroundColor Green
 
 # ============================================================================
-# STEP 6 — Bind credentials to the profile
+# STEP 6 — Bind credentials to the profile (RasSetCredentials API)
 # ============================================================================
-# Win IKEv2 native client does NOT use cmdkey for EAP auth identity lookup
-# (lesson #135). To bind creds to the profile so Settings → VPN → Connect
-# works without any prompt, we try in order:
-#   1. Set-VpnConnectionUsernamePassword cmdlet (PS 7+ on Win 11 22H2+)
-#   2. WMI MSFT_NetVpnConnection::SetCredentials (Win 10+ VPN-specific class)
-#   3. WMI MSFT_NetConnectionProfile::SetCredentials (fallback)
-#   4. Force creds write to rasphone.pbk via rasdial + disconnect cycle
-# Lesson #154: MSFT_NetConnectionProfile is for "network location awareness"
-# profiles (Domain/Public), not VPN. VPN profiles live under
-# MSFT_NetVpnConnection (subclass of MSFT_NetConnection).
-# Lesson #155: rasdial with explicit creds writes to rasphone.pbk on
+# This is the CANONICAL Microsoft way to bind credentials to a VPN profile.
+# RasSetCredentials is the same Windows API (rasapi32.dll) that Windows
+# itself uses when the user checks "Save password" in the GUI prompt.
+# Works on every Windows build (Win 7/8/10/11) without depending on
+# cmdlets, WMI, or rasdial. Inspired by VPNCredentialsHelper
+# (https://github.com/paulstancer/VPNCredentialsHelper) by Paul Stancer.
+# Lesson #161: The WMI namespace for VPN profiles is
+# ROOT\Microsoft\Windows\RemoteAccess\Client (NOT root\StandardCimv2).
+# The classes there (PS_VpnConnection, VpnConnection) have a Set method
+# but no credentials parameter; credential binding is via RasSetCredentials.
+Write-Host ""
+Write-Host "=== [6/7] Binding credentials to profile (RasSetCredentials) ===" -ForegroundColor Cyan
+
+$securePassword = ConvertTo-SecureString -String $Password -AsPlainText -Force
+$bound = $false
+
+# Define the C# P/Invoke wrapper for rasapi32!RasSetCredentials
+$credHelper = @'
+using System;
+using System.Runtime.InteropServices;
+public class VpnCredBinder {
+    private const int UNLEN = 256;
+    private const int PWLEN = 256;
+    private const int DNLEN = 15;
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode, Pack = 4)]
+    private struct RASCREDENTIALS {
+        public int size;
+        public int options;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = UNLEN + 1)] public string userName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = PWLEN + 1)] public string password;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = DNLEN + 1)] public string domain;
+    }
+    [DllImport("rasapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int RasSetCredentials(
+        string lpszPhonebook, string lpszEntryName, IntPtr lpCredentials,
+        [MarshalAs(UnmanagedType.Bool)] bool fClearCredentials);
+    public static int Bind(string entry, string user, string pass, string dom) {
+        var c = new RASCREDENTIALS {
+            size = Marshal.SizeOf(typeof(RASCREDENTIALS)),
+            options = 0x7,  // RASCM.UserName | Password | Domain
+            userName = user, password = pass, domain = dom ?? ""
+        };
+        IntPtr p = Marshal.AllocHGlobal(c.size);
+        try {
+            Marshal.StructureToPtr(c, p, false);
+            return RasSetCredentials(null, entry, p, false);
+        } finally {
+            Marshal.FreeHGlobal(p);
+        }
+    }
+}
+'@
+
+# Method A: Built-in VPNCredentialsHelper module (if installed)
+if (-not $bound) {
+    if (Get-Module -ListAvailable -Name VPNCredentialsHelper -EA SilentlyContinue) {
+        try {
+            Import-Module VPNCredentialsHelper -EA Stop
+            Set-VpnConnectionUsernamePassword -connectionname $ConnectionName -username $Username -password $Password -domain "" -EA Stop
+            Write-Host "  Method A (VPNCredentialsHelper module): OK" -ForegroundColor Green
+            $bound = $true
+        } catch {
+            Write-Host "  Method A: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "  Method A (VPNCredentialsHelper module): not installed" -ForegroundColor DarkGray
+    }
+}
+
+# Method B: Inline C# P/Invoke (no module needed — works on every Win build)
+if (-not $bound) {
+    try {
+        if (-not ('VpnCredBinder' -as [type])) {
+            Add-Type -TypeDefinition $credHelper -IgnoreWarnings -ErrorAction Stop
+        }
+        $r = [VpnCredBinder]::Bind($ConnectionName, $Username, $Password, "")
+        if ($r -eq 0) {
+            Write-Host "  Method B (RasSetCredentials P/Invoke): OK" -ForegroundColor Green
+            $bound = $true
+        } else {
+            Write-Host "  Method B (RasSetCredentials): returned $r (entry may not exist yet)" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  Method B: FAILED - $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+if ($bound) {
+    Write-Host "  Credentials bound — future connects via Settings need NO prompt." -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: creds NOT bound. Run the script again OR enter creds in GUI ONCE." -ForegroundColor Yellow
+}
+
+# cmdkey (decorative for IKEv2, but kept for RDP/credential-manager tools)
+cmdkey /generic:$ServerAddress      /user:$Username /pass:$Password | Out-Null
+cmdkey /generic:$ConnectionName     /user:$Username /pass:$Password | Out-Null
 # successful connect, even if subsequent /disconnect is called immediately.
 # This is the universal fallback that works on every Windows build.
 Write-Host ""
@@ -327,123 +413,6 @@ if (-not $bound) {
     } catch {
         Write-Host "  WMI CIM session failed: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
-}
-
-# Method 4: DPAPI-encrypted direct pbk write (universal, every Windows build)
-# This is what Windows does internally when the user checks "Save password"
-# in the GUI prompt. The password is encrypted with DPAPI using the user's
-# master key, then base64-encoded into the Password= field of the pbk.
-# Lesson #156: rasdial $Name $User $Pass returns 703 for IKEv2 + EAP-MSCHAPv2
-# because the EAP layer needs more than just username — it needs the password
-# in the profile-bound pbk store. Writing directly to the pbk bypasses this.
-if (-not $bound) {
-    Write-Host "  Method 4 (DPAPI-encrypted pbk write): trying..." -ForegroundColor Yellow
-    try {
-        Add-Type -AssemblyName System.Security -ErrorAction Stop
-        $plaintext = [System.Text.Encoding]::Unicode.GetBytes($Password)
-        $encrypted = [System.Security.Cryptography.ProtectedData]::Protect(
-            $plaintext, $null,
-            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
-        )
-        $base64Password = [Convert]::ToBase64String($encrypted)
-
-        $pbkDir = Join-Path $env:APPDATA "Microsoft\Network\Connections\Pbk"
-        if (-not (Test-Path $pbkDir)) {
-            New-Item -Path $pbkDir -ItemType Directory -Force | Out-Null
-        }
-        $pbkPath = Join-Path $pbkDir "rasphone.pbk"
-        if (-not (Test-Path $pbkPath)) {
-            [System.IO.File]::WriteAllText($pbkPath, "", [System.Text.Encoding]::Unicode)
-        }
-
-        # Parse pbk, find/update [DatabyteVPN] section
-        $lines = [System.IO.File]::ReadAllLines($pbkPath, [System.Text.Encoding]::Unicode)
-        $newLines = New-Object System.Collections.Generic.List[string]
-        $inSection = $false
-        $sectionFound = $false
-        $foundUsername = $false; $foundPassword = $false; $foundDomain = $false; $foundRemember = $false
-
-        foreach ($line in $lines) {
-            if ($line -match '^\[(.+)\]$') {
-                if ($inSection) {
-                    if (-not $foundUsername) { $newLines.Add("Username=$Username") }
-                    if (-not $foundPassword) { $newLines.Add("Password=$base64Password") }
-                    if (-not $foundDomain) { $newLines.Add("Domain=") }
-                    if (-not $foundRemember) { $newLines.Add("RememberPassword=1") }
-                }
-                $inSection = ($Matches[1] -eq $ConnectionName)
-                if ($inSection) { $sectionFound = $true }
-                $foundUsername = $false; $foundPassword = $false
-                $foundDomain = $false; $foundRemember = $false
-                $newLines.Add($line)
-                continue
-            }
-            if ($inSection) {
-                if ($line -match '^Username=') { $newLines.Add("Username=$Username"); $foundUsername = $true }
-                elseif ($line -match '^Password=') { $newLines.Add("Password=$base64Password"); $foundPassword = $true }
-                elseif ($line -match '^Domain=') { $newLines.Add("Domain="); $foundDomain = $true }
-                elseif ($line -match '^RememberPassword=') { $newLines.Add("RememberPassword=1"); $foundRemember = $true }
-                else { $newLines.Add($line) }
-            } else {
-                $newLines.Add($line)
-            }
-        }
-        if ($inSection) {
-            if (-not $foundUsername) { $newLines.Add("Username=$Username") }
-            if (-not $foundPassword) { $newLines.Add("Password=$base64Password") }
-            if (-not $foundDomain) { $newLines.Add("Domain=") }
-            if (-not $foundRemember) { $newLines.Add("RememberPassword=1") }
-        }
-        if (-not $sectionFound) {
-            $newLines.Add("[$ConnectionName]")
-            $newLines.Add("Encoding=1")
-            $newLines.Add("Type=2")
-            $newLines.Add("Username=$Username")
-            $newLines.Add("Domain=")
-            $newLines.Add("Password=$base64Password")
-            $newLines.Add("RememberPassword=1")
-        }
-        [System.IO.File]::WriteAllLines($pbkPath, $newLines, [System.Text.Encoding]::Unicode)
-
-        # Verify: check that the pbk now has the username
-        $verify = Get-Content $pbkPath -Raw
-        if ($verify -match [regex]::Escape("Username=$Username")) {
-            Write-Host "  Method 4 (DPAPI pbk write): OK — pbk has Username+Password" -ForegroundColor Green
-            $bound = $true
-        } else {
-            Write-Host "  Method 4: write succeeded but verification failed" -ForegroundColor Yellow
-        }
-    } catch {
-        Write-Host "  Method 4: FAILED - $($_.Exception.Message)" -ForegroundColor Red
-    }
-}
-
-# Method 5: Force rasdial disconnect then reconnect (final fallback)
-if (-not $bound) {
-    Write-Host "  Method 5 (rasdial cycle): trying..." -ForegroundColor Yellow
-    try {
-        rasdial $ConnectionName /disconnect 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
-        $null = rasdial $ConnectionName $Username $Password 2>&1
-        Start-Sleep -Seconds 2
-        $pbkPath = "$env:APPDATA\Microsoft\Network\Connections\Pbk\rasphone.pbk"
-        if ((Test-Path $pbkPath) -and ((Get-Content $pbkPath -Raw) -match [regex]::Escape("Username=$Username"))) {
-            Write-Host "  Method 5 (rasdial cycle): OK" -ForegroundColor Green
-            $bound = $true
-        } else {
-            Write-Host "  Method 5: ran but pbk still not updated" -ForegroundColor DarkGray
-        }
-    } catch {
-        Write-Host "  Method 5: $($_.Exception.Message)" -ForegroundColor DarkGray
-    }
-}
-
-if ($bound) {
-    Write-Host "  Credentials bound — future connects via Settings need NO prompt." -ForegroundColor Green
-} else {
-    Write-Host "  WARNING: All binding methods failed." -ForegroundColor Yellow
-    Write-Host "  Workaround: enter creds in the GUI prompt ONCE; Windows then binds them." -ForegroundColor Yellow
-    Write-Host "  (If pbk was written, the binding is done — try the Settings connect.)" -ForegroundColor DarkGray
 }
 
 # cmdkey (decorative for IKEv2, but kept for RDP/credential-manager tools)
