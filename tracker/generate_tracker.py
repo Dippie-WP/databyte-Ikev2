@@ -150,6 +150,9 @@ changes = [
     ("2026-06-24 21:48", "Tracker xlsx deployed (canonical operational log)",
      "Zun: 'where we both communicate is on the excel'. Excel in RustFS = canonical; MEMORY.md/TOOLS.md are pointers. All timestamps SAST (UTC+2).",
      "tracker/generate_tracker.py, rustfs:/open-claw-push/vpn/databyte-vpn-tracker.xlsx", "🟡 Med", "Zun approved 21:46", "✅"),
+    ("2026-06-24 22:08", "Rotated zun-windows-laptop EAP credentials + ops script",
+     "Silent username desync: Windows profile still sending 'test-win-5g-laptop' but server only knows 'zun-windows-laptop'. Auth failing with 'no EAP key found'. Rotated password + shipped ops/rotate-vpn-credentials.py for future rotations.",
+     "ops/rotate-vpn-credentials.py (branch ops/rotate-vpn-credentials, force-pushed 2e2f763)", "🟠 High", "charon reload green, new key loaded", "✅"),
 ]
 for r, row in enumerate(changes, start=1):
     for c, v in enumerate(row):
@@ -187,6 +190,15 @@ bugs = [
     ("2026-06-24 21:14", "Netflix (anti-VPN) won't stream through tunnel",
      "Xneelo ASN 37153 returns non-ZA CDN IPs (Dublin/Virginia/Oregon) from Netflix GeoDNS. Probably on Netflix's anti-VPN blocklist.",
      "NOT FIXABLE on our side. Document as known limitation in DAT-VPN-SOP-001 v1.0.4. Workaround: turn off VPN for streaming.", "ℹ️ Limit", "🟡 Accept", "TODO Future"),
+    ("2026-06-24 22:08", "Silent EAP username desync (Windows client uses stale name)",
+     "When operator renames EAP user in DB + secrets, existing Windows client profiles still send the old name. Charons 'no EAP key found' = silent auth fail. No re-onboarding prompt.",
+     "Short-term: ops/rotate-vpn-credentials.py + manual client update. Long-term: portal_auth should detect rename + force token re-issue. ~1h code + test.", "🟠 High", "🔴 Open", "TODO #4"),
+    ("2026-06-24 22:08", "VPS ↔ LXC 903 DB drift (portal UI is 3 days stale)",
+     "Two ipsec.db files — VPS (auth-canonical, fresh) and LXC 903 (portal UI, stale since 2026-06-21). No sync mechanism (no cron, no systemd timer, no rsync). User sets diverged.",
+     "Add one-way or two-way sync. E.g. LXC 903 → VPS via cron every 5min, or shared NFS mount. ~30min + tests.", "🟡 Med", "🔴 Open", "TODO #5"),
+    ("2026-06-24 22:08", "Stale EAP key in rw-eap.conf (eap-demo-phone)",
+     "Charon loaded 8 EAP secrets but DB only has 7 users. 'eap-demo-phone' has no matching user. Same drift as DB divergence.",
+     "Cleaned up automatically next time ops/rotate-vpn-credentials.py regenerates secrets from DB. Add 'audit unused secrets' check to script.", "🟢 Low", "🔴 Open", "TODO #6"),
 ]
 for r, row in enumerate(bugs, start=1):
     for c, v in enumerate(row):
@@ -336,6 +348,9 @@ history = [
     ("2026-06-24 20:34", "Customer portal login SQL bug (caught only because Zun tested)",
      "portal_auth.py used wrong column for password compare.",
      "Fixed SQL. Commit 49895dc.", "🟠 High", "Always integration-test login — drives L1 testing plan"),
+    ("2026-06-24 22:08", "EAP credentials rotated for zun-windows-laptop",
+     "Windows client sending old 'test-win-5g-laptop' (renamed silently). DB+charon now know new pwd WARX17x6L-IyLpJHPikW5Q. Audit row id=N in audit_log.",
+     "ops/rotate-vpn-credentials.py branch ops/rotate-vpn-credentials 2e2f763", "🟠 High", "Rotation script = reusable for any future EAP password change"),
 ]
 for r, row in enumerate(history, start=1):
     for c, v in enumerate(row):
