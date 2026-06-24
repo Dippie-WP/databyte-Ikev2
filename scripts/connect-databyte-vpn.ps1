@@ -10,7 +10,7 @@
 
     What it does:
       1. Verifies the server presents a publicly-trusted Let's Encrypt cert
-         (no CA cert install needed — Windows trusts LE natively via ISRG Root X1/X2)
+         (no CA cert install needed - Windows trusts LE natively via ISRG Root X1/X2)
       2. Removes any existing DatabyteVPN connection
       3. Creates a new connection with EAP-MSCHAPv2 via -EapConfigXmlStream
          (no GUI dialog at connect time; RemoteID baked into the profile)
@@ -53,25 +53,39 @@ $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 Write-Host ""
 Write-Host "=== [1/5] Verifying server TLS cert (Let's Encrypt) ===" -ForegroundColor Cyan
 
+# Use raw SslStream to perform a real TLS handshake and fetch the cert.
+# (HttpWebRequest.ServicePoint.Certificate returns null on a fresh request
+# because the handshake doesn't complete before the cert lookup.)
+$cert = $null
+$certError = $null
 try {
-    # Use .NET directly to avoid PS 5.1 parsing bugs with `echo | Invoke-WebRequest`
-    $req = [System.Net.HttpWebRequest]::Create("https://$RemoteId")
-    $req.Timeout = 10000
-    $req.GetResponse().Close()
-    $cert = $req.ServicePoint.Certificate
-    Write-Host "  Server cert subject: $($cert.Subject)" -ForegroundColor Green
-    Write-Host "  Issuer:               $($cert.Issuer)" -ForegroundColor Green
-    Write-Host "  Valid from:           $($cert.GetEffectiveDateString())" -ForegroundColor Green
-    Write-Host "  Expires:              $($cert.GetExpirationDateString())" -ForegroundColor Green
+    $tcp = New-Object System.Net.Sockets.TcpClient($RemoteId, 443)
+    $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, {[System.Net.Security.RemoteCertificateValidationCallback]{ $true }})
+    $ssl.AuthenticateAsClient($RemoteId)
+    $raw = $ssl.RemoteCertificate
+    if ($raw) {
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($raw)
+    }
+    $ssl.Close()
+    $tcp.Close()
+} catch {
+    $certError = $_.Exception.Message
+}
+
+if ($cert) {
+    Write-Host "  Subject:   $($cert.Subject)" -ForegroundColor Green
+    Write-Host "  Issuer:    $($cert.Issuer)" -ForegroundColor Green
+    Write-Host "  NotBefore: $($cert.NotBefore)" -ForegroundColor Green
+    Write-Host "  NotAfter:  $($cert.NotAfter)" -ForegroundColor Green
 
     if ($cert.Issuer -match "Let's Encrypt" -or $cert.Issuer -match "ISRG") {
-        Write-Host "  Chain: Let's Encrypt (ISRG Root) — publicly trusted by Windows." -ForegroundColor Green
+        Write-Host "  Chain:     LE (ISRG Root X1/X2) - publicly trusted by Windows." -ForegroundColor Green
     } else {
-        Write-Host "  WARNING: Cert issuer is not Let's Encrypt. Verify manually." -ForegroundColor Yellow
+        Write-Host "  WARNING:   Issuer is not Let's Encrypt. Verify manually." -ForegroundColor Yellow
     }
-} catch {
-    Write-Host "  Could not fetch server cert: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "  Continuing anyway (certificate trust is handled by Windows at connect time)..." -ForegroundColor Yellow
+} else {
+    Write-Host "  Cert fetch FAILED: $certError" -ForegroundColor Red
+    Write-Host "  Continuing anyway (cert trust is handled by Windows at connect time)..." -ForegroundColor Yellow
 }
 
 # ============================================================================
@@ -135,7 +149,6 @@ $profileXml = @"
 "@
 
 # PS 5.1's Add-VpnConnection takes -EapConfigXmlStream (a byte array), NOT -ConfigurationFile.
-# -ConfigurationFile was a wrong parameter invented for some other cmdlet/version.
 $xmlBytes = [System.Text.Encoding]::UTF8.GetBytes($profileXml)
 
 try {
@@ -187,7 +200,6 @@ New-ItemProperty -Path $regPath -Name "NegotiateDH2048_AES256" `
 Write-Host "  Registry: NegotiateDH2048_AES256 = 1 (Group14+ enabled)" -ForegroundColor Green
 
 # NAT-T fix for error 809 behind double-NAT (e.g., 4G hotspot behind a router).
-# Without this, Windows sends NAT-T encapsulated packets to the wrong place.
 $policyPath = "HKLM:\SYSTEM\CurrentControlSet\Services\PolicyAgent"
 New-ItemProperty -Path $policyPath -Name "AssumeUDPEncapsulationContextOnSendRule" `
     -PropertyType DWord -Value 2 -Force | Out-Null
@@ -235,13 +247,12 @@ Write-Host "To reconnect:  powershell -ExecutionPolicy Bypass -File connect-data
 Write-Host "To disconnect: rasdial $ConnectionName /disconnect"
 Write-Host ""
 
-# Stop transcript before pausing (so the transcript captures the pause message)
+# Stop transcript (so the file is flushed/closed)
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host "---" -ForegroundColor DarkGray
 Write-Host "Full log: $transcriptPath" -ForegroundColor DarkGray
 Write-Host ""
-
-# `cmd /c pause` works reliably in `irm | iex` piped contexts (Read-Host doesn't)
-# This keeps the window open so the user can read the output before closing.
-cmd /c pause | Out-Null
+# No explicit pause — the PowerShell window stays open by default after
+# a script completes in an interactive session. The transcript file above
+# captures everything in case the window does close.

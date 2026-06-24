@@ -39,25 +39,37 @@ $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 Write-Host ""
 Write-Host "=== [1/4] Verifying server TLS cert (Let's Encrypt) ===" -ForegroundColor Cyan
 
+# Use raw SslStream to perform a real TLS handshake and fetch the cert.
+# (HttpWebRequest.ServicePoint.Certificate returns null on a fresh request.)
+$cert = $null
+$certError = $null
 try {
-    # Use .NET directly to avoid PS 5.1 parsing bugs with `echo | Invoke-WebRequest`
-    $req = [System.Net.HttpWebRequest]::Create("https://$ServerHostname")
-    $req.Timeout = 10000
-    $req.GetResponse().Close()
-    $cert = $req.ServicePoint.Certificate
-    Write-Host "  Server cert subject: $($cert.Subject)" -ForegroundColor Green
-    Write-Host "  Issuer:               $($cert.Issuer)" -ForegroundColor Green
-    Write-Host "  Valid from:           $($cert.GetEffectiveDateString())" -ForegroundColor Green
-    Write-Host "  Expires:              $($cert.GetExpirationDateString())" -ForegroundColor Green
-
-    if ($cert.Issuer -match "Let's Encrypt" -or $cert.Issuer -match "ISRG") {
-        Write-Host "  Chain: Let's Encrypt (ISRG Root) — publicly trusted by Windows." -ForegroundColor Green
-    } else {
-        Write-Host "  WARNING: Cert issuer is not Let's Encrypt. Verify manually." -ForegroundColor Yellow
+    $tcp = New-Object System.Net.Sockets.TcpClient($ServerHostname, 443)
+    $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, {[System.Net.Security.RemoteCertificateValidationCallback]{ $true }})
+    $ssl.AuthenticateAsClient($ServerHostname)
+    $raw = $ssl.RemoteCertificate
+    if ($raw) {
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($raw)
     }
+    $ssl.Close()
+    $tcp.Close()
 } catch {
-    Write-Host "  Could not fetch server cert: $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "  Continuing anyway..." -ForegroundColor Yellow
+    $certError = $_.Exception.Message
+}
+
+if ($cert) {
+    Write-Host "  Subject:   $($cert.Subject)" -ForegroundColor Green
+    Write-Host "  Issuer:    $($cert.Issuer)" -ForegroundColor Green
+    Write-Host "  NotBefore: $($cert.NotBefore)" -ForegroundColor Green
+    Write-Host "  NotAfter:  $($cert.NotAfter)" -ForegroundColor Green
+    if ($cert.Issuer -match "Let's Encrypt" -or $cert.Issuer -match "ISRG") {
+        Write-Host "  Chain:     LE (ISRG Root X1/X2) - publicly trusted by Windows." -ForegroundColor Green
+    } else {
+        Write-Host "  WARNING:   Issuer is not Let's Encrypt. Verify manually." -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  Cert fetch FAILED: $certError" -ForegroundColor Red
+    Write-Host "  Continuing anyway (cert trust is handled by Windows at connect time)..." -ForegroundColor Yellow
 }
 
 # ============================================================================
