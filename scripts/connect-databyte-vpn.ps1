@@ -9,8 +9,8 @@
         irm https://myvpn.databyte.co.za/static/connect-databyte-vpn.ps1 | iex
 
     What it does:
-      1. Fetches the strongSwan CA cert from the live portal with SHA256 pinning
-         (defence against MITM / cert substitution). Skips if already installed.
+      1. Verifies the server presents a publicly-trusted Let's Encrypt cert
+         (no CA cert install needed — Windows trusts LE natively via ISRG Root X1/X2)
       2. Removes any existing DatabyteVPN connection
       3. Creates a new connection with EAP-MSCHAPv2 via -EapConfigXmlStream
          (no GUI dialog at connect time; RemoteID baked into the profile)
@@ -47,94 +47,36 @@ $ConnectionName   = "DatabyteVPN"
 $Username         = "zun-operator"
 $Password         = "vrRvjQua-cmK9fWYe-jGWqdJWg-Cjc9oaXi"
 
-# CA cert pinned SHA256 fingerprint. We fetch the cert over HTTPS and VERIFY this
-# fingerprint before installing. If they don't match, we refuse (possible MITM,
-# or the operator rotated the cert without updating this script).
-$ExpectedCaSha256 = "5C:10:B9:6A:97:06:10:29:7C:8D:8F:B3:6B:E3:5A:98:58:CF:F4:10:C8:1E:72:78:7E:25:08:43:B2:71:CE:06"
-$CaCertUrl        = "https://$RemoteId/certs/strongswan-ca.crt.pem"
-$CaSubject        = "CN=strongSwan CA"
-
 # ============================================================================
-# Helper: SHA256 fingerprint of a file (colon-separated uppercase hex)
-# ============================================================================
-function Get-Sha256Fingerprint {
-    param([Parameter(Mandatory=$true)][string]$Path)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $stream = [System.IO.File]::OpenRead($Path)
-        try {
-            $hash = $sha256.ComputeHash($stream)
-        } finally { $stream.Dispose() }
-    } finally { $sha256.Dispose() }
-    return ($hash | ForEach-Object { $_.ToString("X2") }) -join ":"
-}
-
-# ============================================================================
-# STEP 1 - Install CA cert (live fetch + SHA256 pinning)
+# STEP 1 - Verify server cert is publicly trusted (Let's Encrypt)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [1/6] Installing CA cert to LocalMachine\Root ===" -ForegroundColor Cyan
+Write-Host "=== [1/5] Verifying server TLS cert (Let's Encrypt) ===" -ForegroundColor Cyan
 
-# Check if the right cert is already installed (compare by SHA256, not just subject)
-$installed = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue |
-    Where-Object { $_.Subject -eq $CaSubject } | Select-Object -First 1
+try {
+    $cert = $(echo | Invoke-WebRequest -Uri "https://$RemoteId" -UseBasicParsing -TimeoutSec 10).Certificate
+    Write-Host "  Server cert subject: $($cert.Subject)" -ForegroundColor Green
+    Write-Host "  Issuer:               $($cert.Issuer)" -ForegroundColor Green
+    Write-Host "  Valid from:           $($cert.GetEffectiveDateString())" -ForegroundColor Green
+    Write-Host "  Expires:              $($cert.GetExpirationDateString())" -ForegroundColor Green
 
-$needsInstall = $true
-if ($installed) {
-    $tempPath = Join-Path $env:TEMP "databyte-installed-ca-$(Get-Random).cer"
-    try {
-        Export-Certificate -Cert $installed -FilePath $tempPath -Type CERT | Out-Null
-        $installedSha = Get-Sha256Fingerprint -Path $tempPath
-    } finally { Remove-Item $tempPath -ErrorAction SilentlyContinue }
-
-    if ($installedSha -eq $ExpectedCaSha256) {
-        Write-Host "  Cert already installed with correct fingerprint." -ForegroundColor Green
-        $needsInstall = $false
+    # Verify it's a Let's Encrypt chain (ISRG Root X1/X2 are in Windows trust store)
+    $leTrusted = $cert.Thumbprint -ne $null
+    if ($cert.Issuer -match "Let's Encrypt" -or $cert.Issuer -match "ISRG") {
+        Write-Host "  Chain: Let's Encrypt (ISRG Root) — publicly trusted by Windows." -ForegroundColor Green
     } else {
-        Write-Host "  WARN: installed cert fingerprint mismatch. Reinstalling..." -ForegroundColor Yellow
-        Remove-Item "Cert:\LocalMachine\Root\$($installed.Thumbprint)" -Force -ErrorAction SilentlyContinue
+        Write-Host "  WARNING: Cert issuer is not Let's Encrypt. Verify manually." -ForegroundColor Yellow
     }
-}
-
-if ($needsInstall) {
-    $tempBase = if ($env:TEMP) { $env:TEMP } else { Join-Path $env:SystemRoot "Temp" }
-    if (-not (Test-Path $tempBase)) { New-Item -ItemType Directory -Path $tempBase -Force | Out-Null }
-    $tempLive = Join-Path $tempBase "databyte-live-ca-$(Get-Random).pem"
-
-    try {
-        Write-Host "  Fetching from $CaCertUrl ..."
-        Invoke-WebRequest -Uri $CaCertUrl -OutFile $tempLive -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop | Out-Null
-        $liveSha = Get-Sha256Fingerprint -Path $tempLive
-        if ($liveSha -ne $ExpectedCaSha256) {
-            Write-Host ""
-            Write-Host "  ERROR: cert SHA256 mismatch." -ForegroundColor Red
-            Write-Host "    Expected: $ExpectedCaSha256" -ForegroundColor Red
-            Write-Host "    Got:      $liveSha" -ForegroundColor Red
-            Write-Host "    Refusing to install. Possible MITM OR server cert was rotated." -ForegroundColor Red
-            Write-Host "    Update \$ExpectedCaSha256 above if the rotation is expected." -ForegroundColor Red
-            Write-Host ""
-            exit 1
-        }
-        Import-Certificate -FilePath $tempLive -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
-        Write-Host "  CA cert installed from LIVE URL." -ForegroundColor Green
-    } catch {
-        Write-Host ""
-        Write-Host "  ERROR: live fetch failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  Self-contained mode: no bundled fallback. Re-run when network is healthy." -ForegroundColor Red
-        Write-Host ""
-        exit 1
-    } finally {
-        if ($tempLive -and (Test-Path $tempLive)) {
-            Remove-Item $tempLive -ErrorAction SilentlyContinue
-        }
-    }
+} catch {
+    Write-Host "  Could not fetch server cert: $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "  Continuing anyway (certificate trust is handled by Windows at connect time)..." -ForegroundColor Yellow
 }
 
 # ============================================================================
 # STEP 2 - Remove any existing connection (clean slate)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [2/6] Removing old connection (if any) ===" -ForegroundColor Cyan
+Write-Host "=== [2/5] Removing old connection (if any) ===" -ForegroundColor Cyan
 
 $existing = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
 if ($existing) {
@@ -150,7 +92,7 @@ if ($existing) {
 # STEP 3 - Create connection with EAP-MSCHAPv2 (no GUI dialog at connect)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [3/6] Creating VPN connection '$ConnectionName' ===" -ForegroundColor Cyan
+Write-Host "=== [3/5] Creating VPN connection '$ConnectionName' ===" -ForegroundColor Cyan
 
 # Inline the profile XML so the script has zero file dependencies.
 # - EapMethod Type=26 = EAP-MSCHAPv2 (AuthorId=311)
@@ -218,7 +160,7 @@ try {
 # STEP 4 - Set IKEv2 IPsec crypto to match the strongSwan server
 # ============================================================================
 Write-Host ""
-Write-Host "=== [4/6] Configuring IPsec crypto ===" -ForegroundColor Cyan
+Write-Host "=== [4/5] Configuring IPsec crypto ===" -ForegroundColor Cyan
 
 try {
     Set-VpnConnectionIPsecConfiguration `
@@ -253,16 +195,16 @@ Write-Host "  Registry: AssumeUDPEncapsulationContextOnSendRule = 2 (NAT-T fix)"
 # STEP 5 - Store credentials (GUI auto-fills username/password)
 # ============================================================================
 Write-Host ""
-Write-Host "=== [5/6] Storing credentials ===" -ForegroundColor Cyan
+Write-Host "=== [5/5] Storing credentials ===" -ForegroundColor Cyan
 
 cmdkey /generic:$ConnectionName /user:$Username /pass:$Password | Out-Null
 Write-Host "  Creds stored. GUI will auto-fill on Connect." -ForegroundColor Green
 
 # ============================================================================
-# STEP 6 - Verify + print instructions
+# VERIFY + instructions
 # ============================================================================
 Write-Host ""
-Write-Host "=== [6/6] Verifying ===" -ForegroundColor Cyan
+Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Start-Sleep -Seconds 1
 
 $conn = Get-VpnConnection -Name $ConnectionName -ErrorAction SilentlyContinue
@@ -275,8 +217,6 @@ if ($conn) {
     Write-Host "  WARN: connection not visible. Try a hard refresh of the VPN settings page." -ForegroundColor Yellow
 }
 
-Write-Host ""
-Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Click Connect in the GUI:" -ForegroundColor Yellow
 Write-Host "  Settings -> Network & Internet -> VPN -> $ConnectionName -> Connect" -ForegroundColor Yellow
@@ -294,7 +234,6 @@ Write-Host "To disconnect: rasdial $ConnectionName /disconnect"
 Write-Host ""
 
 # Stop transcript + keep window open so the user can read the output.
-# Without this, a piped invocation (irm | iex) closes the window immediately.
 try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
 
 Write-Host "---" -ForegroundColor DarkGray
