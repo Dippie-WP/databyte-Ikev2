@@ -717,6 +717,13 @@
           ),
         ),
         el('div', { cls: 'vp-page-head-r' },
+          // v1.6.6 — Refresh button moved to top next to +New client.
+          // Was at the bottom of the table; Zun asked 2026-06-25 to put it
+          // on top so it's visible without scrolling past the full list.
+          el('button', {
+            cls: 'vp-btn vp-btn-ghost',
+            onclick: () => { loadCustomers().then(render).catch(()=>{}); },
+          }, loading ? spinnerRow('Refreshing…') : '↻ Refresh'),
           el('button', {
             cls: 'vp-btn vp-btn-primary',
             onclick: () => openNewClientModal(),
@@ -873,12 +880,6 @@
                 )
               ),
             ),
-          ),
-          el('div', { cls: 'vp-btn-row' },
-            el('button', {
-              cls: 'vp-btn vp-btn-ghost',
-              onclick: () => { loadCustomers().then(render).catch(()=>{}); },
-            }, loading ? spinnerRow('Refreshing…') : '↻ Refresh'),
           ),
         ),
         // Right: detail
