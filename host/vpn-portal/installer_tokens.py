@@ -17,7 +17,7 @@ modal alone because the customer would need to copy/paste into the script.
 The pattern: a one-time installer token, valid for 7 days.
 
   Operator portal: "Generate installer link" button → returns URL with token
-  Customer runs:   iex (irm https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1'?slug=acme&token=xyz')
+  Customer runs:   iex (irm https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1'?t=BASE64')
   Script fetches:  GET /api/installer/{token} → {username, password, server}
   Script binds:    RasSetCredentials(username, password)
   Server burns:    DELETE row from installer_tokens (single-use)
@@ -161,10 +161,19 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
             f"{now}, {expires}, {_q(op_name)});"
         )
 
-        # Build the PowerShell one-liner the operator sends to customer
+        # Build the PowerShell one-liner the operator sends to customer.
+        # v2.5.1 (2026-06-25) — Bugfix: PowerShell 5.1 (default on Windows 10)
+        # parses `&` as a background-job operator even inside single quotes.
+        # Result: customer pasting the one-liner into PowerShell Admin gets
+        #   ParserError: AmpersandNotAllowed
+        # Fix: pack slug + token into a single query param as base64.
+        # The script decodes it back to slug:token on first run.
+        # No `&` in the URL → works in PS 5.1, PS 7, cmd, bash.
+        import base64
+        packed = base64.urlsafe_b64encode(f"{cust['name']}:{token}".encode()).decode().rstrip("=")
         installer_url = (
             f"https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1"
-            f"?slug={cust['name']}&token={token}"
+            f"?t={packed}"
         )
         ps_cmd = f"iex (irm '{installer_url}')"
 
