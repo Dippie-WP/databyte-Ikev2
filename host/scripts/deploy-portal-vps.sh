@@ -73,10 +73,12 @@ echo "=== STEP 2: capture source SHAs ==="
 SOURCE_HEAD="$(git rev-parse HEAD)"
 SOURCE_PY_SHA="$(sha256sum "${SOURCE_DIR}/app.py" | awk '{print $1}')"
 SOURCE_JS_SHA="$(sha256sum "${SOURCE_DIR}/www/static/app.js" | awk '{print $1}')"
+SOURCE_CSS_SHA="$(sha256sum "${SOURCE_DIR}/www/static/app.css" | awk '{print $1}')"
 SOURCE_HTML_SHA="$(sha256sum "${SOURCE_DIR}/www/index.html" | awk '{print $1}')"
 echo "  HEAD:        ${SOURCE_HEAD}"
 echo "  app.py:      ${SOURCE_PY_SHA}"
 echo "  app.js:      ${SOURCE_JS_SHA}"
+echo "  app.css:     ${SOURCE_CSS_SHA}"
 echo "  index.html:  ${SOURCE_HTML_SHA}"
 
 echo ""
@@ -97,8 +99,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
         ! -name '*.bak*' \
         ! -name '.last_deployed' | wc -l)"
     echo "  source files to sync: ${SOURCE_FILE_COUNT}"
-    # Sample diff for the 3 key files
-    for f in app.py www/static/app.js www/index.html; do
+    # Sample diff for the 4 key files
+    for f in app.py www/static/app.js www/static/app.css www/index.html; do
         src_sha="$(sha256sum "${SOURCE_DIR}/${f}" | awk '{print $1}')"
         dep_sha="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/${f}" 2>/dev/null | awk '{print $1}')"
         if [[ "$src_sha" == "$dep_sha" ]]; then
@@ -174,9 +176,11 @@ echo "=== STEP 6: verify deployed SHAs match source ==="
 MISMATCH=0
 DEPLOYED_PY_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/app.py" | awk '{print $1}')"
 DEPLOYED_JS_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/static/app.js" | awk '{print $1}')"
+DEPLOYED_CSS_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/static/app.css" | awk '{print $1}')"
 DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
 echo "  deployed app.py:      ${DEPLOYED_PY_SHA}"
 echo "  deployed app.js:      ${DEPLOYED_JS_SHA}"
+echo "  deployed app.css:     ${DEPLOYED_CSS_SHA}"
 echo "  deployed index.html:  ${DEPLOYED_HTML_SHA}"
 
 if [[ "$DEPLOYED_PY_SHA" != "$SOURCE_PY_SHA" ]]; then
@@ -189,14 +193,19 @@ if [[ "$DEPLOYED_JS_SHA" != "$SOURCE_JS_SHA" ]]; then
     if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
     MISMATCH=1
 fi
+if [[ "$DEPLOYED_CSS_SHA" != "$SOURCE_CSS_SHA" ]]; then
+    echo "FAIL: deployed app.css SHA != source app.css SHA"
+    if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
+    MISMATCH=1
+fi
 # Note: index.html SHA is checked loosely — STEP 7 will bump ?v= on the
 # deployed copy, which makes its SHA diverge from source by design. The
-# important check is that app.py + app.js match (the actual feature code).
+# important check is that app.py + app.js + app.css match (the actual feature code).
 if [[ "$DEPLOYED_HTML_SHA" != "$SOURCE_HTML_SHA" ]]; then
     echo "  ⚠ deployed index.html SHA != source (OK if STEP 7 cache-bust hasn't run yet)"
 fi
 if [[ $MISMATCH -eq 0 ]]; then
-    echo "  app.py + app.js SHAs match ✓"
+    echo "  app.py + app.js + app.css SHAs match ✓"
 fi
 
 echo ""
@@ -217,20 +226,27 @@ DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.ht
 
 echo ""
 echo "=== STEP 8: verify feature marker in LIVE resources (post cache-bust) ==="
-# Note: the portal shell is a SPA — the actual feature lives in app.js.
-# Fetch the live HTML, extract the new ?v= app.js URL, then check that.
+# Note: the portal shell is a SPA — the actual feature lives in app.js OR app.css.
+# Fetch the live HTML, extract the new ?v= app.js + app.css URLs, then check all three.
 INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
 # Extract the versioned app.js URL from live HTML (post cache-bust should be ?v=$NEW_CACHE_VERSION)
 JS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.js\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
 JS_URL="${PUBLIC_HTML_URL}${JS_URL_VERSIONED:-static/app.js}"
 JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${JS_URL}' --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+# Also check app.css (CSS-only fixes won't show up in JS grep)
+CSS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.css\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
+CSS_URL="${PUBLIC_HTML_URL}${CSS_URL_VERSIONED:-static/app.css}"
+CSS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${CSS_URL}' --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
 INDEX_MATCH="$(echo "${INDEX_RAW}" | head -1 | tr -dc '0-9')"
 JS_MATCH="$(echo "${JS_RAW}" | head -1 | tr -dc '0-9')"
+CSS_MATCH="$(echo "${CSS_RAW}" | head -1 | tr -dc '0-9')"
 [[ -z "${INDEX_MATCH}" ]] && INDEX_MATCH=0
 [[ -z "${JS_MATCH}" ]] && JS_MATCH=0
-FEATURE_MATCH=$(( INDEX_MATCH + JS_MATCH ))
+[[ -z "${CSS_MATCH}" ]] && CSS_MATCH=0
+FEATURE_MATCH=$(( INDEX_MATCH + JS_MATCH + CSS_MATCH ))
 echo "  '${FEATURE_MARKER}' matches in index.html: ${INDEX_MATCH}"
 echo "  '${FEATURE_MARKER}' matches in app.js:     ${JS_MATCH}  (URL: ${JS_URL})"
+echo "  '${FEATURE_MARKER}' matches in app.css:    ${CSS_MATCH}  (URL: ${CSS_URL})"
 echo "  total:                                    ${FEATURE_MATCH}"
 if [[ "${FEATURE_MATCH}" -lt 1 ]]; then
     echo "FAIL: feature marker not found in live resources"
@@ -262,11 +278,13 @@ cache_bust_version=${NEW_CACHE_VERSION:-none}
 source_sha256:
   app.py=${SOURCE_PY_SHA}
   app.js=${SOURCE_JS_SHA}
+  app.css=${SOURCE_CSS_SHA}
   index.html=${SOURCE_HTML_SHA}
 
 deployed_sha256:
   app.py=${DEPLOYED_PY_SHA}
   app.js=${DEPLOYED_JS_SHA}
+  app.css=${DEPLOYED_CSS_SHA}
   index.html=${DEPLOYED_HTML_SHA}
 
 health_url=${SMOKE_URL}
