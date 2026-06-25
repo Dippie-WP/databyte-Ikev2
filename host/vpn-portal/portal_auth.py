@@ -49,10 +49,19 @@ PORTAL_COOKIE = "portal_session"
 # reason (separation of concerns, defense in depth).
 OPERATOR_COOKIE = "session"
 
-# 30-day sliding expiry. After 30 days of inactivity, the customer must log in again.
-PORTAL_TTL = 30 * 24 * 3600
+# 1h sliding expiry for the customer portal.
+#
+# Threat model: customer portal session grants ability to:
+#   - view usage / data burned
+#   - download mobileconfig / Windows installer with embedded EAP creds
+#   - reset EAP password (v1.3.x feature)
+# Stolen phone + stolen cookie = full account takeover until expiry.
+# 1h sliding window limits blast radius to a single coffee-shop session.
+# Was 30 days until 2026-06-24 fix (Bug #1: portal idle expiry 30d).
+PORTAL_TTL = 3600
 
 # Operator session TTL — 8h sliding. After 8h inactivity, operator must re-auth.
+# Longer because operators need to manage customers throughout a workday.
 OPERATOR_TTL = 8 * 3600
 
 # Login rate limit (per IP per minute). Same as operator login.

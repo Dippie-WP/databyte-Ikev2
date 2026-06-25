@@ -133,6 +133,69 @@ class TestCustomerPortalSession:
         assert sess["customer_id"] == 1
         assert sess["identity"] == "customer-laptop"
 
+    def test_portal_ttl_is_short_enough_for_stolen_cookie_threat_model(self):
+        """Bug #1 (regression): customer portal TTL was 30 days. Stolen phone
+        + stolen cookie = 30 days full account access (incl. EAP password reset
+        since v1.3.x). Threat model requires ≤ 1h sliding window."""
+        assert portal_auth.PORTAL_TTL <= 3600, (
+            f"PORTAL_TTL too long: {portal_auth.PORTAL_TTL}s "
+            f"(={portal_auth.PORTAL_TTL // 3600}h). "
+            f"Stolen-cookie blast radius must be ≤ 1 hour."
+        )
+
+    def test_portal_ttl_independent_from_operator_ttl(self):
+        """Bug #1 (regression): operator config (30d) was reused for portal.
+        They MUST be independent constants so future operator-TTL changes
+        don't silently re-leak to customer portal."""
+        assert hasattr(portal_auth, "PORTAL_TTL"), "PORTAL_TTL constant missing"
+        assert hasattr(portal_auth, "OPERATOR_TTL"), "OPERATOR_TTL constant missing"
+        assert portal_auth.PORTAL_TTL != portal_auth.OPERATOR_TTL, (
+            "PORTAL_TTL and OPERATOR_TTL must differ (Bug #1 regression). "
+            f"Both are {portal_auth.PORTAL_TTL}s."
+        )
+
+    def test_new_session_expires_within_portal_ttl(self):
+        """Sliding window: a freshly-created session expires at now + PORTAL_TTL."""
+        import sqlite3
+        now = int(time.time())
+        sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
+        conn = sqlite3.connect(str(portal_auth.DB_PATH))
+        # conftest sets DB_PATH to the tmp DB
+        row = conn.execute(
+            "SELECT expires_at FROM customer_portal_sessions WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        expires_at = row[0]
+        delta = expires_at - now
+        # Allow 5s slack for the between-call clock skew
+        assert abs(delta - portal_auth.PORTAL_TTL) <= 5, (
+            f"Session expires_at differs from now+PORTAL_TTL by {delta - portal_auth.PORTAL_TTL}s"
+        )
+
+    def test_sliding_window_refreshes_expiry(self):
+        """Sliding: verify_session(..., slide=True) extends expires_at to now+PORTAL_TTL."""
+        import sqlite3
+        from unittest.mock import patch
+        sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
+        # Sleep just enough to make expiry noticeably different
+        time.sleep(1.1)
+        portal_auth.verify_session(sid, slide=True)
+        now = int(time.time())
+        conn = sqlite3.connect(str(portal_auth.DB_PATH))
+        row = conn.execute(
+            "SELECT expires_at FROM customer_portal_sessions WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        conn.close()
+        new_delta = row[0] - now
+        # After slide, delta should be ~ PORTAL_TTL again, not PORTAL_TTL - 1.1
+        assert new_delta >= portal_auth.PORTAL_TTL - 2, (
+            f"Sliding window failed: expires_at is only {new_delta}s from now "
+            f"(expected ~{portal_auth.PORTAL_TTL}s)"
+        )
+
     def test_delete_session(self):
         sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
         portal_auth.delete_session(sid)
