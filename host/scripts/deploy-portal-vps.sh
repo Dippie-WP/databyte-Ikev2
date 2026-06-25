@@ -228,15 +228,15 @@ echo ""
 echo "=== STEP 8: verify feature marker in LIVE resources (post cache-bust) ==="
 # Note: the portal shell is a SPA — the actual feature lives in app.js OR app.css.
 # Fetch the live HTML, extract the new ?v= app.js + app.css URLs, then check all three.
-INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
 # Extract the versioned app.js URL from live HTML (post cache-bust should be ?v=$NEW_CACHE_VERSION)
 JS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.js\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
-JS_URL="${PUBLIC_HTML_URL}${JS_URL_VERSIONED:-static/app.js}"
-JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${JS_URL}' --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+JS_URL="${PUBLIC_HTML_URL%/}${JS_URL_VERSIONED:-/static/app.js}"
+JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${JS_URL}' --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
 # Also check app.css (CSS-only fixes won't show up in JS grep)
 CSS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.css\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
-CSS_URL="${PUBLIC_HTML_URL}${CSS_URL_VERSIONED:-static/app.css}"
-CSS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${CSS_URL}' --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+CSS_URL="${PUBLIC_HTML_URL%/}${CSS_URL_VERSIONED:-/static/app.css}"
+CSS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${CSS_URL}' --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
 INDEX_MATCH="$(echo "${INDEX_RAW}" | head -1 | tr -dc '0-9')"
 JS_MATCH="$(echo "${JS_RAW}" | head -1 | tr -dc '0-9')"
 CSS_MATCH="$(echo "${CSS_RAW}" | head -1 | tr -dc '0-9')"
