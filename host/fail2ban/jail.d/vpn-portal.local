@@ -23,8 +23,10 @@ findtime = 600
 maxretry = 5
 # 24h ban
 bantime  = 86400
-# Whitelist: localhost, OC homelab outbound (Cloudflare tunnel exit IPs may vary)
-ignoreip = 127.0.0.1/8 ::1 102.182.117.43
+# Whitelist: localhost, OC homelab outbound, VPS public IP, LAN.
+# Cloudflare tunnel exit IPs vary; not whitelisted here
+# (add at deployment time if needed).
+ignoreip = 127.0.0.1/8 ::1 154.65.110.44 192.168.10.0/24
 
 # Apply nftables/iptables ban
 action   = iptables-multiport[name=vpn-portal, port="80,443", protocol=tcp]
