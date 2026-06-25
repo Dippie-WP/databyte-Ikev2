@@ -946,6 +946,12 @@
       el('dl', { cls: 'vp-kv' },
         el('dt', {}, 'Status'),  el('dd', {}, c.status + (c.is_active ? ' · active' : ' · INACTIVE')),
         el('dt', {}, 'Operator'), el('dd', {}, c.is_operator ? 'yes (bypass quota)' : 'no'),
+        // v1.6.4 — show allocated bandwidth. Was being applied by tc but invisible
+        // to operators in the detail view. Zun noticed 2026-06-25 while watching
+        // zade's session and asked "i dont see the allocated speed for this user".
+        el('dt', {}, 'Bandwidth'), el('dd', { cls: 'vp-mono' },
+          (c.bandwidth_down_mbps || 0) + ' Mbit/s down · ' +
+          (c.bandwidth_up_mbps || 0) + ' Mbit/s up'),
         el('dt', {}, 'Telegram'), el('dd', {}, c.telegram_username || '—'),
         el('dt', {}, 'Billing ID'), el('dd', {}, c.billing_id ? [el('span', { cls: 'vp-mono' }, c.billing_id)] : '—'),
         el('dt', {}, 'Email'),     el('dd', {}, c.email ? [el('span', { cls: 'vp-mono' }, c.email)] : '—'),
