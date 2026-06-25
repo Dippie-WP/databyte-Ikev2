@@ -196,7 +196,7 @@ for c, h in enumerate(hdr):
 bugs = [
     ("2026-06-24 21:06", "Customer portal idle expiry 30 days",
      "operator + customer portals share same session config. 30d is operator-grade; stolen phone = 30d access to customer portal.",
-     "Split config: customer ≤24h idle / ≤7d absolute. 30 min.", "🟠 High", "✅ FIXED 2026-06-25 — PORTAL_TTL 30d→1h + 4 regression tests", "TODO #1"),
+     "Split config: customer ≤24h idle / ≤7d absolute. 30 min.", "🟠 High", "✅ FIXED 2026-06-25 — commit 33fb7d0: PORTAL_TTL 30d→1h + CUSTOMER_MAX_SESSION_AGE 7d + 4 regression tests (122→126 passing). Verify_session now rejects + deletes sessions where (now-created_at) > 7d. Computed from created_at so no DB migration.", "TODO #1"),
     ("2026-06-24 21:06", "Silent name matching users↔customers (BUG AS WRITTEN; real defect was the missing FK constraint)",
      "Description was inaccurate — the device_name→user.name match was already fixed in commit 49895dc (lookup now JOINs on devices.strongswan_user_id, the proper FK). What actually remained: customers had no direct FK to users; relationship was only implicit via devices.",
      "Add customers.user_id INTEGER REFERENCES users(id) column + idempotent migration + populate on create + use in rotate_eap/installer_tokens. 6 L1 regression tests. 6th integrity check added.",
