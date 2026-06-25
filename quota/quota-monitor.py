@@ -50,7 +50,13 @@ CONF_BACKUP_DIR = Path("/home/zunaid/strongswan/swanctl/conf.d/.backups")
 VIP_PREFIX = "10.99.0."
 
 # Poll interval (seconds)
-POLL_INTERVAL = 60
+# Changed 2026-06-25 from 60s → 10s per Zun's directive (msg #22356).
+# At 60s with 40Mbps cap and 5-10 Mbps real LTE throughput, customers
+# were burning ~35-70 MB/min — zade hit 100% mid-poll and overran by
+# ~34 MB before the next poll detected it. 10s reduces max overrun to
+# ~6-12 MB while keeping CPU reasonable (10s × 40 customers × ~5ms/poll
+# = 20ms/s = 2% CPU). See HEARTBEAT 2026-06-25 19:47 UTC.
+POLL_INTERVAL = 10
 
 # Alert thresholds (percent)
 WARN_PCT = 80
