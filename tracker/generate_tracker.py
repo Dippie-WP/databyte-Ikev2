@@ -118,6 +118,10 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-25 19:08", "Portal v1.6.5 — fix 'None' string in /api/customers list + edit modal defense",
+     "db_query() uses sqlite3 -json CLI which serializes SQL NULL as quoted string 'None' instead of real null. Edit modal pre-filled 'None' text, save sent 'email':'None' to backend, email regex 400'd silently. Fix: db_query post-processes rows converting 'None' string → None; modal body construction strips 'None'/'null' as defense in depth; 4 regression tests (3 of 4 fail without fix).",
+     "host/vpn-portal/app.py (db_query), host/vpn-portal/www/static/app.js (modal defense), tests/test_db_query_null_handling.py (4 new tests)",
+     "🟠 High", "Deployed. API verified: telegram_username=null (was 'None' string). PATCH zade 40/40 succeeded. 124 tests passing (was 120). Fix verified by reverting and confirming 3/4 tests fail.", "✅"),
     ("2026-06-25 18:55", "Portal v1.6.4 — show allocated bandwidth in customer detail modal",
      "Customer detail modal showed Status/Operator/Telegram/Billing/Email/Created/Updated/Notes but not bandwidth. API returned bandwidth_down_mbps + bandwidth_up_mbps but UI never rendered them. Zun noticed while watching zade's session.",
      "host/vpn-portal/www/static/app.js (commit 4838997) — 1 row in metadata dl: '40 Mbit/s down · 20 Mbit/s up'",
