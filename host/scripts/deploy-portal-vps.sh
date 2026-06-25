@@ -218,21 +218,23 @@ DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.ht
 echo ""
 echo "=== STEP 8: verify feature marker in LIVE resources (post cache-bust) ==="
 # Note: the portal shell is a SPA — the actual feature lives in app.js.
-# Check BOTH the index.html and the app.js on the live URL.
+# Fetch the live HTML, extract the new ?v= app.js URL, then check that.
 INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
-JS_URL="${PUBLIC_HTML_URL}static/app.js"
-JS_RAW="$(ssh "${VPS_HOST}" "curl -sk ${JS_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+# Extract the versioned app.js URL from live HTML (post cache-bust should be ?v=$NEW_CACHE_VERSION)
+JS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.js\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
+JS_URL="${PUBLIC_HTML_URL}${JS_URL_VERSIONED:-static/app.js}"
+JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${JS_URL}' --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
 INDEX_MATCH="$(echo "${INDEX_RAW}" | head -1 | tr -dc '0-9')"
 JS_MATCH="$(echo "${JS_RAW}" | head -1 | tr -dc '0-9')"
 [[ -z "${INDEX_MATCH}" ]] && INDEX_MATCH=0
 [[ -z "${JS_MATCH}" ]] && JS_MATCH=0
 FEATURE_MATCH=$(( INDEX_MATCH + JS_MATCH ))
 echo "  '${FEATURE_MARKER}' matches in index.html: ${INDEX_MATCH}"
-echo "  '${FEATURE_MARKER}' matches in app.js:     ${JS_MATCH}"
+echo "  '${FEATURE_MARKER}' matches in app.js:     ${JS_MATCH}  (URL: ${JS_URL})"
 echo "  total:                                    ${FEATURE_MATCH}"
 if [[ "${FEATURE_MATCH}" -lt 1 ]]; then
     echo "FAIL: feature marker not found in live resources"
-    echo "Either: (a) feature not deployed, (b) marker string wrong, (c) cache"
+    echo "Either: (a) feature not deployed, (b) marker string wrong, (c) cache not busted"
     echo "Try: curl -sk '${JS_URL}' | grep '${FEATURE_MARKER}'"
     if [[ $DRY_RUN -eq 0 ]]; then exit 6; fi
 else
