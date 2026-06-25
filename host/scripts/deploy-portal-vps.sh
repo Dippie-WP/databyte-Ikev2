@@ -69,6 +69,26 @@ fi
 echo "  git tree clean ✓"
 
 echo ""
+echo "=== STEP 1.5: JS syntax check (added 2026-06-25) ==="
+# Catches parse errors that L1 pytest misses (UI not rendered in tests).
+# Bug that motivated this: const onlineLeases placed inside return el(...)
+# arg list in commit 1cc2855 — shipped SyntaxError, portal broken 2.5h.
+JS_FILES=(
+    "${SOURCE_DIR}/static/app.js"
+    "${SOURCE_DIR}/static/portal.js"
+)
+for js in "${JS_FILES[@]}"; do
+    if [[ -f "$js" ]]; then
+        if ! node --check "$js" 2>/dev/null; then
+            echo "FAIL: JS syntax error in $js"
+            node --check "$js"
+            exit 3
+        fi
+        echo "  $(basename "$js") syntax OK ✓"
+    fi
+done
+
+echo ""
 echo "=== STEP 2: capture source SHAs ==="
 SOURCE_HEAD="$(git rev-parse HEAD)"
 SOURCE_PY_SHA="$(sha256sum "${SOURCE_DIR}/app.py" | awk '{print $1}')"
