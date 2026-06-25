@@ -13,7 +13,7 @@
     Credential API: rasapi32!RasSetCredentials (canonical Microsoft API)
 
     What it does (8 steps):
-      0. (If ?slug=X&token=Y) Fetch customer creds from portal
+      0. (If -t BASE64PACKED) Fetch customer creds from portal
       1. Verify server cert is publicly trusted (LE)
       2. Remove all stale Databyte-related VPN connections + cmdkey entries
       3. Create IKEv2 + EAP-MSCHAPv2 profile
