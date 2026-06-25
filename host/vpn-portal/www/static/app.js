@@ -386,6 +386,24 @@
     if (_activeSessTimer) { clearInterval(_activeSessTimer); _activeSessTimer = null; }
   }
 
+  // v1.6.3 — Dashboard auto-refresh (30s) so live data (Total data, Over quota
+  // counts, Pools active leases) actually moves while operator is on the page.
+  // Bug: dashboard loaded once on tab-open and never polled again, leaving
+  // operators looking at a frozen view even when customers were actively
+  // burning bandwidth. Hidden for weeks behind a JS SyntaxError that broke
+  // the portal entirely — caught 2026-06-25 by Zun after the SyntaxError fix.
+  let _dashboardTimer = null;
+  function startDashboardAutoRefresh() {
+    stopDashboardAutoRefresh();
+    _dashboardTimer = setInterval(() => {
+      if (S.page !== 'dashboard') return;
+      loadDashboard().then(render).catch(() => {});
+    }, 30000);
+  }
+  function stopDashboardAutoRefresh() {
+    if (_dashboardTimer) { clearInterval(_dashboardTimer); _dashboardTimer = null; }
+  }
+
   async function switchPage(p) {
     if (!LOADERS[p]) return;
     if (S.loading[p]) return;  // already in flight
@@ -393,6 +411,9 @@
     if (S.page === 'sessions' && p !== 'sessions') stopSessionsAutoRefresh();
     // Stop customer-detail auto-refresh if leaving customers
     if (S.page === 'customers' && p !== 'customers') stopCustDetailAutoRefresh();
+    // v1.6.3 — start/stop dashboard poll when entering/leaving dashboard tab
+    if (p === 'dashboard' && S.page !== 'dashboard') startDashboardAutoRefresh();
+    else if (p !== 'dashboard' && S.page === 'dashboard') stopDashboardAutoRefresh();
     // v1.2.14 — start/stop active-sessions poll when entering/leaving customers
     if (p === 'customers' && S.page !== 'customers') startActiveSessAutoRefresh();
     else if (p !== 'customers' && S.page === 'customers') stopActiveSessAutoRefresh();
