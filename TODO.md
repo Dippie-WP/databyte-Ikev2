@@ -46,7 +46,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - [ ] **CP7 security hardening** (6 items: fail2ban portal jail, AIDE, backups, cert expiry monitor, INPUT rule tightening, iptables-nft consolidation) — 3-4h total
 - [ ] **ipBan service to VPS** (currently INACTIVE on VPS, only active on LXC 903) — 30m
 - [ ] **Customer portal idle expiry split** (operator 30d OK, customer must be ≤24h idle / ≤7d absolute) — 30m. Surfaced 2026-06-24 by friend-overseas Android test
-- [ ] **Explicit `user_id` FK on `customers` table** — currently portal maps `users.name` (EAP) ↔ `customers.name` (portal) by silent name fuzzy-match (e.g. strip `-laptop`). Brittle. Add FK column + migration. — 1-2h. Surfaced 2026-06-24
+- [x] **Bug #2 customers.user_id FK** — DONE 2026-06-25 — commit a70e866 (customers.user_id INTEGER REFERENCES users(id), 6 L1 tests, idempotent migration, integrity check #6)
 
 ## 🟢 Low Priority (polish)
 
@@ -88,6 +88,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## ✅ Recently Shipped
 
+- **2026-06-25 05:25** — **Bug #2 fixed**: `customers.user_id INTEGER REFERENCES users(id)` column added (v1.4.0). Idempotent migration `host/vpn-portal/portal-user-id-fk.sql` + `apply_portal_user_id_fk.sh`. App: `/api/customers` POST populates; `/rotate_eap` + installer_tokens prefer FK. 6 L1 regression tests (TestCustomerUserIdFK class). 6th integrity check (`user-id-fk`). Fixed latent bug in CI db-integrity cleanup step. L1 95→101. Commit `a70e866`.
 - **2026-06-25 04:50** — **L2 + L4 testing layers shipped**: L2 `scripts/check_db_integrity.py` (5 checks against canonical auth DB) wired into CI db-integrity job. L4 `scripts/smoke.sh` + systemd `vpn-portal-smoke.{service,timer}` — 5-check API-layer smoke running every 6h on LXC 903. Commits `e794490` + `c58a95a`.
 - **2026-06-25 04:30** — **Deep housekeeping**: HARDLOCK rename (nftables-zun-vpn.service → nftables-vpn.service), rotate-vpn-credentials.py VPS path fix (/etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d), archive deprecated v1.5.0 PowerShell scripts. Commits `7a0758f` + `3306551` + `f277951`.
 - **2026-06-25 04:05** — **Bug #4 fixed**: POST `/api/customers/{id}/rotate_eap` endpoint — rotates EAP password in DB + rw-eap.conf while preserving EAP identity. Adds `customers.eap_rotated_at` column. 9 new L1 regression tests. Verified live on VPS. Commit `cdd93b7`.
