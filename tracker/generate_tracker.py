@@ -118,6 +118,10 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-25 18:55", "Portal v1.6.4 — show allocated bandwidth in customer detail modal",
+     "Customer detail modal showed Status/Operator/Telegram/Billing/Email/Created/Updated/Notes but not bandwidth. API returned bandwidth_down_mbps + bandwidth_up_mbps but UI never rendered them. Zun noticed while watching zade's session.",
+     "host/vpn-portal/www/static/app.js (commit 4838997) — 1 row in metadata dl: '40 Mbit/s down · 20 Mbit/s up'",
+     "🟢 Low", "Deployed via deploy-portal-vps.sh. Live file at v=4838997 contains new Bandwidth dt/dd. node --check passes.", "✅"),
     ("2026-06-25 18:50", "Portal v1.6.3 — dashboard auto-refresh (30s)",
      "Dashboard tab loaded once on tab-open and never polled. Operators saw frozen view while customers actively burned bandwidth. Hidden for weeks behind v1.6.2 JS SyntaxError.",
      "host/vpn-portal/www/static/app.js (commit 37d3b14) — startDashboardAutoRefresh/stopDashboardAutoRefresh mirrors startActiveSessAutoRefresh pattern, 30s interval",
