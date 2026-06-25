@@ -279,6 +279,11 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 history = [
+    # 2026-06-25 — speed-plan deploy regression caught by Zun
+    ("2026-06-25 08:30", "BUGFIX — strict-CSP style: keys broke customer form modal (introduced by speed-plan)",
+     "Misha",
+     "Caught by Zun (real prod report) immediately after deploy. Verified via puppeteer: form modal opens but vp-new-client-body is empty. PAGE ERROR: 'el(): style: key forbidden by strict CSP'. 5 places used style: keys: 2 from my commit 90d8c36 (BW override inputs in renderNewClientForm), 3 pre-existing in commit d1467e3 (installer link modal, line 1504/1509/1524 — never noticed because nobody opened that modal in prod). Fix: replace style: with cls: utility classes (.vp-flex-1, .vp-mr-6, .vp-mt-12, .vp-mt-16, .vp-fs-12, .vp-fg-muted, .vp-installer-cmd added to app.css). Deployed via deploy-portal-vps.sh 'Standard — 20 Mbps down' (commit 7a0f7d0, cache-bust ?v=7a0f7d0). Post-deploy puppeteer verification on live portal: form modal renders 25 vp-nc-* elements, speed-plan dropdown has both options, BW override inputs present, no style: errors.",
+     "🔴 High", "Lesson: source-tree tests don't catch JS render errors. el() helper throws but renderNewClientForm catches nothing — body just stays empty. ALWAYS smoke-test in a real browser after portal changes, not just unit tests."),
     # 5B era
     ("2026-06-19 21:48", "5B.6 iptables watchdog fired on every docker event, reset 508 per-VIP byte counters to 0 every 30-60s. Zun's screenshot: 140MB iOS app vs 22MB daemon",
      "Watchdog originally re-applied rules.v4 on every docker event including exec_create/exec_start/health_status*. Fired on every Prometheus scrape (30s) + daemon poll (60s).",
