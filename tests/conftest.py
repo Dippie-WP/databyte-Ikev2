@@ -39,6 +39,7 @@ def db_path(tmp_path) -> Path:
         "test-users-extension.sql",
         "portal-schema.sql",
         "portal-customers-extensions.sql",
+        "portal-user-id-fk.sql",
     ):
         sql = (FIXTURES / schema_file).read_text()
         try:

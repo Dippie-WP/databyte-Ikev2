@@ -1031,6 +1031,12 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             f"({int(cust_id)}, {int(user_id)}, {_q(req.device_name)}, {_q(req.device_type)}, "
             f"{_q(req.os_version)}, {_q(req.notes)}, 1, {now}, {now});"
         )
+
+        # v1.4.0 — Bug #2: populate customers.user_id with the user's PK.
+        # Operator customers (is_operator=1) have no user and skip this path.
+        db_exec(
+            f"UPDATE customers SET user_id = {int(user_id)} WHERE id = {int(cust_id)};"
+        )
         dev_id = db_query(f"SELECT id FROM devices WHERE device_name = {_q(req.device_name)} "
                           f"AND customer_id = {int(cust_id)};")[0]["id"]
 
@@ -1747,7 +1753,7 @@ def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session))
       - Customer with no devices (409)
     """
     cust_rows = db_query(
-        f"SELECT id, name, is_operator, status FROM customers WHERE id = {int(customer_id)};"
+        f"SELECT id, name, is_operator, status, user_id FROM customers WHERE id = {int(customer_id)};"
     )
     if not cust_rows:
         raise HTTPException(404, "Customer not found")
@@ -1757,7 +1763,8 @@ def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session))
     if cust["status"] == "archived":
         raise HTTPException(409, "cannot rotate EAP for an archived customer (unarchive first)")
 
-    # Find the customer's active device
+    # Find the customer's active device (still needed for the is_active check;
+    # we keep the devices join as a sanity check that devices and the FK agree).
     devices = db_query(
         f"SELECT id, strongswan_user_id, device_name, is_active FROM devices "
         f"WHERE customer_id = {int(customer_id)} ORDER BY id LIMIT 1;"
@@ -1766,12 +1773,17 @@ def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session))
         raise HTTPException(409, "customer has no devices; nothing to rotate")
     dev = devices[0]
 
+    # v1.4.0 — Bug #2: use customers.user_id FK directly when populated.
+    # Falls back to devices.strongswan_user_id for pre-migration customers
+    # where user_id is still NULL (operator-only, archived, etc.).
+    eap_user_id = cust.get("user_id") or dev["strongswan_user_id"]
+
     # Look up EAP identity from users table
     user_rows = db_query(
-        f"SELECT id, name FROM users WHERE id = {int(dev['strongswan_user_id'])};"
+        f"SELECT id, name FROM users WHERE id = {int(eap_user_id)};"
     )
     if not user_rows:
-        raise HTTPException(500, f"device points to missing users row id={dev['strongswan_user_id']}")
+        raise HTTPException(500, f"customer points to missing users row id={eap_user_id}")
     eap_identity = user_rows[0]["name"]
 
     # Generate new password

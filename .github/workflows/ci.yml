@@ -166,6 +166,7 @@ jobs:
           sqlite3 "$TEST_DB" < tests/fixtures/quota-schema.sql
           sqlite3 "$TEST_DB" < tests/fixtures/portal-schema.sql
           sqlite3 "$TEST_DB" < tests/fixtures/portal-customers-extensions.sql
+          sqlite3 "$TEST_DB" < tests/fixtures/portal-user-id-fk.sql
           sqlite3 "$TEST_DB" < tests/fixtures/test-users-extension.sql
 
       - name: Seed minimal valid state
@@ -175,17 +176,22 @@ jobs:
           -- One tier
           INSERT INTO tiers (id, name, display_name, data_limit_bytes, created_at)
             VALUES (1, 'test_tier', 'Test', 1000000, 1700000000);
-          -- Two users (one with device, one without — orphan-user should be flagged)
+          -- Three users:
+          --   id=1 user-with-device     — used by customer-with-device
+          --   id=2 orphan-user           — no customer (should be flagged)
+          --   id=3 no-devices-user       — only added in cleanup step
           INSERT INTO users (id, name, password) VALUES
             (1, 'user-with-device', X'deadbeef'),
             (2, 'orphan-user',       X'deadbeef');
-          -- Two customers (one with device, one without — no-devices-customer flagged)
+          -- Two customers (one with device, one without — no-devices-customer flagged).
+          -- Bug #2: customer-with-device has user_id set to the device's user.
+          -- no-devices-customer has user_id NULL (no devices → no user to FK to).
           INSERT INTO customers (id, name, display_name, is_operator, is_active,
                                 data_limit_bytes, data_used_bytes, status,
                                 created_at, updated_at,
-                                bandwidth_down_mbps, bandwidth_up_mbps)
-            VALUES (1, 'customer-with-device', 'Has Device', 0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20),
-                   (2, 'no-devices-customer',  'No Devices',  0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20);
+                                bandwidth_down_mbps, bandwidth_up_mbps, user_id)
+            VALUES (1, 'customer-with-device', 'Has Device', 0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20, 1),
+                   (2, 'no-devices-customer',  'No Devices',  0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20, NULL);
           -- One device (only for customer-with-device, with matching user)
           INSERT INTO devices (id, customer_id, strongswan_user_id, device_name,
                               is_active, created_at, updated_at)
@@ -208,16 +214,28 @@ jobs:
       - name: Verify passing state after cleanup
         run: |
           TEST_DB=/tmp/test_integrity.db
-          # Fix the drift: add device for orphan-user + create matching customer
+          # Fix ALL the seeded drift:
+          #   - orphan-user (id=2) → give it a customer + device
+          #   - no-devices-customer (id=2) → give it a NEW user + device
+          # Bug #2: each customer gets a user_id so the user-id-fk check passes.
           sqlite3 "$TEST_DB" <<'SQL'
+          -- 1. Give orphan-user a customer + device
           INSERT INTO customers (id, name, display_name, is_operator, is_active,
                                 data_limit_bytes, data_used_bytes, status,
                                 created_at, updated_at,
-                                bandwidth_down_mbps, bandwidth_up_mbps)
-            VALUES (3, 'orphan-user-customer', 'For Orphan', 0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20);
+                                bandwidth_down_mbps, bandwidth_up_mbps, user_id)
+            VALUES (3, 'orphan-user-customer', 'For Orphan', 0, 1, 1000000, 0, 'active', 1700000000, 1700000000, 20, 20, 2);
           INSERT INTO devices (id, customer_id, strongswan_user_id, device_name,
                               is_active, created_at, updated_at)
             VALUES (2, 3, 2, 'orphan-user', 1, 1700000000, 1700000000);
+
+          -- 2. Give no-devices-customer (id=2) a NEW user (id=3) + device
+          --    devices.strongswan_user_id is UNIQUE, so we can't reuse user 1.
+          INSERT INTO users (id, name, password) VALUES (3, 'no-devices-user', X'deadbeef');
+          UPDATE customers SET user_id = 3 WHERE id = 2;
+          INSERT INTO devices (id, customer_id, strongswan_user_id, device_name,
+                              is_active, created_at, updated_at)
+            VALUES (3, 2, 3, 'no-devices-laptop', 1, 1700000000, 1700000000);
           SQL
 
           python3 scripts/check_db_integrity.py --db "$TEST_DB"

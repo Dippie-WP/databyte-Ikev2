@@ -646,3 +646,146 @@ class TestRotateEAPCredentials:
         )
         assert r.status_code == 200
         assert "reload" in calls, "reload_charon_creds was not called after rotation"
+
+
+# ============================================================
+# Bug #2 — explicit user_id FK on customers (v1.4.0)
+# ============================================================
+#
+# Before: customer→user was implicit via devices.strongswan_user_id.
+# After: customers.user_id is a real FK column. Populated on create,
+# queryable directly, used by /rotate_eap and installer-token paths.
+#
+# Operator rows (is_operator=1) have no user and user_id stays NULL.
+class TestCustomerUserIdFK:
+    """Regression tests for the customers.user_id FK column."""
+
+    def _create(self, client, operator_login, name, device_name="laptop"):
+        return client.post(
+            "/api/customers",
+            json={
+                "display_name": name,
+                "tier_name": "tier_5gb",
+                "device_name": device_name,
+                "device_type": "Windows",
+            },
+            cookies={"session": operator_login},
+        ).json()
+
+    def test_create_customer_populates_user_id_fk(self, client, operator_login, db_path):
+        """POST /api/customers must set customers.user_id to the user's PK."""
+        import sqlite3
+        body = self._create(client, operator_login, "FK Test Co")
+        cust_id = body["customer"]["id"]
+        cust_name = body["customer"]["name"]
+        eap_identity = body["eap_identity"]
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT c.user_id, u.id AS user_id_via_join "
+            "FROM customers c "
+            "JOIN devices d ON d.customer_id = c.id "
+            "JOIN users u ON u.id = d.strongswan_user_id "
+            "WHERE c.id = ?",
+            (cust_id,),
+        ).fetchone()
+        conn.close()
+        assert row is not None, f"customer {cust_id} has no joined user/device row"
+        cust_user_id, user_id_via_join = row
+        assert cust_user_id is not None, "customers.user_id is NULL after create"
+        assert cust_user_id == user_id_via_join, (
+            f"customers.user_id ({cust_user_id}) doesn't match users.id "
+            f"({user_id_via_join}) — FK would be invalid"
+        )
+
+    def test_create_two_customers_each_gets_distinct_user_id(self, client, operator_login, db_path):
+        """Two customers must have two distinct users, two distinct user_ids."""
+        import sqlite3
+        body_a = self._create(client, operator_login, "Customer A", device_name="laptop")
+        body_b = self._create(client, operator_login, "Customer B", device_name="laptop")
+        cust_a = body_a["customer"]["id"]
+        cust_b = body_b["customer"]["id"]
+
+        conn = sqlite3.connect(str(db_path))
+        ua = conn.execute("SELECT user_id FROM customers WHERE id = ?", (cust_a,)).fetchone()[0]
+        ub = conn.execute("SELECT user_id FROM customers WHERE id = ?", (cust_b,)).fetchone()[0]
+        conn.close()
+        assert ua is not None and ub is not None, "user_id must be set on both"
+        assert ua != ub, f"both customers got the same user_id {ua}"
+
+    def test_operator_user_id_is_null(self, client, operator_login, db_path):
+        """The operator customer (seed) must have user_id NULL — they never auth via EAP."""
+        import sqlite3
+        # Get the operator customer
+        r = client.get("/api/customers", cookies={"session": operator_login})
+        assert r.status_code == 200
+        op = next((c for c in r.json() if c.get("is_operator")), None)
+        assert op is not None, "no operator in seed"
+
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT user_id FROM customers WHERE id = ?", (op["id"],)
+        ).fetchone()
+        conn.close()
+        assert row[0] is None, f"operator user_id should be NULL, got {row[0]}"
+
+    def test_rotate_eap_uses_customer_user_id_fk(self, client, operator_login, db_path):
+        """Bug #2 fix: /rotate_eap uses customers.user_id (not devices join)."""
+        import sqlite3
+        body = self._create(client, operator_login, "Rotate FK Co")
+        cust_id = body["customer"]["id"]
+
+        # Sanity: user_id is set
+        conn = sqlite3.connect(str(db_path))
+        cust_user_id = conn.execute(
+            "SELECT user_id FROM customers WHERE id = ?", (cust_id,)
+        ).fetchone()[0]
+        conn.close()
+        assert cust_user_id is not None, "precondition: customers.user_id must be set"
+
+        # Rotate
+        r = client.post(
+            f"/api/customers/{cust_id}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200, r.text
+
+        # After rotation: user_id still points to the SAME users row (no rename)
+        conn = sqlite3.connect(str(db_path))
+        cust_user_id_after = conn.execute(
+            "SELECT user_id FROM customers WHERE id = ?", (cust_id,)
+        ).fetchone()[0]
+        user_name_after = conn.execute(
+            "SELECT name FROM users WHERE id = ?", (cust_user_id_after,)
+        ).fetchone()[0]
+        conn.close()
+        assert cust_user_id_after == cust_user_id, (
+            f"customers.user_id changed during rotation: "
+            f"{cust_user_id} -> {cust_user_id_after}"
+        )
+        assert user_name_after == body["eap_identity"], (
+            "EAP identity changed during rotation (Bug #4 lineage violation)"
+        )
+
+    def test_idx_customers_user_id_exists(self, db_path):
+        """The migration creates idx_customers_user_id. Must exist after migration."""
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        idx = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='customers' AND name='idx_customers_user_id'"
+        ).fetchone()
+        conn.close()
+        assert idx is not None, "idx_customers_user_id not created by portal-user-id-fk.sql"
+
+    def test_user_id_column_references_users_id(self, db_path):
+        """customers.user_id must be a FOREIGN KEY to users(id), not a bare INTEGER."""
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute("PRAGMA foreign_key_list(customers)").fetchall()
+        conn.close()
+        # Filter for the user_id FK specifically (PRAGMA returns one row per FK column)
+        fk_to_users = [r for r in row if r[2] == "users" and r[3] == "user_id"]
+        assert fk_to_users, (
+            f"customers.user_id is not a FK to users(id). "
+            f"PRAGMA foreign_key_list(customers) = {row}"
+        )
