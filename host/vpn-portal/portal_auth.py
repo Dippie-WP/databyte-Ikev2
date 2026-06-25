@@ -22,8 +22,7 @@ Isolation guarantees:
   - Login rate limit: 5 attempts/IP/min (same as operator login)
   - Audit: every login (success + fail) and every portal API call logged
 
-Lab build (2026-06-21): LAN-only at http://192.168.10.98:8080/portal/.
-No HTTPS, no public exposure. Re-do for production when going client-facing.
+Production build (v1.0.0+, 2026-06-24): live at https://vpn-portal.databyte.co.za/portal/ via Cloudflare proxy.
 """
 
 import hashlib

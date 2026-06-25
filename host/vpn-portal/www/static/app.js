@@ -1,3 +1,5 @@
+// 2026-06-25 live-pool-leases-integration v1.4.6
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
