@@ -6,15 +6,15 @@
 
 Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bug existed 3 days before being caught.
 
-**Layer 1 — Portal API integration tests (pytest) [START HERE — 2h]**
-- [ ] `tests/test_portal_auth.py` — login w/ valid+invalid+expired+disabled+rate-limit
-- [ ] `tests/test_customer_lifecycle.py` — create→archive→delete; verify cascade to rw-eap.conf
-- [ ] `tests/test_installer_tokens.py` — create→fetch→re-fetch returns 404
-- [ ] `tests/test_audit_log.py` — every mutation logged with correct actor
-- [ ] `tests/test_strongswan_sync.py` — create customer → confirm EAP block + swanctl --list-creds
-- [ ] `tests/conftest.py` — shared fixtures (test client, test customers, cleanup)
-- [ ] Wire into `.github/workflows/ci.yml` — run on every push
-- [ ] Catches #193 retroactively (portal_auth login SQL bug)
+**Layer 1 — Portal API integration tests (pytest) [✅ DONE 2026-06-24 — commit 7966c0b, 82 tests]**
+- [x] `tests/test_portal_auth.py` — login w/ valid+invalid+expired+disabled+rate-limit (35 tests)
+- [x] `tests/test_customer_lifecycle.py` — create→archive→delete; verify cascade to rw-eap.conf (18 tests)
+- [x] `tests/test_installer_tokens.py` — create→fetch→re-fetch returns 404 (10 tests)
+- [x] `tests/test_audit_log.py` — every mutation logged with correct actor (8 tests)
+- [x] `tests/test_strongswan_sync.py` — create customer → confirm EAP block + swanctl --list-creds (9 tests)
+- [x] `tests/conftest.py` — shared fixtures (test client, test customers, cleanup)
+- [x] Wire into `.github/workflows/ci.yml` — run on every push (portal-tests job)
+- [x] Catches #193 retroactively (portal_auth login SQL bug)
 
 **Layer 2 — DB integrity check [After L1 — 1h]**
 - [ ] `scripts/check_db_integrity.py` — runs in CI + on demand
@@ -86,6 +86,10 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## ✅ Recently Shipped
 
+- **2026-06-25 04:30** — **Deep housekeeping**: HARDLOCK rename (nftables-zun-vpn.service → nftables-vpn.service), rotate-vpn-credentials.py VPS path fix (/etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d), archive deprecated v1.5.0 PowerShell scripts. Commits `7a0758f` + `3306551` + `f277951`.
+- **2026-06-25 04:05** — **Bug #4 fixed**: POST `/api/customers/{id}/rotate_eap` endpoint — rotates EAP password in DB + rw-eap.conf while preserving EAP identity. Adds `customers.eap_rotated_at` column. 9 new L1 regression tests. Verified live on VPS. Commit `cdd93b7`.
+- **2026-06-25 04:00** — **Bug #1 fixed**: PORTAL_TTL split — customer portal 30d→1h sliding window (operator kept at 30d). 4 regression tests added. Commit `64b7801`.
+- **2026-06-24** — **L1 pytest 82 tests passing**: test_portal_auth 35 + test_customer_lifecycle 18 + test_installer_tokens 10 + test_audit_log 8 + test_strongswan_sync 9. Wired into CI as portal-tests job in `.github/workflows/ci.yml`. Commit `7966c0b`.
 - **2026-06-24 16:55** — Code fix: app.js + templates use myvpn.databyte.co.za (homelab separated from VPS). Commit `afdd879`.
 - **2026-06-24 17:35** — Per-platform test customers created (5 customers, demo_100mb tier).
 - **2026-06-24 18:27** — `test-android-2-phone` customer created.
@@ -93,6 +97,11 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - **2026-06-24 18:36** — Testing/alignment plan logged as TODO (this file).
 - **2026-06-24 19:01** — **First overseas Android client (friend) connected to production VPN** (`test-android-friend-laptop` @ 98.97.77.223 → 10.99.0.4, EAP-MSCHAPv2 + AES-256, 20/20 mbit). End-to-end confirmed working. Surfaced 3 portal bugs (idle expiry, tier label, name-based user↔customer mapping) — added to TODO.
 - **2026-06-24 19:11** — Live VPN monitor (PID 52437, 30s poll) deployed during friend test. Logs `/tmp/vpn_monitor.log`.
+
+## 🟢 Closed (false alarms)
+
+- **Bug #3** Tier label vs cap mismatch — `demo_100mb` tier label "Demo 100MB" matched cap (audit 2026-06-25 confirmed no actual override)
+- **Bug #6** Stale EAP key eap-demo-phone in rw-eap.conf — charon auto-loads all keys from file; "stale" key was active test customer (audit 2026-06-25 confirmed)
 
 ## 📚 Reference
 

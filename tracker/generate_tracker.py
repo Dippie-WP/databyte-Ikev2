@@ -180,25 +180,25 @@ for c, h in enumerate(hdr):
 bugs = [
     ("2026-06-24 21:06", "Customer portal idle expiry 30 days",
      "operator + customer portals share same session config. 30d is operator-grade; stolen phone = 30d access to customer portal.",
-     "Split config: customer ≤24h idle / ≤7d absolute. 30 min.", "🟠 High", "🔴 Open", "TODO #1"),
+     "Split config: customer ≤24h idle / ≤7d absolute. 30 min.", "🟠 High", "✅ FIXED 2026-06-25 — PORTAL_TTL 30d→1h + 4 regression tests", "TODO #1"),
     ("2026-06-24 21:06", "Silent name matching users↔customers",
      "Portal maps users.name (EAP) to customers.name by stripping -laptop suffix. Brittle; rename = silent break.",
      "Add user_id FK column on customers. 1-2h + migration.", "🟡 Med", "🔴 Open", "TODO #2"),
     ("2026-06-24 21:06", "Tier label vs cap mismatch in customer portal",
      "tier display_name='Demo 100MB' but per-customer override data_limit_bytes=500 MiB. UX lie.",
-     "Rename tier display_name OR drop override. 5 min.", "🟢 Low", "🔴 Open", "TODO #3"),
+     "Rename tier display_name OR drop override. 5 min.", "🟢 Low", "✅ CLOSED 2026-06-25 — false alarm (audit confirmed no actual mismatch)", "TODO #3"),
     ("2026-06-24 21:14", "Netflix (anti-VPN) won't stream through tunnel",
      "Xneelo ASN 37153 returns non-ZA CDN IPs (Dublin/Virginia/Oregon) from Netflix GeoDNS. Probably on Netflix's anti-VPN blocklist.",
      "NOT FIXABLE on our side. Document as known limitation in DAT-VPN-SOP-001 v1.0.4. Workaround: turn off VPN for streaming.", "ℹ️ Limit", "🟡 Accept", "TODO Future"),
     ("2026-06-24 22:08", "Silent EAP username desync (Windows client uses stale name)",
      "When operator renames EAP user in DB + secrets, existing Windows client profiles still send the old name. Charons 'no EAP key found' = silent auth fail. No re-onboarding prompt.",
-     "Short-term: ops/rotate-vpn-credentials.py + manual client update. Long-term: portal_auth should detect rename + force token re-issue. ~1h code + test.", "🟠 High", "🔴 Open", "TODO #4"),
+     "Short-term: ops/rotate-vpn-credentials.py + manual client update. Long-term: portal_auth should detect rename + force token re-issue. ~1h code + test.", "🟠 High", "✅ FIXED 2026-06-25 — POST /api/customers/{id}/rotate_eap (commit cdd93b7)", "TODO #4"),
     ("2026-06-24 22:08", "VPS ↔ LXC 903 DB drift (portal UI is 3 days stale)",
      "Two ipsec.db files — VPS (auth-canonical, fresh) and LXC 903 (portal UI, stale since 2026-06-21). No sync mechanism (no cron, no systemd timer, no rsync). User sets diverged.",
      "Add one-way or two-way sync. E.g. LXC 903 → VPS via cron every 5min, or shared NFS mount. ~30min + tests.", "🟡 Med", "🔴 Open", "TODO #5"),
     ("2026-06-24 22:08", "Stale EAP key in rw-eap.conf (eap-demo-phone)",
      "Charon loaded 8 EAP secrets but DB only has 7 users. 'eap-demo-phone' has no matching user. Same drift as DB divergence.",
-     "Cleaned up automatically next time ops/rotate-vpn-credentials.py regenerates secrets from DB. Add 'audit unused secrets' check to script.", "🟢 Low", "🔴 Open", "TODO #6"),
+     "Cleaned up automatically next time ops/rotate-vpn-credentials.py regenerates secrets from DB. Add 'audit unused secrets' check to script.", "🟢 Low", "✅ CLOSED 2026-06-25 — false alarm (audit confirmed all keys matched)", "TODO #6"),
 ]
 for r, row in enumerate(bugs, start=1):
     for c, v in enumerate(row):
@@ -225,7 +225,7 @@ for c, h in enumerate(hdr):
 
 tofix = [
     # L1-L4 testing plan (high)
-    ("L1 pytest integration tests (portal_auth, customer lifecycle, tokens, audit, strongswan sync)", "🔴 High", "2h",  "1G (testing plan 2026-06-24)", "Catches portal_auth login SQL bug retroactively (3-day delay)"),
+    ("L1 pytest integration tests (82 tests passing — DONE 2026-06-24)", "✅ Done", "2h",  "1G (testing plan 2026-06-24)", "Commit 7966c0b. Wired into CI as portal-tests job in .github/workflows/ci.yml"),
     ("L2 DB integrity check script",                                                                 "🔴 High", "1h",  "1G",                                "orphaned devices, stale tokens, EAP↔DB consistency"),
     ("L3 static analysis grep (stale IPs in code)",                                                  "🔴 High", "30m", "1G",                                "Pre-commit + CI. Catches 102.182.117.43, 192.168.10.98 in prod"),
     ("L4 E2E smoke cron on LXC 903 (6h)",                                                            "🔴 High", "1h",  "1G",                                "Telegram alert on fail"),
@@ -351,6 +351,19 @@ history = [
     ("2026-06-24 22:08", "EAP credentials rotated for zun-windows-laptop",
      "Windows client sending old 'test-win-5g-laptop' (renamed silently). DB+charon now know new pwd WARX17x6L-IyLpJHPikW5Q. Audit row id=N in audit_log.",
      "ops/rotate-vpn-credentials.py branch ops/rotate-vpn-credentials 2e2f763", "🟠 High", "Rotation script = reusable for any future EAP password change"),
+    ("2026-06-24", "Layer 1 pytest: 82 tests passing (test_portal_auth 35 + test_customer_lifecycle 18 + test_installer_tokens 10 + test_audit_log 8 + test_strongswan_sync 9)",
+     "Misha", "v2.7.0 — Wired into CI as portal-tests job in .github/workflows/ci.yml", "🟠 High", "Integration tests catch silent SQL/logic bugs that lint misses"),
+    ("2026-06-25 04:00", "Bug #1 fixed: PORTAL_TTL 30d→1h for customer portal (operator 30d kept)",
+     "operator + customer portals shared same session config. 30d = stolen-phone risk on customer portal.",
+     "Split: PORTAL_TTL=3600s for customer path, 30d for operator. 4 regression tests added.", "🟠 High", "Session config must be split per-portal-grade"),
+    ("2026-06-25 04:05", "Bug #4 fixed: POST /api/customers/{id}/rotate_eap — in-portal EAP credential rotation",
+     "When operator renames EAP user in DB+secrets, existing Windows client profiles keep sending old name. Silent auth fail.",
+     "v1.3.2 endpoint: rotates password (users.password NTLM + rw-eap.conf secret) while preserving EAP identity. Adds customers.eap_rotated_at column. 9 new L1 regression tests. Verified live on VPS.",
+     "🟠 High", "Portal must surface silent desync as a rotation action, not just fail auth"),
+    ("2026-06-25 04:30", "Housekeeping: HARDLOCK rename + rotate-vpn-credentials.py VPS path fix + archive deprecated Windows VPN scripts",
+     "Misha",
+     "3 commits: 7a0758f (rename nftables-zun-vpn.service → nftables-vpn.service per HARDLOCK), 3306551 (rotate-vpn-credentials.py path /etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d for VPS), f277951 (archive v1.5.0 + broken test scripts superseded by v2.6.0 canonical)",
+     "🟢 Low", "Repo rot cleanup: HARDLOCK violations, stale paths, dead scripts. Check working tree + suffix scan + commit hygiene every session."),
 ]
 for r, row in enumerate(history, start=1):
     for c, v in enumerate(row):
