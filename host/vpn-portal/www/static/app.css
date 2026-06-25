@@ -6,6 +6,7 @@
 :root {
   --vp-bg:      #0E1117;
   --vp-surface: #161B22;
+  --vp-s1:      #161B22;   /* alias of surface — used by .vp-modal / .vp-toolbar / .vp-bulk-bar */
   --vp-s2:      #1C2330;
   --vp-border:  #2D3748;
   --vp-border2: #1E2A3A;
@@ -30,6 +31,7 @@
 body[data-theme="light"] {
   --vp-bg:      #F7FAFC;
   --vp-surface: #FFFFFF;
+  --vp-s1:      #FFFFFF;   /* light-theme alias */
   --vp-s2:      #EDF2F7;
   --vp-border:  #CBD5E0;
   --vp-border2: #E2E8F0;
