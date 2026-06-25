@@ -42,11 +42,12 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## 🟡 Medium Priority
 
-- [ ] **Per-tier bandwidth limits** (replace flat 20/20 with tier-based) — 1h
 - [ ] **CP7 security hardening** (6 items: fail2ban portal jail, AIDE, backups, cert expiry monitor, INPUT rule tightening, iptables-nft consolidation) — 3-4h total
 - [ ] **ipBan service to VPS** (currently INACTIVE on VPS, only active on LXC 903) — 30m
 - [ ] **Customer portal idle expiry split** (operator 30d OK, customer must be ≤24h idle / ≤7d absolute) — 30m. Surfaced 2026-06-24 by friend-overseas Android test
 - [x] **Bug #2 customers.user_id FK** — DONE 2026-06-25 — commit a70e866 (customers.user_id INTEGER REFERENCES users(id), 6 L1 tests, idempotent migration, integrity check #6)
+- [x] **Speed-plan feature** — DONE 2026-06-25 — commit 90d8c36 (v1.5.0). Per-customer speed_plan at creation: standard (20/20) or asymmetric_40_20 (40/20). Tiers drive quota only, NOT bandwidth. 10 L1 tests. Per-tier bandwidth NUKED per Zun 2026-06-25 05:33.
+- [ ] **Per-tier bandwidth limits** — NUKED per Zun 2026-06-25 05:33 (speed-plan is per-customer, not tier-driven)
 
 ## 🟢 Low Priority (polish)
 
@@ -74,6 +75,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## ✅ Recently Shipped
 
+- **2026-06-25 05:35** — **Speed-plan feature shipped** (v1.5.0, commit `90d8c36`). Per-customer `speed_plan` at creation time: `standard` (20/20 mbps symmetric) or `asymmetric_40_20` (40 down / 20 up). Tiers drive DATA QUOTA only; speed_plan drives BANDWIDTH (independent — per Zun: not tier-based). Precedence: explicit `bandwidth_down_mbps`/`bandwidth_up_mbps` (advanced override) > `speed_plan` preset > default standard. ClientCreate Pydantic model + `resolve_bandwidth()` / `validate_bandwidth()` helpers. UI: dropdown + optional 'Custom bandwidth' override fields. 10 L1 tests in `TestSpeedPlan`. Audits: bandwidth-monitor + installer_tokens already read `customers.bandwidth_*`; no downstream change. L1 101→111.
 - **2026-06-25 05:25** — **Bug #2 fixed**: `customers.user_id INTEGER REFERENCES users(id)` column added (v1.4.0). Idempotent migration `host/vpn-portal/portal-user-id-fk.sql` + `apply_portal_user_id_fk.sh`. App: `/api/customers` POST populates; `/rotate_eap` + installer_tokens prefer FK. 6 L1 regression tests (TestCustomerUserIdFK class). 6th integrity check (`user-id-fk`). Fixed latent bug in CI db-integrity cleanup step. L1 95→101. Commit `a70e866`.
 - **2026-06-25 04:50** — **L2 + L4 testing layers shipped**: L2 `scripts/check_db_integrity.py` (5 checks against canonical auth DB) wired into CI db-integrity job. L4 `scripts/smoke.sh` + systemd `vpn-portal-smoke.{service,timer}` — 5-check API-layer smoke running every 6h on LXC 903. Commits `e794490` + `c58a95a`.
 - **2026-06-25 04:30** — **Deep housekeeping**: HARDLOCK rename (nftables-zun-vpn.service → nftables-vpn.service), rotate-vpn-credentials.py VPS path fix (/etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d), archive deprecated v1.5.0 PowerShell scripts. Commits `7a0758f` + `3306551` + `f277951`.
