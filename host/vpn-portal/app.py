@@ -203,9 +203,24 @@ def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") ->
 
 
 def db_query(sql: str) -> list:
-    """Query SQLite on the VPN gateway, return list of dicts."""
+    """Query SQLite on the VPN gateway, return list of dicts.
+
+    sqlite3 -json serializes NULL as the literal string "None" (sqlite3 CLI
+    quirk, not real JSON null). That breaks the customer-edit modal — the
+    form pre-fills with the text "None" instead of an empty input, and
+    Save then sends the string "None" to the backend, which fails email
+    validation. Caught 2026-06-25 by Zun. Fix: convert any "None" string
+    back to None at the boundary so the rest of the code sees proper nulls.
+    Tests use Python's json.dumps which already produces real null, so this
+    only affects the live sqlite3 CLI path.
+    """
     out = ssh_903(["sqlite3", "-json", DB_PATH, sql])
-    return json.loads(out) if out.strip() else []
+    rows = json.loads(out) if out.strip() else []
+    for r in rows:
+        for k, v in r.items():
+            if v == "None":
+                r[k] = None
+    return rows
 
 
 def db_exec(sql: str) -> None:
