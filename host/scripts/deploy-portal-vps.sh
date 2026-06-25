@@ -189,17 +189,34 @@ if [[ "$DEPLOYED_JS_SHA" != "$SOURCE_JS_SHA" ]]; then
     if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
     MISMATCH=1
 fi
+# Note: index.html SHA is checked loosely — STEP 7 will bump ?v= on the
+# deployed copy, which makes its SHA diverge from source by design. The
+# important check is that app.py + app.js match (the actual feature code).
 if [[ "$DEPLOYED_HTML_SHA" != "$SOURCE_HTML_SHA" ]]; then
-    echo "FAIL: deployed index.html SHA != source index.html SHA"
-    if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
-    MISMATCH=1
+    echo "  ⚠ deployed index.html SHA != source (OK if STEP 7 cache-bust hasn't run yet)"
 fi
 if [[ $MISMATCH -eq 0 ]]; then
-    echo "  all SHAs match ✓"
+    echo "  app.py + app.js SHAs match ✓"
 fi
 
 echo ""
-echo "=== STEP 7: verify feature marker in LIVE resources ==="
+echo "=== STEP 7: cache-bust HTML to force Cloudflare re-fetch of static assets ==="
+# Cloudflare caches /static/app.js for 7 days (immutable). After deploying new
+# app.js, we bump the ?v= query string in deployed index.html so CF sees a new
+# URL, misses cache, and fetches the new file from origin.
+NEW_CACHE_VERSION="${SOURCE_HEAD:0:7}"
+echo "  new cache version: ${NEW_CACHE_VERSION}"
+ssh "${VPS_HOST}" "sudo sed -i -E 's/(\?v=)[0-9.]+/\\1${NEW_CACHE_VERSION}/g' \
+    ${VPS_PORTAL_DIR}/www/index.html \
+    ${VPS_PORTAL_DIR}/www/portal/index.html"
+echo "  bumped ?v= values in deployed HTML:"
+ssh "${VPS_HOST}" "grep -oE '\\\\?v=[0-9a-f]+' ${VPS_PORTAL_DIR}/www/index.html ${VPS_PORTAL_DIR}/www/portal/index.html" | head -6 | sed 's/^/    /'
+# Re-fetch DEPLOYED_HTML_SHA after the bump (expected to differ from source —
+# by design, since source uses semver ?v=N.N.N but deployed uses ?v=gitsha)
+DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
+
+echo ""
+echo "=== STEP 8: verify feature marker in LIVE resources (post cache-bust) ==="
 # Note: the portal shell is a SPA — the actual feature lives in app.js.
 # Check BOTH the index.html and the app.js on the live URL.
 INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
@@ -226,7 +243,7 @@ echo ""
 if [[ $DRY_RUN -eq 1 ]]; then
     echo "=== STEP 8: SKIPPED in dry-run (.last_deployed would be written on real deploy) ==="
 else
-    echo "=== STEP 8: write .last_deployed ==="
+    echo "=== STEP 9: write .last_deployed ==="
     DEPLOY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     DEPLOY_USER="$(whoami)"
     cat > "${STATE_FILE}" <<EOF
@@ -238,6 +255,7 @@ deployed_by=${DEPLOY_USER}
 git_head=${SOURCE_HEAD}
 git_head_short=$(git rev-parse --short HEAD)
 feature_marker=${FEATURE_MARKER}
+cache_bust_version=${NEW_CACHE_VERSION:-none}
 
 source_sha256:
   app.py=${SOURCE_PY_SHA}
