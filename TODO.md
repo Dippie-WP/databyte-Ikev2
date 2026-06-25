@@ -98,10 +98,11 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - **2026-06-24 19:01** — **First overseas Android client (friend) connected to production VPN** (`test-android-friend-laptop` @ 98.97.77.223 → 10.99.0.4, EAP-MSCHAPv2 + AES-256, 20/20 mbit). End-to-end confirmed working. Surfaced 3 portal bugs (idle expiry, tier label, name-based user↔customer mapping) — added to TODO.
 - **2026-06-24 19:11** — Live VPN monitor (PID 52437, 30s poll) deployed during friend test. Logs `/tmp/vpn_monitor.log`.
 
-## 🟢 Closed (false alarms)
+## 🟢 Closed (false alarms / intentional separation)
 
 - **Bug #3** Tier label vs cap mismatch — `demo_100mb` tier label "Demo 100MB" matched cap (audit 2026-06-25 confirmed no actual override)
 - **Bug #6** Stale EAP key eap-demo-phone in rw-eap.conf — charon auto-loads all keys from file; "stale" key was active test customer (audit 2026-06-25 confirmed)
+- **Bug #5** VPS ↔ LXC 903 DB drift — **NOT A BUG, INTENTIONAL SEPARATION**. Per Zun 2026-06-25 03:48 UTC + 04:32 UTC: "903 has nothing to do with production. We built the lab for test and build. Leave it alone now. We only focus on vps production. The lab will Keep for personal." Drift between lab portal UI and prod VPS DB is by design. DO NOT add any sync mechanism between them.
 
 ## 📚 Reference
 
