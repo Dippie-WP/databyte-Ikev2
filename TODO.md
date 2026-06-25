@@ -32,12 +32,13 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - [ ] Allowlist: `*.bak`, `archive/`, `gen-certs.sh` arg name
 - Catches A-1 (app.js homelab) + A-3 (template) retroactively
 
-**Layer 4 — E2E smoke [After L1 — 1h]**
-- [ ] `scripts/smoke.sh` — runs every 6h on LXC 903
-- [ ] Login as each test customer
-- [ ] Fetch /api/portal/me, /api/customers/13/quota
-- [ ] `swanctl --list-creds` count
-- [ ] Telegram alert on any failure
+**Layer 4 — E2E smoke [✅ DONE 2026-06-25 — commit c58a95a]**
+- [x] `scripts/smoke.sh` — runs every 6h on LXC 903
+- [x] Login as each test customer
+- [x] Fetch /api/portal/me, /api/customers (with quota fields)
+- [x] `swanctl --list-creds` count
+- [x] Telegram alert on any failure (optional, env-gated)
+- [x] systemd vpn-portal-smoke.{service,timer} — every 6h on LXC 903, Persistent=true
 
 ## 🟡 Medium Priority
 
@@ -87,6 +88,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## ✅ Recently Shipped
 
+- **2026-06-25 04:50** — **L2 + L4 testing layers shipped**: L2 `scripts/check_db_integrity.py` (5 checks against canonical auth DB) wired into CI db-integrity job. L4 `scripts/smoke.sh` + systemd `vpn-portal-smoke.{service,timer}` — 5-check API-layer smoke running every 6h on LXC 903. Commits `e794490` + `c58a95a`.
 - **2026-06-25 04:30** — **Deep housekeeping**: HARDLOCK rename (nftables-zun-vpn.service → nftables-vpn.service), rotate-vpn-credentials.py VPS path fix (/etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d), archive deprecated v1.5.0 PowerShell scripts. Commits `7a0758f` + `3306551` + `f277951`.
 - **2026-06-25 04:05** — **Bug #4 fixed**: POST `/api/customers/{id}/rotate_eap` endpoint — rotates EAP password in DB + rw-eap.conf while preserving EAP identity. Adds `customers.eap_rotated_at` column. 9 new L1 regression tests. Verified live on VPS. Commit `cdd93b7`.
 - **2026-06-25 04:00** — **Bug #1 fixed**: PORTAL_TTL split — customer portal 30d→1h sliding window (operator kept at 30d). 4 regression tests added. Commit `64b7801`.
