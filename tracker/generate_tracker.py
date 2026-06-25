@@ -118,6 +118,10 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-25 19:15", "Portal v1.6.6 — Customers page Refresh button moved to top",
+     "Refresh button was at the bottom of the customer list — invisible without scrolling. Zun asked 'put this button on top'.",
+     "host/vpn-portal/www/static/app.js (commit 1496eda) — moved Refresh from vp-btn-row after table to vp-page-head-r next to +New client",
+     "🟢 Low", "Deployed. node --check passes. 124 tests passing.", "✅"),
     ("2026-06-25 19:08", "Portal v1.6.5 — fix 'None' string in /api/customers list + edit modal defense",
      "db_query() uses sqlite3 -json CLI which serializes SQL NULL as quoted string 'None' instead of real null. Edit modal pre-filled 'None' text, save sent 'email':'None' to backend, email regex 400'd silently. Fix: db_query post-processes rows converting 'None' string → None; modal body construction strips 'None'/'null' as defense in depth; 4 regression tests (3 of 4 fail without fix).",
      "host/vpn-portal/app.py (db_query), host/vpn-portal/www/static/app.js (modal defense), tests/test_db_query_null_handling.py (4 new tests)",
