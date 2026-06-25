@@ -519,20 +519,24 @@ info "=== Step 17/19: Installing bandwidth-monitor service ==="
 # IMPORTANT: /etc/modules-load.d/ifb.conf only loads the module — it does NOT
 # create the ifb0 device. The `numifbs=1` parameter must be passed to modprobe
 # explicitly. We use a dedicated systemd service (ifb-setup.service) to:
-#   1. modprobe ifb numifbs=1   — create ifb0 device
-#   2. ip link set ifb0 up      — bring it up
-# Both must run before bandwidth-monitor starts. Hit on Xneelo VPS
-# 2026-06-22: ifb module loaded at boot but ifb0 didn't exist, daemon warned
-# "ifb0 not available (likely LXC without host module access)" — wrong diagnosis.
-# Root cause: modules-load.d doesn't pass parameters, so the default 2 ifb
-# devices were created but later removed, or never created.
+#   1. modprobe ifb numifbs=1   — preferred: create only ifb0, no ifb1
+#   2. ip link add ifb0 type ifb — fallback if step 1 silently no-ops because
+#                                  module was already loaded with numifbs=0.
+#                                  `ip link add` returns "File exists" if
+#                                  ifb0 is already there — non-fatal.
+#   3. ip link set ifb0 up      — bring it up
+# All three wrapped in `... || true` so a single failure doesn't break boot.
+# Hit on Xneelo VPS 2026-06-22: ifb module loaded at boot but ifb0 didn't
+# exist, daemon warned "ifb0 not available (likely LXC without host module
+# access)" — wrong diagnosis. Root cause: modules-load.d doesn't pass
+# parameters, so the default 2 ifb devices were created but later removed,
+# or never created.
 #
 # DO NOT add `rmmod ifb` here. On 2026-06-25 that pattern was tried, and
 # bandwidth-monitor's tc filter still referenced ifb0 — every packet flooded
 # the kernel log with "tc mirred to Houston: device ifb0 is down", wedging
-# the VPS for ~2 hours. Safer approach if ifb0 is missing on boot:
-# use `ip link add ifb0 type ifb && ip link set ifb0 up` directly without
-# touching the module — see REVOVERY.md §issue-3.
+# the VPS for ~2 hours. Safer approach: use `ip link add` (this script), which
+# doesn't touch the kernel module.
 cat > /etc/systemd/system/ifb-setup.service << 'EOF'
 [Unit]
 Description=Create ifb0 device for ingress bandwidth shaping
@@ -543,7 +547,8 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/modprobe ifb numifbs=1
+ExecStart=/bin/sh -c 'modprobe ifb numifbs=1 2>/dev/null || true'
+ExecStart=/bin/sh -c 'ip link show ifb0 >/dev/null 2>&1 || ip link add ifb0 type ifb 2>/dev/null || true'
 ExecStart=/sbin/ip link set ifb0 up
 
 [Install]
