@@ -609,7 +609,7 @@
           ? skelBlock()
           : (S.pools && S.pools.length
               ? el('dl', { cls: 'vp-kv' }, ...S.pools.flatMap(p => {
-                  const active = (S.leases || []).length;
+                  const active = (S.leases || []).filter(l => l.online).length;
                   return [
                     el('dt', {}, p.name),
                     el('dd', { cls: 'vp-mono' },
@@ -1225,7 +1225,7 @@
           ? skelBlock()
           : (S.pools && S.pools.length
               ? el('dl', { cls: 'vp-kv' }, ...S.pools.flatMap(p => {
-                  const active = (S.leases || []).length;
+                  const active = (S.leases || []).filter(l => l.online).length;
                   return [
                     el('dt', {}, p.name),
                     el('dd', { cls: 'vp-mono' },
@@ -1234,13 +1234,17 @@
                 }))
               : emptyState('⊘', 'No pools', 'swanctl returned no virtual-IP pools.'))
       ),
-      // Active leases with customer + device + live SA enrichment
+      // Active leases with customer + device + live SA enrichment.
+      // v1.6.2 — Filter to online-only. Charon keeps offline leases sticky
+      // for reconnection stickiness, but the dashboard's job is "who is
+      // connected right now". Total pool usage still visible in the Pools card.
+      const onlineLeases = (S.leases || []).filter(l => l.online);
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' },
-          'Active leases (' + (S.leases && S.leases.length || 0) + ')'),
+          'Active leases (' + onlineLeases.length + ')'),
         showSkeleton
           ? skelBlock()
-          : (S.leases && S.leases.length
+          : (onlineLeases.length
               ? el('div', { cls: 'vp-tbl-wrap' },
                   el('table', {},
                     el('thead', {}, el('tr', {},
@@ -1255,7 +1259,7 @@
                       el('th', {}, 'Acquired'),
                     )),
                     el('tbody', {},
-                      ...S.leases.map(lease => {
+                      ...onlineLeases.map(lease => {
                         const dt = lease.device_type || {};
                         const typeLabel = dt.label || '—';
                         const typeBadge = dt.source === 'inferred'
@@ -1285,7 +1289,7 @@
                     ),
                   ),
                 )
-              : emptyState('○', 'No active leases', 'No clients are currently connected. They will appear here as soon as someone connects.'))
+              : emptyState('○', 'No clients connected', 'No active SAs right now. Offline leases (sticky pool entries) are not shown here — check the Pools card above for total usage.'))
       ),
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' }, 'Active SAs (swanctl --list-sas)'),
