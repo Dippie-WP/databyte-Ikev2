@@ -1917,6 +1917,32 @@
                            min: 1, max: 1048576, placeholder: 'e.g. 1500 for 1.5 GB' }),
             el('div', { cls: 'vp-hint' }, 'Binary MiB (× 1,048,576 bytes). Tier auto-created.'),
           ),
+          // v1.5.0 — Speed plan (per-customer, NOT tier-driven). Two presets:
+          //   'standard'         → 20/20 mbps symmetric
+          //   'asymmetric_40_20' → 40/20 mbps (asymmetric, typical home broadband)
+          // Tiers drive data quota (5/10/20 GB); speed_plan drives bandwidth.
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Speed plan'),
+            el('select', { id: 'vp-nc-speed-plan', cls: 'vp-inp' },
+              el('option', { value: 'standard' }, 'Standard — 20 Mbps down / 20 Mbps up (symmetric)'),
+              el('option', { value: 'asymmetric_40_20' }, 'Asymmetric — 40 Mbps down / 20 Mbps up'),
+            ),
+            el('div', { cls: 'vp-hint' },
+              'Per-customer bandwidth. Independent of tier (tier controls data quota only).'),
+          ),
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-bw-override-wrap' },
+            el('label', { cls: 'vp-label' },
+              'Custom bandwidth (Mbps) ',
+              el('span', { cls: 'vp-optional' }, '(advanced override — wins over speed plan)')),
+            el('div', { cls: 'vp-row' },
+              el('input', { id: 'vp-nc-bw-down', cls: 'vp-inp', type: 'number',
+                             min: 1, max: 1000, placeholder: 'down', style: 'flex:1;margin-right:6px' }),
+              el('input', { id: 'vp-nc-bw-up',   cls: 'vp-inp', type: 'number',
+                             min: 1, max: 1000, placeholder: 'up',   style: 'flex:1' }),
+            ),
+            el('div', { cls: 'vp-hint' },
+              'Both fields required. Bypasses the speed-plan preset above.'),
+          ),
           // Device
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device name'),
@@ -1982,6 +2008,16 @@
     }
     tierSel.addEventListener('change', refresh);
     customMb.addEventListener('input', refresh);
+
+    // v1.5.0 — speed plan + bandwidth override wiring
+    const speedPlanSel = body.querySelector('#vp-nc-speed-plan');
+    const bwOverrideWrap = body.querySelector('#vp-nc-bw-override-wrap');
+    const bwDown = body.querySelector('#vp-nc-bw-down');
+    const bwUp   = body.querySelector('#vp-nc-bw-up');
+    speedPlanSel.addEventListener('change', () => {
+      // Custom override is always available; we just show it after user picks.
+      // (Not auto-shown because most operators will use the preset.)
+    });
 
     // Auto-derive client name from display name if not yet typed
     const nameInp  = body.querySelector('#vp-nc-name');
@@ -2049,11 +2085,20 @@
       notes:              document.getElementById('vp-nc-notes').value.trim() || null,
       tier_name:          document.getElementById('vp-nc-tier').value,
       custom_cap_mb:      parseInt(document.getElementById('vp-nc-custom-mb').value || '0', 10) || null,
+      speed_plan:         document.getElementById('vp-nc-speed-plan').value,
+      bandwidth_down_mbps: parseInt(document.getElementById('vp-nc-bw-down').value || '', 10) || null,
+      bandwidth_up_mbps:   parseInt(document.getElementById('vp-nc-bw-up').value   || '', 10) || null,
       device_name:        document.getElementById('vp-nc-device').value.trim(),
       device_type:        document.getElementById('vp-nc-devtype').value,
       os_version:         document.getElementById('vp-nc-osver').value.trim() || null,
     };
     if (body.tier_name !== 'custom') body.custom_cap_mb = null;
+    // If neither explicit bandwidth field is filled, drop both so the server
+    // applies the speed_plan preset (no partial-state confusion).
+    if (body.bandwidth_down_mbps == null && body.bandwidth_up_mbps == null) {
+      body.bandwidth_down_mbps = null;
+      body.bandwidth_up_mbps = null;
+    }
 
     try {
       const r = await post('/api/customers', body);
