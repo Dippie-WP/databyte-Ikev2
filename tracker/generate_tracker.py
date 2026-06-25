@@ -279,6 +279,11 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 history = [
+    # 2026-06-25 — modal background invisible (--vp-s1 missing)
+    ("2026-06-25 09:23", "Modal background invisible — root cause: --vp-s1 CSS variable never defined",
+     "Misha",
+     "Zun reported modal background 'transparent'. Caught it the second time around (he'd already caught the style: keys bug 30 min before). Verified via puppeteer getComputedStyle: cardBgColor=rgba(0,0,0,0) (was transparent, fell back to initial value because var(--vp-s1) was undefined). Root cause: --vp-s1 referenced in 5 places (.vp-modal, .vp-toolbar, .vp-bulk-bar, line 531, line 652) but never defined in either :root or [light-theme] blocks. Fix: define --vp-s1 in both theme blocks aliased to --vp-surface. Commits: 93c7557 (CSS), 4913b7f (deploy script STEP 8 now greps app.css too + tracks CSS SHA), 57368b8 (grep -- separator + URL double-slash fix). Deploy script upgraded to: (a) capture CSS SHA in STEP 6, (b) verify CSS SHA in STEP 6, (c) grep versioned app.css URL in STEP 8, (d) record CSS SHA in .last_deployed. Live verified: modal card now has solid background rgb(22,27,34), 552px tall, inputs visible. Puppeteer screenshot saved at /tmp/modal-after-fix.png.",
+     "🔴 High", "Lesson: any deploy verification that only checks Python+JS but not CSS silently misses CSS-only fixes. Always grep ALL deployed assets for the feature marker."),
     # 2026-06-25 — speed-plan deploy regression caught by Zun
     ("2026-06-25 08:30", "BUGFIX — strict-CSP style: keys broke customer form modal (introduced by speed-plan)",
      "Misha",
