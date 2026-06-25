@@ -258,6 +258,23 @@ else
 fi
 
 echo ""
+echo "=== STEP 8.5: customer-facing flow smoke test ==="
+echo "(this is the audit — it actually runs the command the customer would paste)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../.." && pwd)"
+TEST_SCRIPT="${SCRIPT_DIR}/tools/test-customer-facing-commands.sh"
+if [[ -x "$TEST_SCRIPT" ]]; then
+    if "$TEST_SCRIPT"; then
+        echo "  customer-facing flow ✓"
+    else
+        echo "  customer-facing flow FAILED — customer would not be able to use this"
+        echo "  see output above for what broke"
+        if [[ $DRY_RUN -eq 0 ]]; then exit 6; fi
+    fi
+else
+    echo "  test script not found at $TEST_SCRIPT (skipping)"
+fi
+
+echo ""
 if [[ $DRY_RUN -eq 1 ]]; then
     echo "=== STEP 8: SKIPPED in dry-run (.last_deployed would be written on real deploy) ==="
 else
