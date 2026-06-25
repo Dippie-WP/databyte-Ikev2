@@ -1,0 +1,22 @@
+# Last successful deploy of vpn-portal to vpn-prod-01
+# This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
+
+deployed_at_utc=2026-06-25T08:10:21Z
+deployed_by=root
+git_head=cb882a0f6dc99b42a6cf63a7aa7ab1e86797e267
+git_head_short=cb882a0
+feature_marker=Asymmetric — 40 Mbps
+cache_bust_version=cb882a0
+
+source_sha256:
+  app.py=713ee7117d064421948e04f06d7e80a27ac937a50db30c21cda00a5ff1323f03
+  app.js=ec03a091f3d43446b309ae608482704aa8d7abb53fe00d2f5eae5bf491cce551
+  index.html=64a446536262697945460d0067154da097cedfc1166d938753a77c1e32a2e4fc
+
+deployed_sha256:
+  app.py=713ee7117d064421948e04f06d7e80a27ac937a50db30c21cda00a5ff1323f03
+  app.js=ec03a091f3d43446b309ae608482704aa8d7abb53fe00d2f5eae5bf491cce551
+  index.html=18fe5097e5933d32c63b5838810f4fa1d8d03fc0fed6ceea46854b92faf3331b
+
+health_url=https://vpn-portal.databyte.co.za/api/health
+public_url=https://vpn-portal.databyte.co.za/
