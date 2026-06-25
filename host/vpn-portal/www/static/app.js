@@ -1816,6 +1816,17 @@
                   tier_name: $ti.value,
                   notes: $nt.value.trim() || null,
                 };
+                // v1.6.5 — defense in depth: backend (db_query) now converts
+                // sqlite3 -json's "None" string to real null, but if a stale
+                // browser cache still has the old API shape (or if any other
+                // field ever gets the literal string "None" pre-filled), the
+                // email regex validation would 400. Strip "None"/"null"/
+                // whitespace-only strings before sending.
+                for (const k of ['telegram_username', 'email', 'billing_id', 'notes', 'display_name']) {
+                  if (body[k] && (body[k].toLowerCase() === 'none' || body[k].toLowerCase() === 'null')) {
+                    body[k] = null;
+                  }
+                }
                 if (body.tier_name === 'custom') {
                   const mb = parseInt($cm.value || '0', 10);
                   if (mb < 1) { toast('Custom cap must be ≥ 1 MiB', 'err'); return; }
