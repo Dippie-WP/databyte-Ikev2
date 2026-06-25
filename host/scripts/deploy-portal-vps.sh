@@ -37,13 +37,27 @@ SMOKE_URL="https://vpn-portal.databyte.co.za/api/health"
 
 FEATURE_MARKER="${1:-}"
 
-if [[ -z "$FEATURE_MARKER" ]]; then
+DRY_RUN=0
+for arg in "$@"; do
+    if [[ "$arg" == "--dry-run" ]]; then
+        DRY_RUN=1
+    fi
+done
+
+if [[ -z "$FEATURE_MARKER" || "$FEATURE_MARKER" == "--dry-run" ]]; then
     echo "FAIL: feature marker required"
-    echo "Usage: $0 \"<unique substring of new feature visible in HTML>\""
+    echo "Usage: $0 \"<unique substring of new feature visible in HTML>\" [--dry-run]"
     exit 2
 fi
 
 cd "$REPO_ROOT"
+
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║ DRY RUN — no changes will be made to ${VPS_HOST}"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo ""
+fi
 
 echo "=== STEP 1: pre-flight ==="
 if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
@@ -71,33 +85,53 @@ ssh "${VPS_HOST}" "test -d ${VPS_PORTAL_DIR}" || {
     echo "FAIL: ${VPS_PORTAL_DIR} does not exist on ${VPS_HOST}"
     exit 3
 }
-rsync -av --delete \
-    --exclude '__pycache__' \
-    --exclude '.venv' \
-    --exclude '*.bak*' \
-    --exclude '.last_deployed' \
+RSYNC_OPTS=(-av --delete
+    --exclude '__pycache__'
+    --exclude '.venv'
+    --exclude '*.bak*'
+    --exclude '.last_deployed'
+)
+if [[ $DRY_RUN -eq 1 ]]; then
+    RSYNC_OPTS+=(--dry-run --itemize-changes)
+fi
+rsync "${RSYNC_OPTS[@]}" \
     "${SOURCE_DIR}/" \
-    "${VPS_HOST}:${VPS_PORTAL_DIR}/" 2>&1 | tail -5
+    "${VPS_HOST}:${VPS_PORTAL_DIR}/" 2>&1 | tail -15
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "  [DRY-RUN] rsync above shows what WOULD change. Nothing was copied."
+fi
 
 echo ""
 echo "=== STEP 4: restart vpn-portal.service on ${VPS_HOST} ==="
-ssh "${VPS_HOST}" 'sudo systemctl restart vpn-portal.service'
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "  [DRY-RUN] WOULD RUN: ssh ${VPS_HOST} 'sudo systemctl restart vpn-portal.service'"
+    echo "  [DRY-RUN] showing CURRENT state instead:"
+    ssh "${VPS_HOST}" 'sudo systemctl is-active vpn-portal.service 2>&1; sudo systemctl show vpn-portal.service --property=ActiveEnterTimestamp,MainPID 2>&1 | head -3'
+else
+    ssh "${VPS_HOST}" 'sudo systemctl restart vpn-portal.service'
+fi
 
 echo ""
 echo "=== STEP 5: wait for /api/health 200 ==="
-for i in 1 2 3 4 5 6 7 8 9 10; do
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "  [DRY-RUN] WOULD poll ${SMOKE_URL} until 200; showing current state:"
     HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${SMOKE_URL}" --max-time 5 || echo 000)"
-    if [[ "$HTTP_CODE" == "200" ]]; then
-        echo "  ${SMOKE_URL} → ${HTTP_CODE} ✓ (try ${i})"
-        break
-    fi
-    echo "  ${SMOKE_URL} → ${HTTP_CODE} (try ${i}/10, retrying)"
-    sleep 2
-    if [[ "$i" == "10" ]]; then
-        echo "FAIL: /api/health never returned 200"
-        exit 4
-    fi
-done
+    echo "  current: ${SMOKE_URL} → ${HTTP_CODE}"
+else
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' "${SMOKE_URL}" --max-time 5 || echo 000)"
+        if [[ "$HTTP_CODE" == "200" ]]; then
+            echo "  ${SMOKE_URL} → ${HTTP_CODE} ✓ (try ${i})"
+            break
+        fi
+        echo "  ${SMOKE_URL} → ${HTTP_CODE} (try ${i}/10, retrying)"
+        sleep 2
+        if [[ "$i" == "10" ]]; then
+            echo "FAIL: /api/health never returned 200"
+            exit 4
+        fi
+    done
+fi
 
 echo ""
 echo "=== STEP 6: verify deployed SHAs match source ==="
@@ -110,15 +144,18 @@ echo "  deployed index.html:  ${DEPLOYED_HTML_SHA}"
 
 if [[ "$DEPLOYED_PY_SHA" != "$SOURCE_PY_SHA" ]]; then
     echo "FAIL: deployed app.py SHA != source app.py SHA"
-    exit 5
+    if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
+    MISMATCH=1
 fi
 if [[ "$DEPLOYED_JS_SHA" != "$SOURCE_JS_SHA" ]]; then
     echo "FAIL: deployed app.js SHA != source app.js SHA"
-    exit 5
+    if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
+    MISMATCH=1
 fi
 if [[ "$DEPLOYED_HTML_SHA" != "$SOURCE_HTML_SHA" ]]; then
     echo "FAIL: deployed index.html SHA != source index.html SHA"
-    exit 5
+    if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
+    MISMATCH=1
 fi
 echo "  all SHAs match ✓"
 
@@ -131,15 +168,19 @@ if [[ "$MATCH_COUNT" -lt 1 ]]; then
     echo "FAIL: feature marker not found in live HTML"
     echo "Either: (a) feature not deployed, (b) marker string wrong, (c) page cached"
     echo "Try: curl -sk '${PUBLIC_HTML_URL}' | head -50"
-    exit 6
+    if [[ $DRY_RUN -eq 0 ]]; then exit 6; fi
 fi
 echo "  feature marker found ✓"
+FEATURE_MATCH="${MATCH_COUNT}"
 
 echo ""
-echo "=== STEP 8: write .last_deployed ==="
-DEPLOY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-DEPLOY_USER="$(whoami)"
-cat > "${STATE_FILE}" <<EOF
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "=== STEP 8: SKIPPED in dry-run (.last_deployed would be written on real deploy) ==="
+else
+    echo "=== STEP 8: write .last_deployed ==="
+    DEPLOY_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    DEPLOY_USER="$(whoami)"
+    cat > "${STATE_FILE}" <<EOF
 # Last successful deploy of vpn-portal to ${VPS_HOST}
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
@@ -162,12 +203,31 @@ deployed_sha256:
 health_url=${SMOKE_URL}
 public_url=${PUBLIC_HTML_URL}
 EOF
-# Also rsync the state file to VPS so we can check from there too
-rsync "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" >/dev/null
-echo "  wrote ${STATE_FILE} ✓"
-echo "  wrote ${VPS_PORTAL_DIR}/.last_deployed on VPS ✓"
+    rsync "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" >/dev/null
+    echo "  wrote ${STATE_FILE} ✓"
+    echo "  wrote ${VPS_PORTAL_DIR}/.last_deployed on VPS ✓"
+fi
 
 echo ""
+if [[ $DRY_RUN -eq 1 ]]; then
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║ DRY-RUN COMPLETE — no changes were made"
+    echo "║"
+    echo "║ Verdict:"
+    if [[ $MISMATCH -eq 0 && "$FEATURE_MATCH" -ge 1 ]]; then
+        echo "║   ✓ Would have SUCCEEDED — feature already live"
+    elif [[ $MISMATCH -gt 0 ]]; then
+        echo "║   ✗ Would have FAILED at STEP 6 — source ≠ deployed"
+    elif [[ "$FEATURE_MATCH" -lt 1 ]]; then
+        echo "║   ✗ Would have FAILED at STEP 7 — feature marker not in live HTML"
+    fi
+    echo "║"
+    echo "║ To actually deploy, run WITHOUT --dry-run:"
+    echo "║   $0 \"${FEATURE_MARKER}\""
+    echo "╚════════════════════════════════════════════════════════════╝"
+    exit 0
+fi
+
 echo "═══════════════════════════════════════════════════════"
 echo " DEPLOY SUCCESS — feature '${FEATURE_MARKER}' is LIVE"
 echo " ${DEPLOY_TS} | ${SOURCE_HEAD:0:12}"
