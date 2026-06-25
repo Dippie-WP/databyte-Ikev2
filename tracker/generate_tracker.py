@@ -118,6 +118,10 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-25 18:50", "Portal v1.6.3 — dashboard auto-refresh (30s)",
+     "Dashboard tab loaded once on tab-open and never polled. Operators saw frozen view while customers actively burned bandwidth. Hidden for weeks behind v1.6.2 JS SyntaxError.",
+     "host/vpn-portal/www/static/app.js (commit 37d3b14) — startDashboardAutoRefresh/stopDashboardAutoRefresh mirrors startActiveSessAutoRefresh pattern, 30s interval",
+     "🟢 Low", "Deployed via deploy-portal-vps.sh (SHA match). API verified zade +42.9 KB in 35s. Headless render confirms vp-login-wrap in DOM.", "✅"),
     ("2026-06-22 13:57", "VPS bootstrap (vpn-prod-01)",
      "Cut over to Xneelo VPS — Debian 13, strongSwan 6.0.7, charon, portal, bandwidth-monitor, certbot staged",
      "ops/bootstrap-xneelo.sh + 17-step manual", "🟠 High", "13/13 smoke green + 6/6 charon SA test", "✅"),
