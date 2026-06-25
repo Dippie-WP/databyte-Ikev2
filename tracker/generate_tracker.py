@@ -157,6 +157,9 @@ changes = [
     ("2026-06-25 08:35", "ipBan deployed to VPS (vpn-prod-01)",
      "LXC 903 has ipBan but VPS exposed to internet with no SSH/portal brute-force protection. fail2ban covers portal only. ipBan = defense-in-depth for SSH + portal + charon + future services. Whitelist: 154.65.110.44 (server) + 102.182.117.43 (Zun home) + LAN ranges + homelab infra.",
      "/opt/ipban/{DigitalRuby.IPBan,ipban.config,DigitalRuby.IPBanCore.xml}, /usr/local/bin/ipban-on-{ban,unban}.sh, /etc/systemd/system/ipban.service, /etc/iptables/{rules.v4,ipsets}", "🟠 High", "E2E test: 5 fake SSH fails from 8.8.8.8 → ipBan triggered → OnBan script ran → ipset populated → iptables DROP rule at position 1 active", "✅"),
+    ("2026-06-25 15:58", "Sessions tab filter to online-only (v1.6.2)",
+     "Dashboard showed '2 active leases' when nobody was connected — charon keeps offline leases sticky for reconnection stickiness, but the dashboard's job is 'who is connected right now'. Filter S.leases to online === true in renderSessions (table + count) + Pools card counter (both renderDashboard and renderSessions). Cache-bust app.js?v=1.5.1 → v=1cc2855.",
+     "commit 1cc2855 (app.js + index.html), b4e6d68 (.last_deployed)", "🟡 Med", "Live audit: API still returns 3 leases (1 online + 2 offline); deployed app.js?v=1cc2855 contains onlineLeases.filter(l => l.online); 13/13 customer-facing smoke PASS; L1 pytest 7/7 PASS for lease/sa_parser tests", "✅"),
 ]
 for r, row in enumerate(changes, start=1):
     for c, v in enumerate(row):
