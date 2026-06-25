@@ -875,3 +875,18 @@ tr:last-child td { border-bottom: none; }
   .vp-os-field  { grid-template-columns: 1fr; }
   .vp-cs-grid   { grid-template-columns: 1fr; }
 }
+
+/* v1.5.0+ — utility classes for previously-inlined styles (CSP-safe) */
+.vp-flex-1     { flex: 1; }
+.vp-mr-6       { margin-right: 6px; }
+.vp-mt-12      { margin-top: 12px; }
+.vp-mt-16      { margin-top: 16px; }
+.vp-fs-12      { font-size: 12px; }
+.vp-fg-muted   { color: #888; }
+.vp-installer-cmd {
+  width: 100%;
+  font-family: monospace;
+  font-size: 12px;
+  padding: 8px;
+  box-sizing: border-box;
+}
