@@ -3,3 +3,8 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 argon2-cffi==23.1.0
 gunicorn==23.0.0
+
+# Test deps (Layer 1 — pytest integration)
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2
