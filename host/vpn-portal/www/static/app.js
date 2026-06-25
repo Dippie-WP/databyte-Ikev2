@@ -1876,7 +1876,7 @@
             el('label', { cls: 'vp-label' }, 'Client name (slug)'),
             el('input', { id: 'vp-nc-name', cls: 'vp-inp', type: 'text', required: true,
                            placeholder: 'acme-corp', maxlength: 32,
-                           pattern: '[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}',
+                           
                            'aria-describedby': 'vp-nc-name-hint' }),
             el('div', { cls: 'vp-hint', id: 'vp-nc-name-hint' },
               'URL-safe: letters, digits, dash, underscore. 1-32 chars.'),
@@ -1948,7 +1948,7 @@
             el('label', { cls: 'vp-label' }, 'Device name'),
             el('input', { id: 'vp-nc-device', cls: 'vp-inp', type: 'text', required: true,
                            placeholder: 'laptop', maxlength: 32,
-                           pattern: '[a-zA-Z0-9][a-zA-Z0-9-]{0,31}',
+                           
                            'aria-describedby': 'vp-nc-device-hint vp-nc-device-warn',
                            value: 'laptop' }),
             el('div', { cls: 'vp-hint', id: 'vp-nc-device-hint' },
@@ -2104,7 +2104,19 @@
       const r = await post('/api/customers', body);
       // Refresh customers list in the background
       try { loadCustomers().then(render).catch(()=>{}); } catch {}
-      renderOneshotPanel(r);
+      // v1.6.0 — For Windows devices, also auto-generate the installer
+      // one-liner so the operator can immediately send it to the customer.
+      // Token is one-shot, 7-day expiry, burned on first customer fetch.
+      let installerData = null;
+      if (body.device_type === 'Windows') {
+        try {
+          installerData = await post(`/api/customers/${r.customer.id}/installer-token`);
+        } catch (e) {
+          // Non-fatal — Windows card will fall back to manual steps.
+          console.warn('installer-token failed:', e.message || e);
+        }
+      }
+      renderOneshotPanel(r, installerData);
     } catch (e) {
       errEl.textContent = e.message || String(e);
       errEl.classList.remove('vp-hidden');
@@ -2114,7 +2126,10 @@
   }
 
   // ─── One-shot password panel (shown after successful create) ─────────────
-  function renderOneshotPanel(r) {
+  // v1.6.0 — installerData (optional): PowerShell one-liner data for Windows.
+  // When the customer was just created with device_type=Windows, we auto-generate
+  // the installer token so the operator can copy-paste-send immediately.
+  function renderOneshotPanel(r, installerData) {
     const c = r.customer, d = r.device;
     const eapId = r.eap_identity, pw = r.password;
     const server    = 'myvpn.databyte.co.za';
@@ -2175,19 +2190,57 @@
       ),
     );
 
+    // v1.6.0 — Windows: prefer PowerShell installer one-liner over manual steps.
+    // The one-liner downloads the CA cert + EAP profile + connects. Falls back
+    // to manual steps if installer-token generation failed.
     const Windows = setupCard('Windows',
-      el('ol', { cls: 'vp-setup-steps' },
-        el('li', {}, 'Settings → Network & internet → VPN → Add a VPN connection'),
-        el('li', {}, 'VPN provider: Windows (built-in)'),
-        el('li', {}, 'Connection name: any (e.g. "databyte VPN")'),
-        el('li', {}, 'Server name or address: ', el('span', { cls: 'vp-mono' }, server)),
-        el('li', {}, 'VPN type: IKEv2'),
-        el('li', {}, 'Type of sign-in info: User name and password'),
-        el('li', {}, 'User name: ', el('span', { cls: 'vp-mono' }, eapId)),
-        el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
-        el('li', {}, 'Save → connect from network flyout'),
-        el('li', {}, 'If asked for "Remember my sign-in info": NO'),
-      ),
+      installerData && installerData.powershell_cmd
+        ? el('div', {},
+            el('div', { cls: 'vp-setup-steps' },
+              el('div', {},
+                el('strong', {}, 'Send this one-liner to the customer. They run it in '),
+                el('code', {}, 'Windows PowerShell (Admin)'),
+                el('strong', {}, '. It downloads the CA cert, EAP profile, and connects — no manual steps.'),
+              ),
+              el('div', { cls: 'vp-row vp-mt-12' },
+                el('button', {
+                  type: 'button',
+                  cls: 'vp-btn vp-btn-primary',
+                  onclick: () => {
+                    navigator.clipboard.writeText(installerData.powershell_cmd).then(() => {
+                      showBanner('Copied PowerShell one-liner', 'ok');
+                    }).catch(() => { showBanner('Copy failed', 'err'); });
+                  },
+                }, '⧉ Copy PowerShell one-liner'),
+                el('button', {
+                  type: 'button',
+                  cls: 'vp-btn vp-btn-ghost',
+                  onclick: () => {
+                    window.open(installerData.installer_url, '_blank').close();
+                    showBanner('⚠ Test fetch consumed the token', 'err');
+                  },
+                  title: 'WARNING: this consumes the token!',
+                }, '⚠ Test fetch (burns token)'),
+              ),
+              el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+                'Token: ', el('code', {}, installerData.token_prefix),
+                ' — expires in ', String(installerData.expires_in_days), ' day(s). ',
+                'Single-use: burns when the customer runs the one-liner.',
+              ),
+            ),
+          )
+        : el('ol', { cls: 'vp-setup-steps' },
+            el('li', {}, 'Settings → Network & internet → VPN → Add a VPN connection'),
+            el('li', {}, 'VPN provider: Windows (built-in)'),
+            el('li', {}, 'Connection name: any (e.g. "databyte VPN")'),
+            el('li', {}, 'Server name or address: ', el('span', { cls: 'vp-mono' }, server)),
+            el('li', {}, 'VPN type: IKEv2'),
+            el('li', {}, 'Type of sign-in info: User name and password'),
+            el('li', {}, 'User name: ', el('span', { cls: 'vp-mono' }, eapId)),
+            el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
+            el('li', {}, 'Save → connect from network flyout'),
+            el('li', {}, 'If asked for "Remember my sign-in info": NO'),
+          )
     );
 
     const macOS = setupCard('macOS',
