@@ -99,3 +99,40 @@ jobs:
           dockerfile: docker/Dockerfile
           config: .hadolint.yaml
           failure-threshold: error
+
+  # ---------- Layer 1: Portal API integration tests (pytest) ----------
+  # Catch portal regressions (e.g. Lesson #193: lookup_user_and_customer SQL bug
+  # existed for 3 days before being caught). Runs offline against a tmp SQLite
+  # DB with mocked ssh_903 — no live VPN gateway needed.
+  # Added: 2026-06-24 (vpn-portal v1.4.x)
+  portal-tests:
+    name: Portal API integration tests (pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-pytest-${{ hashFiles('host/vpn-portal/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-pytest-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-asyncio httpx fastapi[all] argon2-cffi pydantic
+
+      - name: Run portal API tests
+        run: |
+          cd ${{ github.workspace }}
+          python -m pytest tests/ -v --tb=short --color=yes \
+            -p no:cacheprovider
