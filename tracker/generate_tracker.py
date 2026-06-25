@@ -154,6 +154,9 @@ changes = [
     ("2026-06-24 22:08", "Rotated zun-windows-laptop EAP credentials + ops script",
      "Silent username desync: Windows profile still sending 'test-win-5g-laptop' but server only knows 'zun-windows-laptop'. Auth failing with 'no EAP key found'. Rotated password + shipped ops/rotate-vpn-credentials.py for future rotations.",
      "ops/rotate-vpn-credentials.py (branch ops/rotate-vpn-credentials, force-pushed 2e2f763)", "🟠 High", "charon reload green, new key loaded", "✅"),
+    ("2026-06-25 08:35", "ipBan deployed to VPS (vpn-prod-01)",
+     "LXC 903 has ipBan but VPS exposed to internet with no SSH/portal brute-force protection. fail2ban covers portal only. ipBan = defense-in-depth for SSH + portal + charon + future services. Whitelist: 154.65.110.44 (server) + 102.182.117.43 (Zun home) + LAN ranges + homelab infra.",
+     "/opt/ipban/{DigitalRuby.IPBan,ipban.config,DigitalRuby.IPBanCore.xml}, /usr/local/bin/ipban-on-{ban,unban}.sh, /etc/systemd/system/ipban.service, /etc/iptables/{rules.v4,ipsets}", "🟠 High", "E2E test: 5 fake SSH fails from 8.8.8.8 → ipBan triggered → OnBan script ran → ipset populated → iptables DROP rule at position 1 active", "✅"),
 ]
 for r, row in enumerate(changes, start=1):
     for c, v in enumerate(row):
@@ -241,7 +244,7 @@ tofix = [
     ("CP7: iptables-nft consolidation (empty + policy ACCEPT → migrate)",                            "🟡 Med",  "1h",  "1F (CP7)",                           ""),
     # Other medium
     ("Per-tier bandwidth limits (replace flat 20/20)",                                               "🟡 Med",  "1h",  "1D post-cutover",                    "tier-based columns + JOIN in bandwidth-monitor"),
-    ("ipBan service to VPS (currently only on LXC 903)",                                            "🟡 Med",  "30m", "1D post-cutover",                    ""),
+    ("ipBan service to VPS (currently only on LXC 903) — DONE 2026-06-25 06:35",                   "✅ Done", "30m", "1D post-cutover",                    "Binary copied from 903, rsyslog installed (Debian 13 needs it), UseDefaultBannedIPAddressHandler=false (broken default), custom OnBan/OnUnban scripts handle iptables, persisted in rules.v4 + ipsets. End-to-end test passed (8.8.8.8 fake SSH fails → banned). See Changes sheet 2026-06-25 08:35."),
     # Low / polish
     ("systemd RuntimeDirectoryMode duplicate key cleanup",                                           "🟢 Low",  "5m",  "polish",                             ""),
     ("CSP report-uri endpoint",                                                                      "🟢 Low",  "15m", "polish",                             ""),
