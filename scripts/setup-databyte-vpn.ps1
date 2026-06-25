@@ -63,8 +63,10 @@ $PortalBase     = "https://vpn-portal.databyte.co.za"
 # ============================================================================
 # STEP 0 - Fetch credentials via installer token (operator-issued)
 # ============================================================================
-# If the script was downloaded with ?slug=X&token=Y (operator-generated
-# installer link), fetch real customer creds from the portal.
+# If the script was downloaded with ?t=BASE64 (operator-generated installer
+# link), fetch real customer creds from the portal.
+# The BASE64 packs slug:token so the URL has no `&` (PowerShell 5.1 would
+# parse `&` as background-job operator and reject the whole command).
 # If no token, fall back to the hardcoded test customer.
 $Username = $null
 $Password = $null
@@ -74,9 +76,21 @@ try {
     if ($args.Count -ge 2) {
         $InstallerSlug  = $args[0]
         $InstallerToken = $args[1]
-    } elseif ($MyInvocation.MyCommand.Definition -match '\?slug=([^&]+)&token=([^&\s"]+)') {
-        $InstallerSlug  = $Matches[1]
-        $InstallerToken = $Matches[2]
+    } elseif ($MyInvocation.MyCommand.Definition -match '\?t=([A-Za-z0-9_\-]+)') {
+        # v2.5.1 (2026-06-25) — decode ?t=BASE64(slug:token)
+        try {
+            $packed = $Matches[1]
+            # Restore URL-safe base64 padding before decode
+            $padded = $packed + '=' * (4 - ($packed.Length % 4))
+            $decoded = [System.Text.Encoding]::UTF8.GetString(
+                [System.Convert]::FromBase64String($padded.Replace('-','+').Replace('_','/'))
+            )
+            $parts = $decoded -split ':', 2
+            if ($parts.Count -eq 2) {
+                $InstallerSlug  = $parts[0]
+                $InstallerToken = $parts[1]
+            }
+        } catch {}
     }
 } catch {}
 
