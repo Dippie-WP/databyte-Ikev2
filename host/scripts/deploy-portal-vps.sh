@@ -80,25 +80,57 @@ echo "  app.js:      ${SOURCE_JS_SHA}"
 echo "  index.html:  ${SOURCE_HTML_SHA}"
 
 echo ""
-echo "=== STEP 3: rsync to ${VPS_HOST} ==="
+echo "=== STEP 3: sync to ${VPS_HOST} (rsync or tar+ssh) ==="
 ssh "${VPS_HOST}" "test -d ${VPS_PORTAL_DIR}" || {
     echo "FAIL: ${VPS_PORTAL_DIR} does not exist on ${VPS_HOST}"
     exit 3
 }
-RSYNC_OPTS=(-av --delete
-    --exclude '__pycache__'
-    --exclude '.venv'
-    --exclude '*.bak*'
-    --exclude '.last_deployed'
-)
+
+# Use rsync if available on both ends; else tar+ssh pipeline.
+USE_RSYNC=0
 if [[ $DRY_RUN -eq 1 ]]; then
-    RSYNC_OPTS+=(--dry-run --itemize-changes)
-fi
-rsync "${RSYNC_OPTS[@]}" \
-    "${SOURCE_DIR}/" \
-    "${VPS_HOST}:${VPS_PORTAL_DIR}/" 2>&1 | tail -15
-if [[ $DRY_RUN -eq 1 ]]; then
-    echo "  [DRY-RUN] rsync above shows what WOULD change. Nothing was copied."
+    # In dry-run, just show what files WOULD change by hashing each.
+    echo "  [DRY-RUN] would sync these files (hashing each, comparing to deployed):"
+    SOURCE_FILE_COUNT="$(find "${SOURCE_DIR}" -type f \
+        ! -path '*/__pycache__/*' \
+        ! -path '*/.venv/*' \
+        ! -name '*.bak*' \
+        ! -name '.last_deployed' | wc -l)"
+    echo "  source files to sync: ${SOURCE_FILE_COUNT}"
+    # Sample diff for the 3 key files
+    for f in app.py www/static/app.js www/index.html; do
+        src_sha="$(sha256sum "${SOURCE_DIR}/${f}" | awk '{print $1}')"
+        dep_sha="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/${f}" 2>/dev/null | awk '{print $1}')"
+        if [[ "$src_sha" == "$dep_sha" ]]; then
+            echo "    ✓ ${f}: would be SKIPPED (sha256 match)"
+        else
+            echo "    ✗ ${f}: would be UPDATED (src=${src_sha:0:12} deployed=${dep_sha:0:12})"
+        fi
+    done
+    echo "  [DRY-RUN] no actual file transfer happened"
+elif command -v rsync >/dev/null && ssh "${VPS_HOST}" 'command -v rsync' >/dev/null 2>&1; then
+    USE_RSYNC=1
+    rsync -av --delete \
+        --exclude '__pycache__' \
+        --exclude '.venv' \
+        --exclude '*.bak*' \
+        --exclude '.last_deployed' \
+        "${SOURCE_DIR}/" \
+        "${VPS_HOST}:${VPS_PORTAL_DIR}/" 2>&1 | tail -5
+else
+    # tar+ssh fallback. No --delete equivalent; we'll first delete the dest contents
+    # (preserving .last_deployed), then extract. Slower but works without rsync.
+    echo "  [info] rsync not available; using tar+ssh fallback"
+    ssh "${VPS_HOST}" "find ${VPS_PORTAL_DIR} -mindepth 1 \
+        ! -name '.last_deployed' \
+        ! -name '*.bak*' \
+        -exec rm -rf {} +" 2>&1 | tail -3
+    tar --exclude='__pycache__' \
+        --exclude='.venv' \
+        --exclude='*.bak*' \
+        --exclude='.last_deployed' \
+        -czf - -C "${SOURCE_DIR}" . | \
+        ssh "${VPS_HOST}" "tar -xzf - -C ${VPS_PORTAL_DIR}/" 2>&1 | tail -5
 fi
 
 echo ""
@@ -203,7 +235,8 @@ deployed_sha256:
 health_url=${SMOKE_URL}
 public_url=${PUBLIC_HTML_URL}
 EOF
-    rsync "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" >/dev/null
+    rsync "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>/dev/null || \
+        scp "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>&1 | tail -2
     echo "  wrote ${STATE_FILE} ✓"
     echo "  wrote ${VPS_PORTAL_DIR}/.last_deployed on VPS ✓"
 fi
