@@ -100,13 +100,16 @@ print("rows_updated:", c.rowcount)
 
 
 def update_secrets_file(user_name: str, secret_b64: str, dry_run: bool) -> None:
-    """Edit /etc/swanctl/conf.d/rw-eap.conf in place — replace secret line."""
+    """Edit /opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf in place
+    (this is the HOST path that bind-mounts into the strongswan container at
+    /etc/swanctl/conf.d/rw-eap.conf). Replace the secret line inside the
+    eap-{user_name} block."""
     if dry_run:
         print(f"[DRY-RUN] rw-eap.conf: eap-{user_name} secret = \"{secret_b64}\"")
         return
     script = f'''
 import sys
-path = "/etc/swanctl/conf.d/rw-eap.conf"
+path = "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf"
 with open(path) as f:
     lines = f.readlines()
 
