@@ -2,7 +2,9 @@
 """
 databyte VPN Portal — FastAPI backend (5C.1, MVP)
 
-Single-file app. Reads SQLite from LXC 903 via SSH. Wraps swanctl/ipBan/firewalld.
+Single-file app. Reads SQLite + charon state from the VPN gateway (VPS in prod
+via 127.0.0.1, LXC 903 lab via 192.168.10.98 — selected by VPN_HOST env var).
+Wraps swanctl/ipBan/firewalld.
 
 Endpoints:
   GET  /api/health                     public — service + DB + charon reach
@@ -215,68 +217,66 @@ def db_exec(sql: str) -> None:
 def leases_active() -> list:
     """Currently active virtual-IP leases with customer + device info.
 
-    Joins the strongSwan attr-sql pool with the 5B customers/devices layer.
-    Note: identities.data is a BLOB; we CAST to TEXT to make the join work.
-    Includes per-customer usage data so the Sessions tab can show how much
-    each active session has used vs its tier limit.
+    Source: charon's live pool (swanctl --list-pools --leases). Replaces the
+    attr-sql `addresses` table which is empty (charon uses an inline pool
+    defined in swanctl.conf, not the DB-managed pool the original design
+    assumed — see docs/ARCHITECTURE.md §"Sticky VIP via attr-sql").
 
-    Also enriches each lease with live SA data from swanctl --list-sas:
-    public_ip, remote_port, ike_proposal, device_type (inferred from algo).
-    Device hostname + OS version come from the devices table if set.
+    Enrichment layers:
+      1. DB devices/customers/tiers — joined on device_name = pool-lease identity
+      2. SA parser (swanctl --list-sas) — adds public_ip, remote_port, algo
+
+    Output shape is identical to the old addresses-table version (back-compat
+    for the UI in app.js + the customer_active_sessions endpoint).
     """
-    sql = """
-      SELECT
-        hex(a.address)        AS hex_addr,
-        i.id                 AS identity_id,
-        CAST(i.data AS TEXT) AS identity_name,
-        d.id                 AS device_id,
-        d.device_name        AS device_name,
-        d.device_type        AS device_type_meta,
-        d.os_version         AS os_version_meta,
-        d.hostname           AS hostname_meta,
-        c.id                 AS customer_id,
-        c.name               AS customer_name,
-        c.is_operator        AS is_operator,
-        c.data_used_bytes    AS data_used_bytes,
-        c.data_limit_bytes   AS data_limit_bytes,
-        c.over_quota         AS over_quota,
-        c.tier_id            AS tier_id,
-        t.name               AS tier_name,
-        a.acquired           AS acquired_at
-      FROM addresses a
-      JOIN identities i ON i.id = a.identity
-      LEFT JOIN devices   d ON d.device_name = CAST(i.data AS TEXT)
+    pool_leases = swanctl_list_pool_leases()
+    if not pool_leases:
+        return []
+
+    # Fetch active devices (small N, ~hundreds max) and index by name.
+    device_sql = """
+      SELECT d.id              AS device_id,
+             d.device_name     AS device_name,
+             d.device_type     AS device_type_meta,
+             d.os_version      AS os_version_meta,
+             d.hostname        AS hostname_meta,
+             d.last_seen_at    AS acquired_at,
+             c.id              AS customer_id,
+             c.name            AS customer_name,
+             c.is_operator     AS is_operator,
+             c.data_used_bytes AS data_used_bytes,
+             c.data_limit_bytes AS data_limit_bytes,
+             c.over_quota      AS over_quota,
+             c.tier_id         AS tier_id,
+             t.name            AS tier_name
+      FROM devices d
       LEFT JOIN customers c ON c.id = d.customer_id
       LEFT JOIN tiers     t ON t.id = c.tier_id
-      WHERE a.acquired > 0 AND a.released = 0
-      ORDER BY a.acquired DESC
+      WHERE d.is_active = 1
     """
     try:
-        rows = db_query(sql)
+        all_devices = db_query(device_sql)
     except HTTPException:
         return []
-    # Parse live SAs once — keyed by VIP
+    devices_by_name = {
+        d["device_name"]: d for d in all_devices if d.get("device_name")
+    }
+
+    # Parse live SAs once — keyed by VIP for enrichment.
     sas_by_vip = {}
     for sa in swanctl_parse_sas():
         if sa.get("vip"):
             sas_by_vip[sa["vip"]] = sa
 
     out = []
-    for r in rows:
-        hex_addr = r.get("hex_addr") or ""
-        # hex '0A630005' -> '10.99.0.5'
-        try:
-            ip = ".".join(str(int(hex_addr[i:i+2], 16)) for i in (0, 2, 4, 6))
-        except Exception:
-            ip = "?"
-        used   = r.get("data_used_bytes")  or 0
-        limit  = r.get("data_limit_bytes") or 0
-        pct    = (used / limit * 100) if limit else 0
+    for pl in pool_leases:
+        vip      = pl["vip"]
+        identity = pl["identity"]
+        r        = devices_by_name.get(identity, {})
+        sa       = sas_by_vip.get(vip, {})
 
-        sa = sas_by_vip.get(ip, {})
-        algo  = sa.get("algo")
-        algo_fp = sa.get("algo_fingerprint") or fingerprint_device(algo or "")
-        # Prefer manually-set device_type; fall back to inferred
+        algo     = sa.get("algo")
+        algo_fp  = sa.get("algo_fingerprint") or fingerprint_device(algo or "")
         manual_type = r.get("device_type_meta")
         if manual_type:
             device_type = {"label": manual_type, "confidence": 1.0, "source": "manual"}
@@ -285,32 +285,39 @@ def leases_active() -> list:
         else:
             device_type = {"label": None, "confidence": 0, "source": None}
 
+        used  = r.get("data_used_bytes")  or 0
+        limit = r.get("data_limit_bytes") or 0
+        pct   = (used / limit * 100) if limit else 0
+
         out.append({
-            "address":           ip,
-            "identity_id":       r.get("identity_id"),
-            "identity_name":     r.get("identity_name"),
-            "device_id":         r.get("device_id"),
-            "device_name":       r.get("device_name"),
-            "device_type":       device_type,
-            "os_version":        r.get("os_version_meta"),
-            "hostname":          r.get("hostname_meta"),
-            "customer_id":       r.get("customer_id"),
-            "customer_name":     r.get("customer_name"),
-            "is_operator":       bool(r.get("is_operator")),
-            "data_used_bytes":   used,
-            "data_limit_bytes":  limit,
-            "data_pct":          round(pct, 1),
-            "over_quota":        bool(r.get("over_quota")),
-            "tier_name":         r.get("tier_name"),
-            "acquired_at":       r.get("acquired_at"),
-            "public_ip":         sa.get("remote_ip"),
-            "remote_port":       sa.get("remote_port"),
-            "ike_proposal":      algo,
-            "sa_state":          sa.get("state"),
+            "address":             vip,
+            "identity_id":         None,  # was attr-sql identities.id; not used downstream
+            "identity_name":       identity,
+            "device_id":           r.get("device_id"),
+            "device_name":         r.get("device_name") or identity,
+            "device_type":         device_type,
+            "os_version":          r.get("os_version_meta"),
+            "hostname":            r.get("hostname_meta"),
+            "customer_id":         r.get("customer_id"),
+            "customer_name":       r.get("customer_name") or "(unknown identity)",
+            "is_operator":         bool(r.get("is_operator")),
+            "data_used_bytes":     used,
+            "data_limit_bytes":    limit,
+            "data_pct":            round(pct, 1),
+            "over_quota":          bool(r.get("over_quota")),
+            "tier_name":           r.get("tier_name"),
+            "acquired_at":         r.get("acquired_at"),
+            "public_ip":           sa.get("remote_ip"),
+            "remote_port":         sa.get("remote_port"),
+            "ike_proposal":        algo,
+            "sa_state":            sa.get("state"),
             "sa_established_secs": sa.get("established_secs"),
-            "sa_bytes_in":       sa.get("bytes_in"),
-            "sa_bytes_out":      sa.get("bytes_out"),
-            "sa_uniqueid":       sa.get("uniqueid"),
+            "sa_bytes_in":         sa.get("bytes_in"),
+            "sa_bytes_out":        sa.get("bytes_out"),
+            "sa_uniqueid":         sa.get("uniqueid"),
+            # v1.4.6 — live pool state (not in old addresses-table shape)
+            "online":              pl["online"],
+            "pool":                pl.get("pool"),
         })
     return out
 
@@ -360,8 +367,8 @@ def fingerprint_device(algo_str: str) -> dict:
 # swanctl --list-sas parser — extracts structured data for the UI.
 # Format (strongSwan 6.x):
 #   rw-eap: #22, ESTABLISHED, IKEv2, <spi_i>_i <spi_r>_r*
-#     local  'vpn.homelab.local' @ 192.168.10.98[4500]
-#     remote 'demo-phone' @ 105.174.188.166[51234] [10.99.0.5]
+#     local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]
+#     remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.2]
 #     AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
 #     established 614s ago, rekeying in 79344s, reauth in 78406s
 #     net: #3, reqid 1, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-256/HMAC_SHA2_256_128
@@ -369,7 +376,7 @@ def fingerprint_device(algo_str: str) -> dict:
 #       in  cbe261ee, 4199276 bytes, 52155 packets,     0s ago
 #       out 040b08d2, 128451591 bytes, 105627 packets,     0s ago
 #       local  0.0.0.0/0
-#       remote 10.99.0.5/32
+#       remote 10.99.0.2/32
 # SPIs end with _i / _r role markers; responder SPI also gets a trailing *
 _SA_HEADER_RE = re.compile(
     r"^(?P<conn>\S+):\s+#(?P<id>\d+),\s+(?P<state>\S+),\s+(?P<version>\S+),\s+"
@@ -380,7 +387,9 @@ _SA_LOCAL_RE  = re.compile(
     r"local\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
 )
 _SA_REMOTE_RE = re.compile(
-    r"remote\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
+    r"remote\s+'(?P<id>[^']*)'"
+    r"\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
+    r"(?:\s+EAP:\s+'(?P<eap_id>[^']*)')?"
     r"(?:\s+\[(?P<vip>\d+\.\d+\.\d+\.\d+)\])?"
 )
 _SA_ALGO_RE   = re.compile(r"^\s*([A-Z][A-Z0-9_/-]+(?:/[A-Z0-9_]+)+)\s*$")
@@ -391,18 +400,17 @@ _SA_INOUT_RE  = re.compile(
 )
 
 
-def swanctl_parse_sas() -> list:
-    """Parse swanctl --list-sas output into structured records keyed by VIP.
+def _parse_sas_text(raw: str) -> list:
+    """Pure parser for swanctl --list-sas output. Testable without SSH/charon.
 
     Returns list of dicts: {uniqueid, conn, state, version, local_id, local_ip,
-    local_port, remote_id, remote_ip, remote_port, vip, algo, algo_fingerprint,
-    established_secs, bytes_in, bytes_out, pkts_in, pkts_out}.
+    local_port, remote_id, eap_id, remote_ip, remote_port, vip, algo,
+    algo_fingerprint, established_secs, bytes_in, bytes_out, pkts_in, pkts_out}.
+
+    remote_id is set to the EAP identity (when present) so the UI shows the
+    username (saalieg-laptop) instead of the client's public IP. Falls back to
+    the IKE identity (ip-based) for non-EAP conns (rw-psk).
     """
-    raw = ""
-    try:
-        raw = swanctl_list_sas()
-    except Exception:
-        return []
     sas = []
     cur = None
     in_child = False
@@ -415,7 +423,8 @@ def swanctl_parse_sas() -> list:
                 "state":            m.group("state"),
                 "version":          m.group("version"),
                 "local_id":         None, "local_ip": None, "local_port": None,
-                "remote_id":        None, "remote_ip": None, "remote_port": None,
+                "remote_id":        None, "eap_id": None,
+                "remote_ip":        None, "remote_port": None,
                 "vip":              None,
                 "algo":             None, "algo_fingerprint": None,
                 "established_secs": None,
@@ -435,10 +444,15 @@ def swanctl_parse_sas() -> list:
         m = _SA_REMOTE_RE.search(line)
         if m:
             cur["remote_id"]   = m.group("id")
+            cur["eap_id"]      = m.group("eap_id")
             cur["remote_ip"]   = m.group("ip")
             cur["remote_port"] = int(m.group("port"))
             if m.group("vip"):
                 cur["vip"] = m.group("vip")
+            # Prefer EAP username as the displayed remote_id (matches the
+            # rw-eap.conf eap-X block and the customers.devices.device_name).
+            if cur["eap_id"]:
+                cur["remote_id"] = cur["eap_id"]
             continue
         # Algorithm line — bare token list, not preceded by 'in'/'out'/'local'/'remote'
         if not in_child:
@@ -467,6 +481,68 @@ def swanctl_parse_sas() -> list:
                 cur["bytes_out"] = int(m.group("bytes"))
                 cur["pkts_out"]  = int(m.group("pkts"))
     return sas
+
+
+def swanctl_parse_sas() -> list:
+    """Fetch swanctl --list-sas and parse it. Thin wrapper around _parse_sas_text."""
+    try:
+        return _parse_sas_text(swanctl_list_sas())
+    except Exception:
+        return []
+
+
+# swanctl --list-pools --leases parser — extract live pool state.
+# Format (strongSwan 6.x):
+#   rw-pool              10.99.0.1                           1 / 1 / 254
+#     10.99.0.1                      offline  'safwaan-laptop'
+#     10.99.0.2                      online   'saalieg-laptop'
+# The header line is the pool summary (name, base addr, used/total/size).
+# Indented (2+ spaces) lines are individual leases: VIP, status, identity.
+_POOL_LEASE_RE = re.compile(
+    r"^\s+(?P<vip>\d+\.\d+\.\d+\.\d+)\s+"
+    r"(?P<status>online|offline)\s+"
+    r"'(?P<identity>[^']*)'\s*$"
+)
+
+
+def _parse_pool_leases_text(raw: str) -> list:
+    """Pure parser for swanctl --list-pools --leases output. Returns list of
+    dicts: {pool, vip, status, identity, online}. Testable without SSH/charon.
+    """
+    leases = []
+    current_pool = None
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            # Header line: pool_name base_ip used/total/size
+            parts = line.split()
+            if parts:
+                current_pool = parts[0]
+            continue
+        m = _POOL_LEASE_RE.match(line)
+        if m:
+            leases.append({
+                "pool":     current_pool,
+                "vip":      m.group("vip"),
+                "status":   m.group("status"),
+                "identity": m.group("identity"),
+                "online":   m.group("status") == "online",
+            })
+    return leases
+
+
+def swanctl_list_pool_leases() -> list:
+    """Fetch live pool leases from charon. Returns [] on error (no leases)."""
+    try:
+        out = ssh_903([
+            "docker", "exec", "strongswan",
+            "swanctl", "--uri=tcp://127.0.0.1:4502",
+            "--list-pools", "--leases",
+        ])
+        return _parse_pool_leases_text(out)
+    except Exception:
+        return []
 
 
 def swanctl_list_pools() -> list:
