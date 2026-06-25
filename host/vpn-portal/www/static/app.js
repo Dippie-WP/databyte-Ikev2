@@ -1204,6 +1204,13 @@
     const live       = !!S._sessionsTimer;
     // "loading && !refreshing" = show skeleton only on first load
     const showSkeleton = loading && !refreshing;
+    // v1.6.2 — Filter to online-only. Charon keeps offline leases sticky
+    // for reconnection stickiness, but the dashboard's job is "who is
+    // connected right now". Total pool usage still visible in the Pools card.
+    // MUST be declared before the return el(...) call — declaring a `const`
+    // inside a function-argument list is a syntax error (was bug shipped in
+    // commit 1cc2855, fixed in followup).
+    const onlineLeases = (S.leases || []).filter(l => l.online);
     return el('div', { cls: 'vp-page' },
       el('div', { cls: 'vp-page-head' },
         el('div', { cls: 'vp-page-title' },
@@ -1235,10 +1242,6 @@
               : emptyState('⊘', 'No pools', 'swanctl returned no virtual-IP pools.'))
       ),
       // Active leases with customer + device + live SA enrichment.
-      // v1.6.2 — Filter to online-only. Charon keeps offline leases sticky
-      // for reconnection stickiness, but the dashboard's job is "who is
-      // connected right now". Total pool usage still visible in the Pools card.
-      const onlineLeases = (S.leases || []).filter(l => l.online);
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' },
           'Active leases (' + onlineLeases.length + ')'),
