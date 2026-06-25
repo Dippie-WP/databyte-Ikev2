@@ -11,10 +11,9 @@ Catches:
 - _parse_pool_leases_text handling empty input gracefully
 - Bug 3 (2026-06-25): parser silently dropped VIP, broke SA enrichment
 - Bug 2 (2026-06-25): pool lease parser was missing entirely
-
-The new EAP-aware format appears in strongSwan 6.x output for any conn that
-uses EAP auth methods (eap-mschapv2, eap-tls, etc.). The old format (no
-EAP: injection) still appears for PSK-only conns (rw-psk fallback).
+- Bug 2b (2026-06-25): leases_active() join path must use users.name (EAP
+  identity) → users.id → devices.strongswan_user_id, NOT devices.device_name
+  (which is the user-friendly label and doesn't match the pool identity)
 """
 import pytest
 
@@ -173,53 +172,63 @@ class TestParsePoolLeases:
 
 
 class TestLeasesActiveIntegration:
-    """End-to-end: leases_active() joins pool leases with DB devices."""
+    """End-to-end: leases_active() joins pool leases with DB users/devices.
 
-    def test_leases_active_returns_pool_lease(
+    Bug 2b — the join key is users.name (EAP identity) → users.id →
+    devices.strongswan_user_id, NOT devices.device_name (the user-friendly
+    label, e.g. 'laptop', which does NOT match the pool identity
+    'saalieg-laptop').
+    """
+
+    def test_leases_active_joins_via_eap_identity(
         self, app_module, db_path, monkeypatch
     ):
-        """Mock swanctl_list_pool_leases to return a known lease; verify the
-        join produces a lease dict in the right shape."""
-        # Seed a device + customer in the test DB
+        """Pool lease identity 'saalieg-laptop' should find customer 'saalieg'
+        via the users.name → devices.strongswan_user_id join path."""
         import sqlite3
         now = 1700000000
         conn = sqlite3.connect(str(db_path))
         conn.executescript(f"""
-            INSERT INTO customers (name, display_name, is_operator, is_active,
+            INSERT INTO customers (id, name, display_name, is_operator, is_active,
                                    data_limit_bytes, tier_id, status, max_devices,
                                    created_at, updated_at, notes)
-            VALUES ('saalieg', 'Saalieg', 0, 1, 104857600, NULL, 'active', 1,
+            VALUES (56, 'saalieg', 'Saalieg', 0, 1, 104857600, NULL, 'active', 1,
                     {now}, {now}, 'seed for test');
 
-            INSERT INTO devices (customer_id, strongswan_user_id, device_name,
+            -- users table is the strongSwan EAP identity table
+            INSERT INTO users (id, name)
+            VALUES (55, 'saalieg-laptop');
+
+            -- devices.device_name is the user-friendly label (e.g. 'laptop')
+            -- NOT the EAP identity. strongswan_user_id is the join key.
+            INSERT INTO devices (id, customer_id, strongswan_user_id, device_name,
                                  is_active, created_at, updated_at)
-            VALUES (last_insert_rowid(), 1, 'saalieg-laptop', 1, {now}, {now});
+            VALUES (56, 56, 55, 'laptop', 1, {now}, {now});
         """)
         conn.commit()
         conn.close()
 
-        # Mock swanctl_list_pool_leases to return a known lease
-        def fake_list_pool_leases():
-            return [{
-                "pool": "rw-pool",
-                "vip": "10.99.0.2",
-                "status": "online",
-                "identity": "saalieg-laptop",
-                "online": True,
-            }]
-        monkeypatch.setattr(
-            app_module, "swanctl_list_pool_leases", fake_list_pool_leases
-        )
-
-        # Mock SA parser to return empty (no extra enrichment)
+        monkeypatch.setattr(app_module, "swanctl_list_pool_leases", lambda: [{
+            "pool": "rw-pool",
+            "vip": "10.99.0.2",
+            "status": "online",
+            "identity": "saalieg-laptop",
+            "online": True,
+        }])
         monkeypatch.setattr(app_module, "swanctl_parse_sas", lambda: [])
 
         leases = app_module.leases_active()
-        assert len(leases) == 1
+        assert len(leases) == 1, f"BUG 2b: expected 1 lease, got {len(leases)}"
         lease = leases[0]
         assert lease["address"] == "10.99.0.2"
-        assert lease["customer_name"] == "saalieg"
-        assert lease["device_name"] == "saalieg-laptop"
+        # BUG 2b regression guard: customer_name MUST come back as 'saalieg',
+        # not '(unknown identity)'. This is the bug that motivated the v1.4.7 fix.
+        assert lease["customer_name"] == "saalieg", (
+            f"BUG 2b: customer_name should be 'saalieg', got {lease['customer_name']!r}. "
+            "Join path users.name → users.id → devices.strongswan_user_id is broken."
+        )
+        assert lease["customer_id"] == 56
+        assert lease["device_name"] == "laptop"
         assert lease["identity_name"] == "saalieg-laptop"
         assert lease["online"] is True
         assert lease["pool"] == "rw-pool"
@@ -230,3 +239,18 @@ class TestLeasesActiveIntegration:
         monkeypatch.setattr(app_module, "swanctl_list_pool_leases", lambda: [])
         leases = app_module.leases_active()
         assert leases == []
+
+    def test_leases_active_unknown_identity_handled(self, app_module, monkeypatch):
+        """Pool lease for an identity NOT in the users table (e.g., a lab test
+        or manually-added eap block) should still appear in the result, but
+        with customer_name='(unknown identity)' and customer_id=None."""
+        monkeypatch.setattr(app_module, "swanctl_list_pool_leases", lambda: [{
+            "pool": "rw-pool", "vip": "10.99.0.99", "status": "online",
+            "identity": "ghost-laptop", "online": True,
+        }])
+        monkeypatch.setattr(app_module, "swanctl_parse_sas", lambda: [])
+
+        leases = app_module.leases_active()
+        assert len(leases) == 1
+        assert leases[0]["customer_name"] == "(unknown identity)"
+        assert leases[0]["customer_id"] is None
