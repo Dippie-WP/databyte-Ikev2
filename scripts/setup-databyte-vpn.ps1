@@ -81,7 +81,12 @@ $InstallerSlug  = $null
 $InstallerToken = $null
 function Decode-PackedToken {
     param([string]$Packed)
-    $padded = $Packed + '=' * (4 - ($Packed.Length % 4))
+    # Padding: (4 - len % 4) % 4 — the OUTER mod 4 is critical.
+    # Without it, when Packed.Length is already a multiple of 4, we add 4 '='
+    # which makes FromBase64String throw "non-base 64 character / more than
+    # two padding characters".
+    $padCount = (4 - $Packed.Length % 4) % 4
+    $padded = $Packed + '=' * $padCount
     $decoded = [System.Text.Encoding]::UTF8.GetString(
         [System.Convert]::FromBase64String($padded.Replace('-','+').Replace('_','/'))
     )
