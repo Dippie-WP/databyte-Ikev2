@@ -227,7 +227,7 @@ for c, h in enumerate(hdr):
 tofix = [
     # L1-L4 testing plan (high)
     ("L1 pytest integration tests (82 tests passing — DONE 2026-06-24)", "✅ Done", "2h",  "1G (testing plan 2026-06-24)", "Commit 7966c0b. Wired into CI as portal-tests job in .github/workflows/ci.yml"),
-    ("L2 DB integrity check script",                                                                 "🔴 High", "1h",  "1G",                                "orphaned devices, stale tokens, EAP↔DB consistency"),
+    ("L2 DB integrity check script (DONE 2026-06-25 — commit e794490)",                                                          "✅ Done", "1h",  "1G",                                "5 checks: users-orphaned, customers-orphaned, tokens-stale, eap-conf-orphan, eap-conf-missing. Graceful skip for missing tables. Wired into CI db-integrity job."),
     ("L3 static analysis grep (stale IPs in code)",                                                  "🔴 High", "30m", "1G",                                "Pre-commit + CI. Catches 102.182.117.43, 192.168.10.98 in prod"),
     ("L4 E2E smoke cron on LXC 903 (6h)",                                                            "🔴 High", "1h",  "1G",                                "Telegram alert on fail"),
     # CP7 (medium)
