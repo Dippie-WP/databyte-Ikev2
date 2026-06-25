@@ -577,6 +577,69 @@ else
     warn "bandwidth-monitor service failed to start. Check: journalctl -u bandwidth-monitor"
 fi
 
+# ─── Step 18: Install quota-monitor + strongswan-iptables-watchdog ──
+# Hit on Xneelo VPS 2026-06-25: data_used_bytes stayed 0 forever because
+# quota-monitor.service was never deployed. Two missing pieces:
+#   1. Per-VIP iptables byte counters in FORWARD chain (508 rules) — quota/
+#      install_quota_rules.sh
+#   2. quota-monitor.py daemon that reads counters + updates customers.
+#      .data_used_bytes (60s poll, 80% warn, 100% hard-cut)
+# Plus the strongswan-iptables-watchdog so the per-VIP rules survive
+# strongswan container restarts (otherwise netfilter-persistent reload would
+# wipe them).
+info "=== Step 18/19: Installing quota-monitor + iptables-watchdog ==="
+cd /opt/strongswan-vpn-gateway
+
+# Symlink swanctl so quota-monitor can find rw-eap.conf for hard-cut
+# (it uses /home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf per the
+# bandwidth-monitor deployment pattern).
+mkdir -p /home/zunaid/strongswan
+ln -sf /opt/strongswan-vpn-gateway/docker/swanctl /home/zunaid/strongswan/swanctl
+
+# Copy quota-monitor.py
+sudo cp quota/quota-monitor.py /home/zunaid/strongswan/quota/quota-monitor.py 2>/dev/null || \
+    { mkdir -p /home/zunaid/strongswan/quota
+      sudo cp quota/quota-monitor.py /home/zunaid/strongswan/quota/quota-monitor.py; }
+sudo chown root:root /home/zunaid/strongswan/quota/quota-monitor.py
+sudo chmod 755 /home/zunaid/strongswan/quota/quota-monitor.py
+
+# Install quota-monitor.service
+sudo cp host/systemd/quota-monitor.service /etc/systemd/system/quota-monitor.service
+sudo chown root:root /etc/systemd/system/quota-monitor.service
+sudo chmod 644 /etc/systemd/system/quota-monitor.service
+
+# Install strongswan-iptables-watchdog (re-applies rules.v4 on container events)
+sudo cp host/systemd/strongswan-iptables-watchdog.sh /usr/local/bin/strongswan-iptables-watchdog.sh
+sudo cp host/systemd/strongswan-iptables-watchdog.service /etc/systemd/system/strongswan-iptables-watchdog.service
+sudo chown root:root /usr/local/bin/strongswan-iptables-watchdog.sh /etc/systemd/system/strongswan-iptables-watchdog.service
+sudo chmod +x /usr/local/bin/strongswan-iptables-watchdog.sh
+sudo chmod 644 /etc/systemd/system/strongswan-iptables-watchdog.service
+
+# Install the per-VIP iptables counter rules (idempotent — safe to re-run)
+sudo bash quota/install_quota_rules.sh > /tmp/install_quota_rules.log 2>&1
+if [ $? -eq 0 ]; then
+    ok "Per-VIP quota counter rules installed (508 rules)"
+else
+    warn "install_quota_rules.sh failed; check /tmp/install_quota_rules.log"
+fi
+
+# Enable + start everything
+sudo systemctl daemon-reload
+sudo systemctl enable quota-monitor.service strongswan-iptables-watchdog.service
+sudo systemctl start quota-monitor.service strongswan-iptables-watchdog.service
+sleep 2
+
+if systemctl is-active --quiet quota-monitor; then
+    ok "quota-monitor service active (60s poll)."
+else
+    warn "quota-monitor failed to start. Check: journalctl -u quota-monitor"
+fi
+if systemctl is-active --quiet strongswan-iptables-watchdog; then
+    ok "strongswan-iptables-watchdog service active."
+else
+    warn "strongswan-iptables-watchdog failed to start. Check: journalctl -u strongswan-iptables-watchdog"
+fi
+
 # ─── Smoke test ─────────────────────────────────────────────────────────────
 info ""
 info "=== SMOKE TEST ==="
