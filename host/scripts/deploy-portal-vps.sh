@@ -171,6 +171,7 @@ fi
 
 echo ""
 echo "=== STEP 6: verify deployed SHAs match source ==="
+MISMATCH=0
 DEPLOYED_PY_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/app.py" | awk '{print $1}')"
 DEPLOYED_JS_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/static/app.js" | awk '{print $1}')"
 DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
