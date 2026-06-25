@@ -1,13 +1,13 @@
-# /etc/systemd/system/nftables-zun-vpn.service
+# /etc/systemd/system/nftables-vpn.service
 # Reference service for loading nftables rules directly. NOT USED in
 # current deployment (firewalld is the active firewall manager with
 # iptables backend). Kept here for reference if you ever switch to
 # nftables-native.
 #
-# Apply with:  sudo cp nftables-zun-vpn.service /etc/systemd/system/
-#               sudo cp ../nftables.d/zun-vpn.nft /etc/nftables.d/
+# Apply with:  sudo cp nftables-vpn.service /etc/systemd/system/
+#               sudo cp ../nftables.d/vpn.nft /etc/nftables.d/
 #               sudo systemctl daemon-reload
-#               sudo systemctl enable nftables-zun-vpn.service
+#               sudo systemctl enable nftables-vpn.service
 
 [Unit]
 Description=Zun VPN nftables rules
@@ -16,7 +16,7 @@ Before=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f /etc/nftables.d/zun-vpn.nft
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/vpn.nft
 RemainAfterExit=yes
 
 [Install]
