@@ -526,6 +526,13 @@ info "=== Step 17/19: Installing bandwidth-monitor service ==="
 # "ifb0 not available (likely LXC without host module access)" — wrong diagnosis.
 # Root cause: modules-load.d doesn't pass parameters, so the default 2 ifb
 # devices were created but later removed, or never created.
+#
+# DO NOT add `rmmod ifb` here. On 2026-06-25 that pattern was tried, and
+# bandwidth-monitor's tc filter still referenced ifb0 — every packet flooded
+# the kernel log with "tc mirred to Houston: device ifb0 is down", wedging
+# the VPS for ~2 hours. Safer approach if ifb0 is missing on boot:
+# use `ip link add ifb0 type ifb && ip link set ifb0 up` directly without
+# touching the module — see REVOVERY.md §issue-3.
 cat > /etc/systemd/system/ifb-setup.service << 'EOF'
 [Unit]
 Description=Create ifb0 device for ingress bandwidth shaping
