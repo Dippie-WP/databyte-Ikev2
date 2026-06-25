@@ -1,24 +1,24 @@
 # Last successful deploy of vpn-portal to vpn-prod-01
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
-deployed_at_utc=2026-06-25T10:02:56Z
+deployed_at_utc=2026-06-25T13:18:00Z
 deployed_by=root
-git_head=85e265b6066f35ae81796e23c4ccb532e46a0bda
-git_head_short=85e265b
-feature_marker=vp-cmd
-cache_bust_version=85e265b
+git_head=fe2d1679fed87693b4902ad6fc2c0ef9441fa264
+git_head_short=fe2d167
+feature_marker=live-pool-leases-integration
+cache_bust_version=fe2d167
 
 source_sha256:
-  app.py=713ee7117d064421948e04f06d7e80a27ac937a50db30c21cda00a5ff1323f03
-  app.js=0749e19de7c868a3bb687e6f348da2abba41c32e402e6882904f8440da88b35b
+  app.py=8311ccc2668f8923b7aa28adcf515bcb42601750b7f9cf734136f5c13bc230d1
+  app.js=8e72512f1afb101ebb0ea37bcb0613f73aa1a75688f5bbd58bc45fb9de7209d7
   app.css=15ccaa7cb525c3cded27a57918413a18df682ae86d36145673597f4091c5957c
   index.html=64a446536262697945460d0067154da097cedfc1166d938753a77c1e32a2e4fc
 
 deployed_sha256:
-  app.py=713ee7117d064421948e04f06d7e80a27ac937a50db30c21cda00a5ff1323f03
-  app.js=0749e19de7c868a3bb687e6f348da2abba41c32e402e6882904f8440da88b35b
+  app.py=8311ccc2668f8923b7aa28adcf515bcb42601750b7f9cf734136f5c13bc230d1
+  app.js=8e72512f1afb101ebb0ea37bcb0613f73aa1a75688f5bbd58bc45fb9de7209d7
   app.css=15ccaa7cb525c3cded27a57918413a18df682ae86d36145673597f4091c5957c
-  index.html=cbc42f1aa95349bee71d184a96c5745d083490e108a5e72eebb7e7f5dd67cb04
+  index.html=fc0725bffb2d7803877c158e9700ffe39937866d2080a3ad77e01147f70097e0
 
 health_url=https://vpn-portal.databyte.co.za/api/health
 public_url=https://vpn-portal.databyte.co.za/

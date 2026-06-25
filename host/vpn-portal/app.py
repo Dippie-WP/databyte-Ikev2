@@ -233,9 +233,16 @@ def leases_active() -> list:
     if not pool_leases:
         return []
 
-    # Fetch active devices (small N, ~hundreds max) and index by name.
+    # Fetch all active devices joined with their strongSwan user + customer + tier.
+    # Index by users.name (the EAP identity, e.g. 'saalieg-laptop') — that is
+    # what charon's --list-pools --leases reports. The portal's `device_name`
+    # is a user-friendly label ('laptop') and does NOT match the pool identity.
+    # Join path: users.name (EAP identity) -> users.id -> devices.strongswan_user_id
+    #                                              -> devices.customer_id -> customers.id
     device_sql = """
-      SELECT d.id              AS device_id,
+      SELECT u.id              AS user_id,
+             u.name            AS eap_identity,
+             d.id              AS device_id,
              d.device_name     AS device_name,
              d.device_type     AS device_type_meta,
              d.os_version      AS os_version_meta,
@@ -249,17 +256,18 @@ def leases_active() -> list:
              c.over_quota      AS over_quota,
              c.tier_id         AS tier_id,
              t.name            AS tier_name
-      FROM devices d
+      FROM users u
+      LEFT JOIN devices   d ON d.strongswan_user_id = u.id AND d.is_active = 1
       LEFT JOIN customers c ON c.id = d.customer_id
       LEFT JOIN tiers     t ON t.id = c.tier_id
-      WHERE d.is_active = 1
     """
     try:
-        all_devices = db_query(device_sql)
+        all_users = db_query(device_sql)
     except HTTPException:
         return []
-    devices_by_name = {
-        d["device_name"]: d for d in all_devices if d.get("device_name")
+    # Index by EAP identity (matches charon pool lease)
+    devices_by_identity = {
+        u["eap_identity"]: u for u in all_users if u.get("eap_identity")
     }
 
     # Parse live SAs once — keyed by VIP for enrichment.
@@ -272,7 +280,7 @@ def leases_active() -> list:
     for pl in pool_leases:
         vip      = pl["vip"]
         identity = pl["identity"]
-        r        = devices_by_name.get(identity, {})
+        r        = devices_by_identity.get(identity, {})
         sa       = sas_by_vip.get(vip, {})
 
         algo     = sa.get("algo")
