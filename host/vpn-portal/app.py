@@ -48,7 +48,7 @@ import asyncio
 import contextlib
 from collections import defaultdict
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Literal
 import portal_auth  # v1.3.0 customer portal auth + v1.3.1 operator sessions
 
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
@@ -627,6 +627,61 @@ def slugify(s: str) -> str:
     return s[:32] or "client"
 
 
+# Speed-plan lookup table (v1.5.0). Per-customer, NOT tier-driven.
+# Tiers (tier_5gb/tier_10gb/tier_20gb) only set DATA QUOTA, not bandwidth.
+# Operator picks the speed plan at customer creation; explicit bandwidth_*
+# overrides win.
+SPEED_PLANS = {
+    "standard":         {"bandwidth_down_mbps": 20, "bandwidth_up_mbps": 20},
+    "asymmetric_40_20": {"bandwidth_down_mbps": 40, "bandwidth_up_mbps": 20},
+}
+
+
+def resolve_bandwidth(
+    speed_plan: Optional[str],
+    explicit_down: Optional[int],
+    explicit_up: Optional[int],
+) -> tuple[int, int]:
+    """Return (down_mbps, up_mbps) for a new customer.
+
+    Precedence (high to low):
+      1. Explicit bandwidth_down_mbps / bandwidth_up_mbps from the request body
+         (advanced override). Both must be provided if either is — partial is an error.
+      2. speed_plan lookup ('standard' or 'asymmetric_40_20').
+      3. Default = 'standard' (20/20).
+    """
+    # If either explicit value is set, both must be — partial is ambiguous.
+    if (explicit_down is None) != (explicit_up is None):
+        raise HTTPException(
+            400,
+            "bandwidth_down_mbps and bandwidth_up_mbps must be provided together "
+            "(both or neither). To use a preset, set speed_plan instead."
+        )
+
+    if explicit_down is not None and explicit_up is not None:
+        return int(explicit_down), int(explicit_up)
+
+    if speed_plan is not None:
+        if speed_plan not in SPEED_PLANS:
+            raise HTTPException(
+                400,
+                f"speed_plan must be one of {sorted(SPEED_PLANS.keys())}, got '{speed_plan}'"
+            )
+        plan = SPEED_PLANS[speed_plan]
+        return plan["bandwidth_down_mbps"], plan["bandwidth_up_mbps"]
+
+    # Default: standard (20/20 symmetric). Matches existing schema default.
+    return SPEED_PLANS["standard"]["bandwidth_down_mbps"], SPEED_PLANS["standard"]["bandwidth_up_mbps"]
+
+
+def validate_bandwidth(down_mbps: int, up_mbps: int) -> None:
+    """Bounds-check the resolved bandwidth. 1..1000 mbps per the existing schema."""
+    if not 1 <= down_mbps <= 1000:
+        raise HTTPException(400, f"bandwidth_down_mbps must be 1..1000, got {down_mbps}")
+    if not 1 <= up_mbps <= 1000:
+        raise HTTPException(400, f"bandwidth_up_mbps must be 1..1000, got {up_mbps}")
+
+
 # ---------- v1.2.7 Pydantic models ----------
 class ClientCreate(BaseModel):
     # Customer
@@ -641,6 +696,21 @@ class ClientCreate(BaseModel):
     tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_5gb', 'tier_10gb', 'tier_20gb') OR 'custom'")
     custom_cap_mb:    Optional[int] = Field(None, ge=1, le=1024*1024,
                                            description="Cap in MiB. Required iff tier_name=='custom'")
+    # v1.5.0 — Speed plan (per-customer, NOT tier-driven). Two preset options:
+    #   'standard'           → 20/20 mbps symmetric (default; matches existing default)
+    #   'asymmetric_40_20'   → 40 mbps down / 20 mbps up
+    # Precedence: explicit bandwidth_down_mbps / bandwidth_up_mbps (below) wins.
+    # If both omitted → defaults to 'standard'.
+    speed_plan:       Optional[Literal["standard", "asymmetric_40_20"]] = Field(
+        None,
+        description="Per-customer bandwidth preset. 'standard' (20/20) or 'asymmetric_40_20' (40/20). "
+                    "If both speed_plan and explicit bandwidth_* are provided, explicit wins."
+    )
+    # Per-customer bandwidth (advanced override). Wins over speed_plan when set.
+    bandwidth_down_mbps: Optional[int] = Field(None, ge=1, le=1000,
+                                               description="Override download mbps (1..1000). Wins over speed_plan.")
+    bandwidth_up_mbps:   Optional[int] = Field(None, ge=1, le=1000,
+                                               description="Override upload mbps (1..1000). Wins over speed_plan.")
     # Device (1 creds = 1 device, per v1.2.6 model)
     device_name:      str           = Field(..., min_length=1, max_length=32)
     device_type:      str           = Field(..., description="iOS/Android/Windows/macOS/Linux/Other")
@@ -971,6 +1041,14 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     if not SLUG_RE.match(eap_identity):
         raise HTTPException(400, f"derived EAP identity '{eap_identity}' is too long (max 32)")
 
+    # 1b. v1.5.0 — Resolve bandwidth (speed_plan + explicit override).
+    # Per-customer, NOT tier-driven (Bug-fix from roadmap: tier drives data
+    # quota, NOT bandwidth). Defaults to 'standard' (20/20) if both omitted.
+    bandwidth_down_mbps, bandwidth_up_mbps = resolve_bandwidth(
+        req.speed_plan, req.bandwidth_down_mbps, req.bandwidth_up_mbps
+    )
+    validate_bandwidth(bandwidth_down_mbps, bandwidth_up_mbps)
+
     # 2. Resolve tier
     if req.tier_name == "custom":
         ts = int(time.time())
@@ -1013,9 +1091,11 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         db_exec(
             f"INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
             f"over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
+            f"bandwidth_down_mbps, bandwidth_up_mbps, "
             f"created_at, updated_at, notes, billing_id, email) VALUES "
             f"({_q(cust_name)}, {_q(req.display_name)}, {_q(req.telegram_username)}, 0, 1, "
             f"0, {int(data_limit)}, 0, {int(tier_id)}, 'active', 1, "
+            f"{int(bandwidth_down_mbps)}, {int(bandwidth_up_mbps)}, "
             f"{now}, {now}, {_q(req.notes)}, {_q(req.billing_id)}, {_q(req.email)});"
         )
         cust_id = db_query(f"SELECT id FROM customers WHERE name = {_q(cust_name)};")[0]["id"]

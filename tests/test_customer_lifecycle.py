@@ -789,3 +789,156 @@ class TestCustomerUserIdFK:
             f"customers.user_id is not a FK to users(id). "
             f"PRAGMA foreign_key_list(customers) = {row}"
         )
+
+
+# ============================================================
+# v1.5.0 — Speed plan at customer creation (per-customer, NOT tier-driven)
+# ============================================================
+#
+# Per Zun 2026-06-25 05:19: two preset options at customer create time:
+#   - 'standard'         → 20/20 mbps symmetric (default)
+#   - 'asymmetric_40_20' → 40/20 mbps asymmetric
+#
+# Tiers (tier_5gb/tier_10gb/tier_20gb) drive DATA QUOTA, not bandwidth.
+# The operator picks the speed plan when creating the customer.
+# Explicit bandwidth_down/up override wins over speed_plan.
+class TestSpeedPlan:
+    """Regression tests for the speed_plan field in POST /api/customers."""
+
+    def _create(self, client, operator_login, **extra):
+        body = {
+            "display_name": "Speed Plan Co",
+            "tier_name": "tier_5gb",
+            "device_name": "laptop",
+            "device_type": "Windows",
+        }
+        body.update(extra)
+        # Avoid name collision on repeated calls in same test session
+        if "name" not in body and "display_name" in extra:
+            pass  # custom display_name used as slug source
+        return client.post(
+            "/api/customers",
+            json=body,
+            cookies={"session": operator_login},
+        )
+
+    def _read_bandwidth(self, db_path, cust_id):
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT bandwidth_down_mbps, bandwidth_up_mbps FROM customers WHERE id = ?",
+            (cust_id,),
+        ).fetchone()
+        conn.close()
+        return row
+
+    def test_default_speed_plan_is_standard_20_20(self, client, operator_login, db_path):
+        """No speed_plan, no explicit bandwidth → defaults to 20/20."""
+        r = self._create(client, operator_login)
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert down == 20, f"expected bandwidth_down_mbps=20, got {down}"
+        assert up == 20, f"expected bandwidth_up_mbps=20, got {up}"
+
+    def test_speed_plan_standard_sets_20_20(self, client, operator_login, db_path):
+        """speed_plan='standard' → 20/20 (explicit form)."""
+        r = self._create(client, operator_login,
+                         display_name="Std Speed Co",
+                         speed_plan="standard")
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert (down, up) == (20, 20), f"expected (20, 20), got ({down}, {up})"
+
+    def test_speed_plan_asymmetric_40_20_sets_40_20(self, client, operator_login, db_path):
+        """speed_plan='asymmetric_40_20' → 40 down / 20 up."""
+        r = self._create(client, operator_login,
+                         display_name="Asym Speed Co",
+                         speed_plan="asymmetric_40_20")
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert (down, up) == (40, 20), f"expected (40, 20), got ({down}, {up})"
+
+    def test_explicit_bandwidth_wins_over_speed_plan(self, client, operator_login, db_path):
+        """Explicit bandwidth_down/up override speed_plan."""
+        r = self._create(client, operator_login,
+                         display_name="Override Co",
+                         speed_plan="standard",
+                         bandwidth_down_mbps=100,
+                         bandwidth_up_mbps=50)
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert (down, up) == (100, 50), (
+            f"explicit override ignored: speed_plan='standard' gave ({down}, {up})"
+        )
+
+    def test_explicit_bandwidth_without_speed_plan(self, client, operator_login, db_path):
+        """Explicit bandwidth works without speed_plan (advanced override path)."""
+        r = self._create(client, operator_login,
+                         display_name="Adv Co",
+                         bandwidth_down_mbps=50,
+                         bandwidth_up_mbps=50)
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert (down, up) == (50, 50)
+
+    def test_partial_explicit_bandwidth_rejected_400(self, client, operator_login):
+        """Only down provided (no up) → 400. Partial is ambiguous."""
+        r = self._create(client, operator_login,
+                         display_name="Partial Co",
+                         bandwidth_down_mbps=50)
+        assert r.status_code == 400, r.text
+        assert "both" in r.text.lower() or "together" in r.text.lower(), r.text
+
+    def test_partial_explicit_bandwidth_only_up_rejected_400(self, client, operator_login):
+        """Only up provided (no down) → 400."""
+        r = self._create(client, operator_login,
+                         display_name="Partial2 Co",
+                         bandwidth_up_mbps=30)
+        assert r.status_code == 400, r.text
+
+    def test_invalid_speed_plan_rejected_422(self, client, operator_login):
+        """speed_plan='gigabit' is not in the Literal → Pydantic 422 (schema validation)."""
+        r = self._create(client, operator_login,
+                         display_name="Bad Plan Co",
+                         speed_plan="gigabit")
+        assert r.status_code == 422, r.text
+        # Pydantic returns a structured error mentioning the literal options
+        body = r.json()
+        assert "speed_plan" in str(body), r.text
+        assert "standard" in r.text and "asymmetric_40_20" in r.text
+
+    def test_bandwidth_out_of_range_rejected_422(self, client, operator_login):
+        """bandwidth_down_mbps > 1000 → Pydantic 422 (le=1000 bound)."""
+        r = self._create(client, operator_login,
+                         display_name="Too Fast Co",
+                         bandwidth_down_mbps=2000,
+                         bandwidth_up_mbps=2000)
+        assert r.status_code == 422, r.text
+        assert "1000" in r.text
+
+    def test_speed_plan_does_not_override_tier(self, client, operator_login, db_path):
+        """Tier drives DATA QUOTA (data_limit_bytes), speed_plan drives BANDWIDTH (mbps).
+        Per Zun's directive: speed_plan is per-customer, NOT tier-based. This test
+        proves the two are independent: tier_10gb + asymmetric_40_20 → 10 GiB quota,
+        40/20 mbps bandwidth.
+        """
+        r = self._create(client, operator_login,
+                         display_name="Indep Co",
+                         tier_name="tier_10gb",
+                         speed_plan="asymmetric_40_20")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        cust_id = body["customer"]["id"]
+
+        # Tier quota is 10 GiB (10737418240 bytes)
+        assert body["customer"]["data_limit_bytes"] == 10737418240, (
+            f"tier 10GB quota lost: got {body['customer']['data_limit_bytes']}"
+        )
+        # Speed plan is 40/20 (independent)
+        down, up = self._read_bandwidth(db_path, cust_id)
+        assert (down, up) == (40, 20)
