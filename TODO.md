@@ -16,14 +16,15 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - [x] Wire into `.github/workflows/ci.yml` — run on every push (portal-tests job)
 - [x] Catches #193 retroactively (portal_auth login SQL bug)
 
-**Layer 2 — DB integrity check [After L1 — 1h]**
-- [ ] `scripts/check_db_integrity.py` — runs in CI + on demand
-  - Every `users` row has a `devices` row pointing to it
-  - Every `customers` row has ≥1 device
-  - Every `installer_tokens` row < 7 days old OR consumed
-  - Every EAP block in rw-eap.conf has matching user in DB
-  - Every active customer has matching EAP block
+**Layer 2 — DB integrity check [✅ DONE 2026-06-25 — commit e794490]**
+- [x] `scripts/check_db_integrity.py` — runs in CI + on demand
+  - [x] Every `users` row has a `devices` row pointing to it
+  - [x] Every `customers` row has ≥1 device
+  - [x] Every `installer_tokens` row < 7 days old OR consumed
+  - [x] Every EAP block in rw-eap.conf has matching user in DB
+  - [x] Every active customer has matching EAP block
 - Catches C-1 (orphaned devices) + B-1 (stale tokens) retroactively
+- Wired into CI db-integrity job: tests drift detection + recovery
 
 **Layer 3 — Static analysis [After L1 — 30m]**
 - [ ] `scripts/check_stale_refs.sh` — grep for `102.182.117.43`, `vpn.homelab.local`, `192.168.10.98`
