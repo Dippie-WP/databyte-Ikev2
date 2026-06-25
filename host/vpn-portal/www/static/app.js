@@ -2198,9 +2198,9 @@
         ? el('div', {},
             el('div', { cls: 'vp-setup-steps' },
               el('div', {},
-                el('strong', {}, 'Send this one-liner to the customer. They run it in '),
+                el('strong', {}, 'Send these 3 lines to the customer. They paste them into '),
                 el('code', {}, 'Windows PowerShell (Admin)'),
-                el('strong', {}, '. It downloads the CA cert, EAP profile, and connects — no manual steps.'),
+                el('strong', {}, '. The script downloads the CA cert, installs the EAP profile, and connects.'),
               ),
               el('div', { cls: 'vp-row vp-mt-12' },
                 el('button', {
@@ -2222,6 +2222,11 @@
                   title: 'WARNING: this consumes the token!',
                 }, '⚠ Test fetch (burns token)'),
               ),
+              // v2.5.2 — Render the multi-line powershell_cmd in a <pre> so the
+              // operator can SEE the 3 lines before clicking Copy. Each line
+              // starts on its own row.
+              el('pre', { cls: 'vp-cmd vp-mt-12' },
+                installerData.powershell_cmd),
               el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
                 'Token: ', el('code', {}, installerData.token_prefix),
                 ' — expires in ', String(installerData.expires_in_days), ' day(s). ',
