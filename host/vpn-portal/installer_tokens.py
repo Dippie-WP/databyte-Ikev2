@@ -251,7 +251,9 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
         if not row.get("is_active"):
             raise HTTPException(403, "customer is suspended")
 
-        # Get the device + EAP identity + plain-text password (reconstructed from NTLM hash)
+        # Get the device + EAP identity + plain-text password (reconstructed from NTLM hash).
+        # v1.4.0 — Bug #2: prefer customers.user_id FK for the user lookup when set;
+        # fall back to devices.strongswan_user_id for pre-migration customers.
         devs = _db_query(
             f"SELECT id, device_name, device_type, os_version, strongswan_user_id "
             f"FROM devices WHERE id = {int(row['device_id'])} AND is_active = 1;"
@@ -260,8 +262,17 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
             raise HTTPException(500, "device not found or inactive")
         dev = devs[0]
 
+        cust_fk = _db_query(
+            f"SELECT user_id FROM customers WHERE id = {int(row['customer_id'])};"
+        )
+        eap_user_id = (
+            cust_fk[0]["user_id"]
+            if cust_fk and cust_fk[0].get("user_id")
+            else dev["strongswan_user_id"]
+        )
+
         users = _db_query(
-            f"SELECT name, password FROM users WHERE id = {int(dev['strongswan_user_id'])};"
+            f"SELECT name, password FROM users WHERE id = {int(eap_user_id)};"
         )
         if not users:
             raise HTTPException(500, "EAP user not found")

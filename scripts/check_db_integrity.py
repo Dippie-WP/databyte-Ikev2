@@ -23,6 +23,10 @@ Checks
 5. eap-conf-missing   Every active customer with devices has a matching
                       `eap-<device.device_name>` block in rw-eap.conf.
                       (Optional — same.)
+6. user-id-fk         Every non-operator customer with devices has
+                      `customers.user_id` set AND it equals
+                      `devices.strongswan_user_id` for at least one device.
+                      Operators (is_operator=1) are exempt (user_id NULL).
 
 Usage
 -----
@@ -189,6 +193,40 @@ def parse_eap_blocks(eap_conf_path):
     return set(re.findall(r"^eap-([\w.-]+)\s*\{", text, re.MULTILINE))
 
 
+def check_user_id_fk(db, json_mode):
+    """Bug #2 invariant: customers.user_id FK must agree with devices.strongswan_user_id.
+
+    Operators (is_operator=1) are exempt: their user_id is NULL by design.
+    Customers with no devices are exempt: nothing to FK to.
+    """
+    try:
+        rows = db.execute("""
+            SELECT c.id, c.name, c.user_id
+            FROM customers c
+            WHERE c.is_operator = 0
+              AND EXISTS (SELECT 1 FROM devices d WHERE d.customer_id = c.id)
+              AND (
+                  c.user_id IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1 FROM devices d
+                      WHERE d.customer_id = c.id AND d.strongswan_user_id = c.user_id
+                  )
+              )
+            ORDER BY c.id
+        """).fetchall()
+    except sqlite3.OperationalError as e:
+        return _skip_if_table_missing(db, "user-id-fk",
+                                       "customers.user_id FK vs devices.strongswan_user_id", e)
+    findings = [{"id": r[0], "name": r[1], "user_id": r[2]} for r in rows]
+    return {
+        "check": "user-id-fk",
+        "description": "non-operator customers with devices where user_id is NULL or doesn't match devices.strongswan_user_id",
+        "ok": len(findings) == 0,
+        "count": len(findings),
+        "findings": findings,
+    }
+
+
 def check_eap_conf_orphan(db, eap_names, json_mode):
     """Every eap-<name> block in rw-eap.conf has a matching users.name."""
     if not eap_names:
@@ -305,6 +343,7 @@ def main():
     results.append(check_users_orphaned(conn, args.json))
     results.append(check_customers_orphaned(conn, args.json))
     results.append(check_tokens_stale(conn, args.json))
+    results.append(check_user_id_fk(conn, args.json))
 
     if eap_path is not None:
         try:
