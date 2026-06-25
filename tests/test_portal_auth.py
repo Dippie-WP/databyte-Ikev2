@@ -218,6 +218,85 @@ class TestCustomerPortalSession:
         assert purged == 2
         assert portal_auth.verify_session(s_recent) is not None
 
+    # --- Bug #2/R2 (added 2026-06-25): absolute max session age cap ---
+    # Bug: 1h sliding window alone allows a continuously-active session to
+    # live indefinitely (each verify refreshes expires_at). Threat model
+    # requires a hard ceiling. Fix: 7-day absolute max via created_at check.
+
+    def test_max_session_age_constant_exists_and_is_7_days(self):
+        """R2: CUSTOMER_MAX_SESSION_AGE must exist and equal 7 days. The
+        threat model requires a hard ceiling — sliding alone allows indefinite
+        lifetime for an active session."""
+        assert hasattr(portal_auth, "CUSTOMER_MAX_SESSION_AGE"), (
+            "CUSTOMER_MAX_SESSION_AGE constant missing"
+        )
+        assert portal_auth.CUSTOMER_MAX_SESSION_AGE == 7 * 86400, (
+            f"CUSTOMER_MAX_SESSION_AGE must be 7 days (604800s), "
+            f"got {portal_auth.CUSTOMER_MAX_SESSION_AGE}s"
+        )
+
+    def test_session_under_absolute_max_is_accepted(self, db_path):
+        """A session 1 day old (well under 7d cap) must still be accepted,
+        even if expires_at (sliding) somehow got stale. The absolute cap
+        doesn't make things expire faster — it only caps at 7d."""
+        import sqlite3
+        sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
+        # Backdate created_at to 1 day ago
+        one_day_ago = int(time.time()) - 86400
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE customer_portal_sessions SET created_at = ? WHERE session_id = ?",
+            (one_day_ago, sid),
+        )
+        conn.commit()
+        conn.close()
+        sess = portal_auth.verify_session(sid)
+        assert sess is not None, "1-day-old session must still be accepted"
+        assert sess["customer_id"] == 1
+
+    def test_session_over_absolute_max_is_rejected_and_deleted(self, db_path):
+        """A session 8 days old (over 7d cap) MUST be rejected even if
+        sliding expiry says it's fresh. This is the core R2 fix."""
+        import sqlite3
+        sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
+        # Backdate created_at to 8 days ago (over 7d cap)
+        eight_days_ago = int(time.time()) - (8 * 86400)
+        # Also reset expires_at to "now + 1h" so sliding wouldn't reject it
+        fresh_expiry = int(time.time()) + portal_auth.PORTAL_TTL
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE customer_portal_sessions SET created_at = ?, expires_at = ? WHERE session_id = ?",
+            (eight_days_ago, fresh_expiry, sid),
+        )
+        conn.commit()
+        conn.close()
+        sess = portal_auth.verify_session(sid)
+        assert sess is None, "8-day-old session must be rejected (R2 absolute cap)"
+        # Verify it was deleted from DB
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT 1 FROM customer_portal_sessions WHERE session_id = ?",
+            (sid,),
+        ).fetchone()
+        conn.close()
+        assert row is None, "Session exceeding absolute max must be deleted from DB"
+
+    def test_session_exactly_at_absolute_max_is_accepted(self, db_path):
+        """Boundary: a session just under the 7d cap (6d23h) must be accepted."""
+        import sqlite3
+        sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
+        # Backdate created_at to 6d23h ago (just under 7d cap)
+        six_d_23_h = int(time.time()) - (6 * 86400 + 23 * 3600)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE customer_portal_sessions SET created_at = ? WHERE session_id = ?",
+            (six_d_23_h, sid),
+        )
+        conn.commit()
+        conn.close()
+        sess = portal_auth.verify_session(sid)
+        assert sess is not None, "Session 6d23h old must be accepted (under 7d cap)"
+
 
 # ---------- lookup_user_and_customer — THE BUG THAT EXISTED 3 DAYS ----------
 

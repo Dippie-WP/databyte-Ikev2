@@ -37,7 +37,10 @@ from typing import Optional
 from argon2 import PasswordHasher, Type
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
 
+import logging
 from fastapi import Cookie, HTTPException, Request, Response
+
+log = logging.getLogger("vpn-portal.portal_auth")
 
 
 # Portal session cookie name. Different from operator "session" cookie.
@@ -58,6 +61,17 @@ OPERATOR_COOKIE = "session"
 # 1h sliding window limits blast radius to a single coffee-shop session.
 # Was 30 days until 2026-06-24 fix (Bug #1: portal idle expiry 30d).
 PORTAL_TTL = 3600
+
+# Absolute maximum lifetime for a customer portal session (Bug #2/R2 fix 2026-06-25).
+#
+# Without this, a session that stays active (slides forward every hour) can
+# live indefinitely — a single continuously-used session could persist for
+# months, defeating the point of "≤ 1h sliding window". The absolute cap
+# forces a full re-auth after 7 days even if the user is active every hour.
+# Threat model: passive observation of a long-lived cookie is a higher-value
+# target than an active 1h sliding session.
+# Computed from `created_at` so no DB schema change needed.
+CUSTOMER_MAX_SESSION_AGE = 7 * 86400  # 7 days in seconds
 
 # Operator session TTL — 8h sliding. After 8h inactivity, operator must re-auth.
 # Longer because operators need to manage customers throughout a workday.
@@ -292,6 +306,16 @@ def verify_session(session_id: str, slide: bool = True) -> Optional[dict]:
             (session_id,)
         ).fetchone()
         if not row:
+            return None
+        # Bug #2/R2 absolute cap (added 2026-06-25): even if expires_at (1h sliding)
+        # keeps being refreshed, a session older than CUSTOMER_MAX_SESSION_AGE
+        # must be rejected and deleted. Without this, a continuously-active
+        # session would live forever.
+        if (now - row["created_at"]) > CUSTOMER_MAX_SESSION_AGE:
+            conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
+            log.warning("portal session %s... exceeded absolute max age %ds, deleted",
+                        session_id[:8], CUSTOMER_MAX_SESSION_AGE)
             return None
         if row["expires_at"] < now:
             conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
