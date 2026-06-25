@@ -12,3 +12,6 @@
 
 ALTER TABLE customers ADD COLUMN billing_id TEXT;
 ALTER TABLE customers ADD COLUMN email TEXT;
+-- v1.3.2 — Bug #4 fix: EAP credential rotation
+-- Added 2026-06-25 by /api/customers/{id}/rotate_eap endpoint.
+ALTER TABLE customers ADD COLUMN eap_rotated_at INTEGER;

@@ -1695,6 +1695,136 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
     return {"ok": True, "customer_id": int(customer_id)}
 
 
+# ---------- v1.3.2 — Rotate EAP credentials (Bug #4 fix) ----------
+
+def _replace_eap_secret(identity: str, new_password: str) -> None:
+    """Replace the `secret = "..."` line inside the eap-{identity} block.
+    Preserves block id (EAP identity is immutable by design — see Lesson #193,
+    Bug #4 history). Idempotent only if new_password matches current; otherwise
+    raises 404 if block not found.
+
+    The EAP identity in rw-eap.conf is the source of truth for charon. We
+    MUST keep it stable across rotations or the customer's Windows laptop
+    will silently fail auth (Lesson #193 lineage).
+    """
+    conf = read_rw_eap_conf()
+    block_id = f"eap-{identity}"
+    # Match the block: eap-X { ... secret = "..." ... }
+    block_pat = re.compile(
+        rf"(^\s*{re.escape(block_id)}\s*\{{[^}}]*?secret\s*=\s*)\"[^\"]*\"",
+        re.MULTILINE | re.DOTALL,
+    )
+    if not block_pat.search(conf):
+        raise HTTPException(404, f"EAP block '{block_id}' not found in rw-eap.conf")
+    new_conf = block_pat.sub(rf'\1"{new_password}"', conf, count=1)
+    write_rw_eap_conf(new_conf)
+
+
+@app.post("/api/customers/{customer_id}/rotate_eap")
+def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session)):
+    """v1.3.2 — rotate the EAP password for a customer's active device.
+
+    Generates a new random password, computes new NTLM hash, updates
+    users.password in DB, replaces the secret inside the existing
+    eap-{identity} block in rw-eap.conf (the EAP identity itself is
+    preserved — only the password changes), then reloads charon creds.
+
+    Behavior:
+      - Identity is NEVER changed (Lesson #193 lineage, Bug #4 history).
+      - Customer's Windows laptop will silently fail auth until they
+        re-onboard with the new credentials via the installer token flow.
+      - The customer's `eap_rotated_at` is set to now so the UI can
+        surface a "credentials rotated" banner.
+      - Operator does NOT receive the new password in the response —
+        it travels to the customer only via the installer token flow
+        (defense in depth: operator screen, logs, screenshots all
+        excluded from credential exposure).
+
+    Refuses on:
+      - Missing customer (404)
+      - Operator account (403) — operator has no EAP creds to rotate
+      - Archived customer (409)
+      - Customer with no devices (409)
+    """
+    cust_rows = db_query(
+        f"SELECT id, name, is_operator, status FROM customers WHERE id = {int(customer_id)};"
+    )
+    if not cust_rows:
+        raise HTTPException(404, "Customer not found")
+    cust = cust_rows[0]
+    if cust["is_operator"]:
+        raise HTTPException(403, "cannot rotate EAP for the operator account")
+    if cust["status"] == "archived":
+        raise HTTPException(409, "cannot rotate EAP for an archived customer (unarchive first)")
+
+    # Find the customer's active device
+    devices = db_query(
+        f"SELECT id, strongswan_user_id, device_name, is_active FROM devices "
+        f"WHERE customer_id = {int(customer_id)} ORDER BY id LIMIT 1;"
+    )
+    if not devices:
+        raise HTTPException(409, "customer has no devices; nothing to rotate")
+    dev = devices[0]
+
+    # Look up EAP identity from users table
+    user_rows = db_query(
+        f"SELECT id, name FROM users WHERE id = {int(dev['strongswan_user_id'])};"
+    )
+    if not user_rows:
+        raise HTTPException(500, f"device points to missing users row id={dev['strongswan_user_id']}")
+    eap_identity = user_rows[0]["name"]
+
+    # Generate new password
+    new_password = secrets.token_urlsafe(16)
+    ntlm = ntlm_hash_bytes(new_password)
+    now = int(time.time())
+
+    # 1. Update users.password (BLOB column holds NTLM hash as X'...')
+    db_exec(
+        f"UPDATE users SET password = X'{ntlm.hex().upper()}' WHERE id = {int(user_rows[0]['id'])};"
+    )
+
+    # 2. Replace the secret in rw-eap.conf (preserve EAP identity)
+    _replace_eap_secret(eap_identity, new_password)
+
+    # 3. Mark customer as rotated (timestamp column added in v1.3.2 migration)
+    db_exec(
+        f"UPDATE customers SET eap_rotated_at = {now} WHERE id = {int(customer_id)};"
+    )
+
+    # 4. Reload charon creds so the new secret is active
+    reload_charon_creds()
+
+    # 5. Audit (the new_password is NOT in the audit payload — no plaintext in logs)
+    _audit(user.get("name") or "operator", "customer_eap_rotate", {
+        "_target_type": "customer",
+        "_target_id":   int(customer_id),
+        "customer_name": cust["name"],
+        "eap_identity":  eap_identity,
+        "device_id":     dev["id"],
+        "device_name":   dev["device_name"],
+        "rotated_at":    now,
+    })
+
+    log.info(
+        "EAP rotated customer=%s identity=%s device=%s by=%s",
+        cust["name"], eap_identity, dev["device_name"],
+        user.get("name") or "operator",
+    )
+
+    return {
+        "ok": True,
+        "customer_id":  int(customer_id),
+        "customer_name": cust["name"],
+        "eap_identity": eap_identity,
+        "eap_rotated_at": now,
+        "device_id":    dev["id"],
+        "device_name":  dev["device_name"],
+        # Operator gets confirmation; new password travels ONLY via installer token flow.
+        "next_step":    "customer must re-onboard via the installer token to receive new credentials",
+    }
+
+
 @app.post("/api/customers/{customer_id}/archive")
 def archive_customer(customer_id: int, user: dict = Depends(require_session)):
     """v1.2.12 — soft-delete: set status='archived'. Reversible. Keeps all data, devices, audit, leases."""
