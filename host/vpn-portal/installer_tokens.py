@@ -161,21 +161,31 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
             f"{now}, {expires}, {_q(op_name)});"
         )
 
-        # Build the PowerShell one-liner the operator sends to customer.
-        # v2.5.1 (2026-06-25) — Bugfix: PowerShell 5.1 (default on Windows 10)
-        # parses `&` as a background-job operator even inside single quotes.
-        # Result: customer pasting the one-liner into PowerShell Admin gets
-        #   ParserError: AmpersandNotAllowed
-        # Fix: pack slug + token into a single query param as base64.
-        # The script decodes it back to slug:token on first run.
-        # No `&` in the URL → works in PS 5.1, PS 7, cmd, bash.
+        # Build the PowerShell block the operator sends to customer.
+        # v2.5.2 (2026-06-25) — Zun caught me: iex (irm 'URL') hits two problems:
+        #   1. PowerShell 5.1 parses `&` in the URL as a background-job operator
+        #      (ParserError: AmpersandNotAllowed) — fixed by packing slug+token
+        #      as base64 `?t=BASE64` so there's no `&` in the URL.
+        #   2. $MyInvocation.MyCommand.Definition doesn't reliably carry the URL
+        #      into the script when invoked via iex (irm 'URL'), so the script's
+        #      URL-detection regex often misses the token entirely.
+        # Cleaner fix: give the customer a 3-line block (per DAT-VPN-WINDOWS-
+        # CLIENT-MASTER-001.md canonical invocation):
+        #   curl.exe -o $env:TEMP\setup.ps1 'URL'   # download without query
+        #   & $env:TEMP\setup.ps1 -t BASE64PACKED   # execute with token arg
+        #   rasdial DatabyteVPN                     # connect
+        # -t flag is handled by the script's param block (decodes the packed
+        # slug:token). Works in PS 5.1, PS 7, no MyInvocation dependency.
         import base64
         packed = base64.urlsafe_b64encode(f"{cust['name']}:{token}".encode()).decode().rstrip("=")
         installer_url = (
             f"https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1"
-            f"?t={packed}"
         )
-        ps_cmd = f"iex (irm '{installer_url}')"
+        ps_cmd = "\n".join([
+            f"curl.exe -o $env:TEMP\\setup.ps1 '{installer_url}'",
+            f"& $env:TEMP\\setup.ps1 -t {packed}",
+            "rasdial DatabyteVPN",
+        ])
 
         _audit(op_name, "installer_token_create", {
             "_target_type": "customer",

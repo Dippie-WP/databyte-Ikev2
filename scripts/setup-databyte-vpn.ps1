@@ -63,34 +63,54 @@ $PortalBase     = "https://vpn-portal.databyte.co.za"
 # ============================================================================
 # STEP 0 - Fetch credentials via installer token (operator-issued)
 # ============================================================================
-# If the script was downloaded with ?t=BASE64 (operator-generated installer
-# link), fetch real customer creds from the portal.
+# Three ways the script can receive the installer token:
+#   1. setup.ps1 -t BASE64PACKED         (canonical 3-line block per master doc)
+#   2. setup.ps1 slug token              (legacy 2-positional-args form)
+#   3. iex (irm 'URL?t=BASE64PACKED')    (legacy URL-detection — may not work
+#                                        in all PS versions; MyInvocation is
+#                                        unreliable when invoked this way)
+# The 3-line block is the recommended path. It works in PS 5.1, PS 7, and
+# any shell that can run curl + a .ps1 file.
+#
 # The BASE64 packs slug:token so the URL has no `&` (PowerShell 5.1 would
 # parse `&` as background-job operator and reject the whole command).
-# If no token, fall back to the hardcoded test customer.
+# If no token is given, fall back to the hardcoded test customer (lab mode).
 $Username = $null
 $Password = $null
 $InstallerSlug  = $null
 $InstallerToken = $null
+function Decode-PackedToken {
+    param([string]$Packed)
+    $padded = $Packed + '=' * (4 - ($Packed.Length % 4))
+    $decoded = [System.Text.Encoding]::UTF8.GetString(
+        [System.Convert]::FromBase64String($padded.Replace('-','+').Replace('_','/'))
+    )
+    $parts = $decoded -split ':', 2
+    if ($parts.Count -eq 2) { return @($parts[0], $parts[1]) }
+    return $null
+}
 try {
-    if ($args.Count -ge 2) {
+    # Path 1 (canonical): -t BASE64PACKED
+    $tIdx = [array]::IndexOf($args, '-t')
+    if ($tIdx -ge 0 -and $tIdx + 1 -lt $args.Count) {
+        $decoded = Decode-PackedToken $args[$tIdx + 1]
+        if ($decoded) {
+            $InstallerSlug  = $decoded[0]
+            $InstallerToken = $decoded[1]
+        }
+    }
+    # Path 2: setup.ps1 slug token  (positional, 2 args)
+    elseif ($args.Count -ge 2 -and $args[0] -notlike '-*') {
         $InstallerSlug  = $args[0]
         $InstallerToken = $args[1]
-    } elseif ($MyInvocation.MyCommand.Definition -match '\?t=([A-Za-z0-9_\-]+)') {
-        # v2.5.1 (2026-06-25) — decode ?t=BASE64(slug:token)
-        try {
-            $packed = $Matches[1]
-            # Restore URL-safe base64 padding before decode
-            $padded = $packed + '=' * (4 - ($packed.Length % 4))
-            $decoded = [System.Text.Encoding]::UTF8.GetString(
-                [System.Convert]::FromBase64String($padded.Replace('-','+').Replace('_','/'))
-            )
-            $parts = $decoded -split ':', 2
-            if ($parts.Count -eq 2) {
-                $InstallerSlug  = $parts[0]
-                $InstallerToken = $parts[1]
-            }
-        } catch {}
+    }
+    # Path 3 (legacy, unreliable): iex (irm 'URL?t=...') — try Definition match
+    elseif ($MyInvocation.MyCommand.Definition -match '\?t=([A-Za-z0-9_\-]+)') {
+        $decoded = Decode-PackedToken $Matches[1]
+        if ($decoded) {
+            $InstallerSlug  = $decoded[0]
+            $InstallerToken = $decoded[1]
+        }
     }
 } catch {}
 
