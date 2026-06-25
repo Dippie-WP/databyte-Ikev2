@@ -111,6 +111,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
 elif command -v rsync >/dev/null && ssh "${VPS_HOST}" 'command -v rsync' >/dev/null 2>&1; then
     USE_RSYNC=1
     rsync -av --delete \
+        --rsync-path='sudo rsync' \
+        --chown=vpn-portal:vpn-portal \
         --exclude '__pycache__' \
         --exclude '.venv' \
         --exclude '*.bak*' \
@@ -121,7 +123,7 @@ else
     # tar+ssh fallback. No --delete equivalent; we'll first delete the dest contents
     # (preserving .last_deployed), then extract. Slower but works without rsync.
     echo "  [info] rsync not available; using tar+ssh fallback"
-    ssh "${VPS_HOST}" "find ${VPS_PORTAL_DIR} -mindepth 1 \
+    ssh "${VPS_HOST}" "sudo find ${VPS_PORTAL_DIR} -mindepth 1 \
         ! -name '.last_deployed' \
         ! -name '*.bak*' \
         -exec rm -rf {} +" 2>&1 | tail -3
@@ -130,7 +132,8 @@ else
         --exclude='*.bak*' \
         --exclude='.last_deployed' \
         -czf - -C "${SOURCE_DIR}" . | \
-        ssh "${VPS_HOST}" "tar -xzf - -C ${VPS_PORTAL_DIR}/" 2>&1 | tail -5
+        ssh "${VPS_HOST}" "sudo tar -xzf - --no-same-owner -C ${VPS_PORTAL_DIR}/ && \
+            sudo chown -R vpn-portal:vpn-portal ${VPS_PORTAL_DIR}" 2>&1 | tail -5
 fi
 
 echo ""
@@ -142,6 +145,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 else
     ssh "${VPS_HOST}" 'sudo systemctl restart vpn-portal.service'
 fi
+# (no change needed — already uses sudo)
 
 echo ""
 echo "=== STEP 5: wait for /api/health 200 ==="
@@ -247,8 +251,10 @@ deployed_sha256:
 health_url=${SMOKE_URL}
 public_url=${PUBLIC_HTML_URL}
 EOF
-    rsync "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>/dev/null || \
-        scp "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>&1 | tail -2
+    rsync -av --rsync-path='sudo rsync' \
+        "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>&1 | tail -2 || \
+    scp "${STATE_FILE}" "${VPS_HOST}:${VPS_PORTAL_DIR}/.last_deployed" 2>&1 | tail -2 || \
+    cat "${STATE_FILE}" | ssh "${VPS_HOST}" "sudo tee ${VPS_PORTAL_DIR}/.last_deployed >/dev/null"
     echo "  wrote ${STATE_FILE} ✓"
     echo "  wrote ${VPS_PORTAL_DIR}/.last_deployed on VPS ✓"
 fi
