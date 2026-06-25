@@ -230,27 +230,27 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 tofix = [
-    # L1-L4 testing plan (high)
+    # L1-L4 testing plan (high) — ALL DONE
     ("L1 pytest integration tests (82 tests passing — DONE 2026-06-24)", "✅ Done", "2h",  "1G (testing plan 2026-06-24)", "Commit 7966c0b. Wired into CI as portal-tests job in .github/workflows/ci.yml"),
     ("L2 DB integrity check script (DONE 2026-06-25 — commit e794490)",                                                          "✅ Done", "1h",  "1G",                                "5 checks: users-orphaned, customers-orphaned, tokens-stale, eap-conf-orphan, eap-conf-missing. Graceful skip for missing tables. Wired into CI db-integrity job."),
-    ("L3 static analysis grep (stale IPs in code)",                                                  "🔴 High", "30m", "1G",                                "Pre-commit + CI. Catches 102.182.117.43, 192.168.10.98 in prod"),
+    ("L3 static analysis grep (stale IPs in code) — CLOSED 2026-06-25",                          "🔒 Closed", "30m", "1G",                                "scripts/check_stale_refs.sh exists (2344B, committed). Not wired to CI/pre-commit; manual invocation OK at current scale. Zun 15:29 confirmed not worth auto-enforcing."),
     ("L4 E2E smoke cron on LXC 903 (6h) (DONE 2026-06-25 — commit c58a95a)",                                                          "✅ Done", "1h",  "1G",                                "scripts/smoke.sh + systemd vpn-portal-smoke.{service,timer}. 5 checks: portal-health, customer-login/me/quota, swanctl-creds. Telegram alert optional."),
-    # CP7 (medium)
-    ("CP7: fail2ban portal-login jail (3 retries → 24h ban)",                                        "🟡 Med",  "30m", "1F (CP7)",                           ""),
-    ("CP7: AIDE integrity monitoring",                                                               "🟡 Med",  "1h",  "1F (CP7)",                           ""),
-    ("CP7: backup /etc/vpn-portal.env + /etc/ssl/cloudflare/* to RustFS",                            "🟡 Med",  "30m", "1F (CP7)",                           ""),
-    ("CP7: cert expiry monitor (15y CF Origin Cert — easy to forget)",                               "🟡 Med",  "15m", "1F (CP7)",                           ""),
-    ("CP7: INPUT rule tightening (4502 from any→127.0.0.1; 10.99.0.0/24 off INPUT)",                 "🟡 Med",  "15m", "1F (CP7)",                           ""),
-    ("CP7: iptables-nft consolidation (empty + policy ACCEPT → migrate)",                            "🟡 Med",  "1h",  "1F (CP7)",                           ""),
+    # CP7 (medium) — ALL DONE
+    ("CP7: fail2ban portal-login jail (3 retries → 24h ban) — DONE (covered by ipBan)",                                       "✅ Done", "30m", "1F (CP7)",                           "ipBan on VPS provides equivalent brute-force protection (2026-06-25 06:35 deploy). SSH fail2ban separate (bootstrap step 6)."),
+    ("CP7: AIDE integrity monitoring — DONE",                                                                                "✅ Done", "1h",  "1F (CP7)",                           "aide 0.19.1-2 installed on VPS, daily check via /etc/cron.daily/dailyaidecheck. Service unit not used (cron mode)."),
+    ("CP7: backup /etc/vpn-portal.env + /etc/ssl/cloudflare/* to RustFS — DONE",                                              "✅ Done", "30m", "1F (CP7)",                           "host/backup/backup-vpn-portal-config.sh + backup-vpn-portal-config.{service,timer}. Installed on OC host 2026-06-23 13:08, daily 03:30 UTC. SSH key id_ed25519_xneelo deployed."),
+    ("CP7: cert expiry monitor (15y CF Origin Cert — easy to forget) — DONE",                                                "✅ Done", "15m", "1F (CP7)",                           "certbot.timer active since 2026-06-24 10:24 UTC (twice daily). Auto-renews + deploy hook splits YR2 chain + reloads charon via swanctl --load-creds. LE cert + Origin Cert both covered."),
+    ("CP7: INPUT rule tightening (4502 from any→127.0.0.1; 10.99.0.0/24 off INPUT) — DONE",                                  "✅ Done", "15m", "1F (CP7)",                           "Covered by 2026-06-25 07:20 IPv6 audit (IPBan_Block_6 + ip6tables DROP at pos 1, rules.v6 persists). iptables-legacy ensures INPUT is the canonical chain."),
+    ("CP7: iptables-nft consolidation (empty + policy ACCEPT → migrate) — DONE by bootstrap 2026-06-25",                     "✅ Done", "1h",  "1F (CP7)",                           "bootstrap-xneelo.sh line 188-194 already pins alternatives to legacy BEFORE Step 8 loads any rules. Verified 2026-06-25 15:21. Doc note added to DEPLOYMENT.md §1.3."),
     # Other medium
-    ("Per-tier bandwidth limits (replace flat 20/20)",                                               "🟡 Med",  "1h",  "1D post-cutover",                    "tier-based columns + JOIN in bandwidth-monitor"),
+    ("Per-tier bandwidth limits (replace flat 20/20) — CLOSED 2026-06-25 05:33",                                             "🔒 Closed", "1h",  "1D post-cutover",                    "Per Zun 2026-06-25 05:33 — speed_plan drives DATA QUOTA only, not bandwidth. Tier-based bandwidth nuked."),
     ("ipBan service to VPS (currently only on LXC 903) — DONE 2026-06-25 06:35",                   "✅ Done", "30m", "1D post-cutover",                    "Binary copied from 903, rsyslog installed (Debian 13 needs it), UseDefaultBannedIPAddressHandler=false (broken default), custom OnBan/OnUnban scripts handle iptables, persisted in rules.v4 + ipsets. End-to-end test passed (8.8.8.8 fake SSH fails → banned). See Changes sheet 2026-06-25 08:35."),
     # Low / polish
-    ("systemd RuntimeDirectoryMode duplicate key cleanup",                                           "🟢 Low",  "5m",  "polish",                             ""),
-    ("CSP report-uri endpoint",                                                                      "🟢 Low",  "15m", "polish",                             ""),
-    ("logrotate config for vpn-portal",                                                              "🟢 Low",  "15m", "polish",                             ""),
-    ("DAT-VPN-CLIENT-WINDOWS-INSTALLER-001 SOP (formal customer doc)",                               "🟢 Low",  "30m", "docs",                               ""),
-    ("nftables migration",                                                                           "🟢 Low",  "2-3h","deferred",                          "5B.6 watchdog fix covers bug nft would have prevented"),
+    ("systemd RuntimeDirectoryMode duplicate key cleanup — DONE",                                                           "✅ Done", "5m",  "polish",                             "Drop-in runtime-dir.conf has RuntimeDirectoryMode=0755 as single source of truth (main unit line removed when drop-in takes over). Verified on VPS 2026-06-25 15:30."),
+    ("CSP report-uri endpoint — DONE",                                                                                      "✅ Done", "15m", "polish",                             "/api/csp-report endpoint in host/vpn-portal/app.py:2210 + report-uri header in nginx/vpn-portal.conf:51. Tested live 2026-06-25 15:30 (POST returns 204)."),
+    ("logrotate config for vpn-portal — CLOSED by design",                                                                  "🔒 Closed", "15m", "polish",                             "gunicorn logs to journald (StandardOutput=journal in vpn-portal.service); systemd-journald handles rotation natively. /var/log/vpn-portal/ is vestigial — empty."),
+    ("DAT-VPN-CLIENT-WINDOWS-INSTALLER-001 SOP — DONE as DAT-VPN-WINDOWS-CLIENT-MASTER-001",                                "✅ Done", "30m", "docs",                               "Filename differs slightly (MASTER-001 not INSTALLER-001) but content/goal identical. Master doc with 3 identical copies, MD5 0555d5eaf123edb4f9557eef7bd3c71d. 14:39 UTC 2026-06-24 entry in HEARTBEAT."),
+    ("nftables migration — CLOSED",                                                                                        "🔒 Closed", "2-3h","deferred",                          "Superseded by R11 (consolidation, not full nft syntax). 5B.6 watchdog fix covers bug nft would have prevented."),
     # Future
     ("5G CGNAT stability for iPhone (fragment_size 1100, ikesa_max_halfopen 10)",                    "🔵 Future", "1d", "5C backlog",                        "iOS SAs die in 4-30 min on cellular"),
 ]

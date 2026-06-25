@@ -44,6 +44,8 @@ If you DON'T use firewalld, you can use the iptables rules in `host/iptables/rul
 
 ### 1.3 iptables (MSS clamp — CRITICAL for 5G)
 
+> **Backend:** `iptables-legacy` (not iptables-nft). Debian 13 defaults to nft; `scripts/bootstrap-xneelo.sh` line 188-194 pins alternatives to legacy before Step 8 loads any rules. Don't switch — charon VICI + bandwidth-monitor depend on legacy semantics.
+
 ```bash
 sudo apt install iptables-persistent
 # Netfilter asks to save current rules — say yes
