@@ -160,6 +160,9 @@ changes = [
     ("2026-06-25 15:58", "Sessions tab filter to online-only (v1.6.2)",
      "Dashboard showed '2 active leases' when nobody was connected — charon keeps offline leases sticky for reconnection stickiness, but the dashboard's job is 'who is connected right now'. Filter S.leases to online === true in renderSessions (table + count) + Pools card counter (both renderDashboard and renderSessions). Cache-bust app.js?v=1.5.1 → v=1cc2855.",
      "commit 1cc2855 (app.js + index.html), b4e6d68 (.last_deployed)", "🟡 Med", "Live audit: API still returns 3 leases (1 online + 2 offline); deployed app.js?v=1cc2855 contains onlineLeases.filter(l => l.online); 13/13 customer-facing smoke PASS; L1 pytest 7/7 PASS for lease/sa_parser tests", "✅"),
+    ("2026-06-25 16:12", "quota-monitor deployed on VPS (Step 18 in bootstrap)",
+     "data_used_bytes was 0 forever because quota-monitor.service was never deployed on VPS. The per-VIP iptables counter rules in FORWARD chain were also missing (0 → 508). Plus the strongswan-iptables-watchdog needed so per-VIP counters survive strongswan container restart events. Fix is Step 18 in bootstrap-xneelo.sh so future VPSes get this automatically. Note: symlink /home/zunaid/strongswan/swanctl → /opt/strongswan-vpn-gateway/docker/swanctl for hard-cut path (rw-eap.conf).",
+     "commit 83ea80a (bootstrap-xneelo.sh); installed on VPS: quota-monitor.py, quota-monitor.service, strongswan-iptables-watchdog.{sh,service}, 508 iptables quota: rules in FORWARD + rules.v4", "🟠 High", "Live audit: zade.data_used_bytes 0 → 260,340 in 4 daemon iterations (60s poll); API /api/customers/60 returns data_used_bytes=260340; L1 pytest 7/7 PASS; customer-facing smoke 13/13 (Issue 1 deploy); strongSwan SA ESTABLISHED for 2075s — per-VIP rules didn't break tunnel", "✅"),
 ]
 for r, row in enumerate(changes, start=1):
     for c, v in enumerate(row):
