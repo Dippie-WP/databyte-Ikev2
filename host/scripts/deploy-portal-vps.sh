@@ -260,7 +260,7 @@ fi
 echo ""
 echo "=== STEP 8.5: customer-facing flow smoke test ==="
 echo "(this is the audit — it actually runs the command the customer would paste)"
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 TEST_SCRIPT="${SCRIPT_DIR}/tools/test-customer-facing-commands.sh"
 if [[ -x "$TEST_SCRIPT" ]]; then
     if "$TEST_SCRIPT"; then
