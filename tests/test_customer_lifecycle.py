@@ -401,3 +401,248 @@ class TestListAndGetCustomers:
         # Audit log should have at least the create_client entry
         actions = [a["action"] for a in body.get("audit_log", [])]
         assert "create_client" in actions
+
+
+# ---------- v1.3.2 — Rotate EAP credentials (Bug #4 fix) ----------
+
+class TestRotateEAPCredentials:
+    """In-portal EAP credential rotation. Real prod bug: previously required
+    SSH to VPS + manual ops/rotate-vpn-credentials.py invocation. Now the
+    operator clicks a button in the portal UI.
+
+    Behavioral contract:
+      - Rotates the password (users.password NTLM hash + rw-eap.conf secret)
+      - PRESERVES the EAP identity (Lesson #193 / Bug #4 lineage — never rename)
+      - Sets customers.eap_rotated_at to now
+      - Reloads charon creds
+      - Writes audit row (NO plaintext password in audit)
+      - Returns success but NOT the new password (defense in depth)
+
+    Refuses on:
+      - 404: customer not found
+      - 403: customer is the operator account
+      - 409: customer is archived (unarchive first)
+      - 409: customer has no devices
+    """
+
+    def _create(self, client, operator_login, name, device_name="laptop"):
+        return client.post(
+            "/api/customers",
+            json={
+                "display_name": name,
+                "tier_name": "tier_5gb",
+                "device_name": device_name,
+                "device_type": "Windows",
+            },
+            cookies={"session": operator_login},
+        ).json()
+
+    def test_rotate_succeeds_and_preserves_identity(self, client, operator_login, rw_eap_conf):
+        c = self._create(client, operator_login, "Rotate Co")
+        cid = c["customer"]["id"]
+        eap_identity_before = c["eap_identity"]
+        password_before = c["password"]
+
+        # Confirm eap block exists with old secret
+        assert f'eap-{eap_identity_before}' in rw_eap_conf.read_text()
+        assert password_before in rw_eap_conf.read_text()
+
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        # Identity is PRESERVED (Lesson #193 / Bug #4 lineage)
+        assert body["eap_identity"] == eap_identity_before
+        assert body["customer_id"] == cid
+        assert body["eap_rotated_at"] > 0
+        # New password is NOT in the response (defense in depth)
+        assert "password" not in body
+        assert "new_password" not in body
+
+    def test_rotate_changes_password_in_rw_eap_conf(self, client, operator_login, rw_eap_conf):
+        c = self._create(client, operator_login, "Rotate Conf Co")
+        cid = c["customer"]["id"]
+        eap_identity = c["eap_identity"]
+        old_password = c["password"]
+        old_conf = rw_eap_conf.read_text()
+        assert f'secret = "{old_password}"' in old_conf
+
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+        new_conf = rw_eap_conf.read_text()
+        # Old secret is gone
+        assert f'secret = "{old_password}"' not in new_conf
+        # Block still exists with same identity
+        assert f'eap-{eap_identity}' in new_conf
+        # New secret is present (some non-empty quoted value)
+        import re
+        secret_match = re.search(
+            rf"eap-{re.escape(eap_identity)}\s*\{{[^}}]*secret\s*=\s*\"([^\"]+)\"",
+            new_conf,
+            re.DOTALL,
+        )
+        assert secret_match is not None
+        assert len(secret_match.group(1)) > 8, "new secret should be non-trivial"
+
+    def test_rotate_updates_users_password_ntlm_hash(self, client, operator_login, db_path):
+        c = self._create(client, operator_login, "Rotate Hash Co")
+        cid = c["customer"]["id"]
+        eap_identity = c["eap_identity"]
+        old_password = c["password"]
+
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+
+        # Read users.password from DB
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT password FROM users WHERE name=?", (eap_identity,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        stored = row[0]
+        if isinstance(stored, str):
+            stored = bytes.fromhex(stored)
+        # Old password hash should NOT match anymore.
+        # Use portal_auth.ntlm_hash_bytes (uses openssl legacy provider, not
+        # the hashlib.md4 path which is broken on Python 3.13+).
+        import portal_auth
+        old_ntlm = portal_auth.ntlm_hash_bytes(old_password)
+        assert bytes(stored).lower() != old_ntlm.lower(), (
+            "users.password still matches old plaintext — rotation didn't take effect"
+        )
+
+    def test_rotate_sets_eap_rotated_at_timestamp(self, client, operator_login, db_path):
+        c = self._create(client, operator_login, "Rotate TS Co")
+        cid = c["customer"]["id"]
+
+        # Before rotate: eap_rotated_at should be NULL
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT eap_rotated_at FROM customers WHERE id=?", (cid,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] is None, f"eap_rotated_at should start NULL, got {row[0]}"
+
+        # Rotate
+        before = int(__import__("time").time())
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+        after = int(__import__("time").time())
+
+        # After rotate: eap_rotated_at should be set to a recent timestamp
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT eap_rotated_at FROM customers WHERE id=?", (cid,)
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        rotated_at = row[0]
+        assert rotated_at is not None
+        assert before <= rotated_at <= after, (
+            f"eap_rotated_at={rotated_at} outside [{before},{after}]"
+        )
+
+    def test_rotate_writes_audit_log_without_plaintext(self, client, operator_login):
+        c = self._create(client, operator_login, "Rotate Audit Co")
+        cid = c["customer"]["id"]
+        eap_identity = c["eap_identity"]
+
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+
+        # Read audit log via API
+        ar = client.get(
+            "/api/admin/audit?target_type=customer&target_id=" + str(cid),
+            cookies={"session": operator_login},
+        )
+        body = ar.json()
+        actions = [row["action"] for row in body["rows"]]
+        assert "customer_eap_rotate" in actions
+        # Find the row and check NO plaintext password leaked
+        rotate_row = [r for r in body["rows"] if r["action"] == "customer_eap_rotate"][0]
+        import json as _json
+        payload_str = _json.dumps(rotate_row["payload"])
+        assert eap_identity in payload_str  # identity is OK to log
+        # No password fields
+        assert "password" not in payload_str.lower()
+        assert "secret" not in payload_str.lower()
+
+    def test_rotate_archived_customer_returns_409(self, client, operator_login):
+        c = self._create(client, operator_login, "Rotate Archived Co")
+        cid = c["customer"]["id"]
+        # Archive first
+        r = client.post(
+            f"/api/customers/{cid}/archive",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+        # Rotate should fail
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 409
+        assert "archived" in r.text.lower()
+
+    def test_rotate_missing_customer_returns_404(self, client, operator_login):
+        r = client.post(
+            "/api/customers/99999/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 404
+
+    def test_rotate_operator_returns_403(self, client, operator_login):
+        # Get the operator's customer id
+        r = client.get("/api/customers", cookies={"session": operator_login})
+        body = r.json()
+        # The first item is typically the operator (ORDER BY is_operator DESC)
+        operator_customer = next(
+            (c for c in body if c.get("is_operator")), None
+        )
+        assert operator_customer is not None, "expected an operator customer in seed"
+        op_id = operator_customer["id"]
+        r = client.post(
+            f"/api/customers/{op_id}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 403
+        assert "operator" in r.text.lower()
+
+    def test_rotate_reload_charon_called(self, client, operator_login, monkeypatch):
+        """Verify reload_charon_creds is called (catches the bug where rotation
+        forgets to reload and charon keeps serving the OLD secret)."""
+        calls = []
+        import app as app_mod
+        original_reload = app_mod.reload_charon_creds
+        def counted_reload():
+            calls.append("reload")
+            return original_reload()
+        monkeypatch.setattr(app_mod, "reload_charon_creds", counted_reload)
+
+        c = self._create(client, operator_login, "Rotate Reload Co")
+        cid = c["customer"]["id"]
+        r = client.post(
+            f"/api/customers/{cid}/rotate_eap",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200
+        assert "reload" in calls, "reload_charon_creds was not called after rotation"

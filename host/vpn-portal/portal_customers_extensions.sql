@@ -12,3 +12,7 @@
 
 ALTER TABLE customers ADD COLUMN billing_id TEXT;
 ALTER TABLE customers ADD COLUMN email TEXT;
+-- v1.3.2 — EAP credential rotation (Bug #4 fix)
+-- Added 2026-06-25: track when EAP creds were last rotated for a customer.
+-- Used by /api/customers/{id}/rotate_eap. NULL = never rotated.
+ALTER TABLE customers ADD COLUMN eap_rotated_at INTEGER;
