@@ -189,21 +189,25 @@ if [[ "$DEPLOYED_HTML_SHA" != "$SOURCE_HTML_SHA" ]]; then
     if [[ $DRY_RUN -eq 0 ]]; then exit 5; fi
     MISMATCH=1
 fi
-echo "  all SHAs match ✓"
+if [[ $MISMATCH -eq 0 ]]; then
+    echo "  all SHAs match ✓"
+fi
 
 echo ""
 echo "=== STEP 7: verify feature marker in LIVE HTML ==="
 # Fetch the public HTML, look for the feature marker.
-MATCH_COUNT="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 | grep -c '${FEATURE_MARKER}'" || echo 0)"
-echo "  '${FEATURE_MARKER}' matches in live HTML: ${MATCH_COUNT}"
-if [[ "$MATCH_COUNT" -lt 1 ]]; then
+MATCH_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c '${FEATURE_MARKER}'" 2>/dev/null || true)"
+FEATURE_MATCH="$(echo "${MATCH_RAW}" | head -1 | tr -dc '0-9')"
+[[ -z "${FEATURE_MATCH}" ]] && FEATURE_MATCH=0
+echo "  '${FEATURE_MARKER}' matches in live HTML: ${FEATURE_MATCH}"
+if [[ "${FEATURE_MATCH}" -lt 1 ]]; then
     echo "FAIL: feature marker not found in live HTML"
     echo "Either: (a) feature not deployed, (b) marker string wrong, (c) page cached"
     echo "Try: curl -sk '${PUBLIC_HTML_URL}' | head -50"
     if [[ $DRY_RUN -eq 0 ]]; then exit 6; fi
+else
+    echo "  feature marker found ✓"
 fi
-echo "  feature marker found ✓"
-FEATURE_MATCH="${MATCH_COUNT}"
 
 echo ""
 if [[ $DRY_RUN -eq 1 ]]; then
