@@ -1450,15 +1450,24 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     steps.append({"step": "db_reset", "ok": True, "reset_from_bytes": db_reset_from})
 
     # 2. Restore EAP secrets if KILLED
+    # v1.6.7 — Bug fix: must query the EAP IDENTITY (users.name), not device_name.
+    # rw-eap.conf blocks use `id = zade-cellphone` (EAP identity format =
+    # `{customer.name}-{device.device_name}`), not `cellphone`. The old code
+    # checked `"zade-cellphone" in ["cellphone"]` which always failed, so
+    # KILLED detection missed every customer after a hard cut. Caught by Zun
+    # 2026-06-25: "I reset zade data usage after he reach the hard cut but
+    # he was still unable to connect back to the vpn after the data reset".
     devs = db_query(
-        f"SELECT d.device_name FROM devices d WHERE d.customer_id = {int(customer_id)};"
+        f"SELECT u.name AS eap_identity "
+        f"FROM devices d JOIN users u ON u.id = d.strongswan_user_id "
+        f"WHERE d.customer_id = {int(customer_id)};"
     )
     secret_restored = False
     secret_devices = []
     backup_path = ""
 
     if devs:
-        dev_names = [d.get("device_name") for d in devs if d.get("device_name")]
+        dev_names = [d.get("eap_identity") for d in devs if d.get("eap_identity")]
 
         # 2a. Read the current conf file (ssh_903 with no bash -c)
         try:
@@ -1481,13 +1490,10 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
 
         # 2c. Detect KILLED secrets for any of this customer's devices.
         # Parse the conf locally: find blocks "id = X\nsecret = Y" and check Y for KILLED.
+        # State machine: track current block's id; on each secret line, check if it's
+        # KILLED AND belongs to one of our customer's devices.
         killed_devs = []
         if conf:
-            for line in conf.splitlines():
-                m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
-                if m_id and m_id.group(1) in dev_names:
-                    dev_in_block = m_id.group(1)
-            # Use a simple state-machine parser
             current_id = None
             for line in conf.splitlines():
                 m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
