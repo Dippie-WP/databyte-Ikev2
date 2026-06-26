@@ -942,3 +942,347 @@ class TestSpeedPlan:
         # Speed plan is 40/20 (independent)
         down, up = self._read_bandwidth(db_path, cust_id)
         assert (down, up) == (40, 20)
+
+
+class TestSpeedPlanPatch:
+    """v1.7.0 — speed_plan in PATCH /api/customers/{id} (per-customer bandwidth edit).
+
+    Mirrors TestSpeedPlan but exercises the PATCH endpoint. Backend precedence
+    (consistent with POST):
+      1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
+      2. speed_plan preset ('standard' / 'asymmetric_40_20')
+      3. speed_plan='custom' OR no speed_plan AND no explicit → don't touch bandwidth
+    """
+
+    def _create(self, client, operator_login, **extra):
+        body = {
+            "display_name": "Patch Speed Co",
+            "tier_name": "tier_5gb",
+            "device_name": "laptop",
+            "device_type": "Windows",
+        }
+        body.update(extra)
+        return client.post(
+            "/api/customers",
+            json=body,
+            cookies={"session": operator_login},
+        )
+
+    def _read_bandwidth(self, db_path, cust_id):
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT bandwidth_down_mbps, bandwidth_up_mbps FROM customers WHERE id = ?",
+            (cust_id,),
+        ).fetchone()
+        conn.close()
+        return row
+
+    def _patch(self, client, operator_login, cust_id, body):
+        return client.patch(
+            f"/api/customers/{cust_id}",
+            json=body,
+            cookies={"session": operator_login},
+        )
+
+    def test_patch_speed_plan_standard_sets_20_20(self, client, operator_login, db_path):
+        """Customer starts at 40/40 (custom). PATCH speed_plan=standard → 20/20."""
+        r = self._create(client, operator_login,
+                         display_name="Patch Std",
+                         bandwidth_down_mbps=40,
+                         bandwidth_up_mbps=40)
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        # Sanity: starts at 40/40
+        assert self._read_bandwidth(db_path, cust_id) == (40, 40)
+        # PATCH speed_plan=standard → 20/20
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "standard"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (20, 20), (
+            f"speed_plan=standard in PATCH failed: {r.text}"
+        )
+
+    def test_patch_speed_plan_asymmetric_40_20(self, client, operator_login, db_path):
+        """Customer starts at 20/20. PATCH speed_plan=asymmetric_40_20 → 40/20."""
+        r = self._create(client, operator_login, display_name="Patch Asym")
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        assert self._read_bandwidth(db_path, cust_id) == (20, 20)
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "asymmetric_40_20"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (40, 20), (
+            f"speed_plan=asymmetric_40_20 in PATCH failed: {r.text}"
+        )
+
+    def test_patch_explicit_bandwidth_wins_over_speed_plan(
+        self, client, operator_login, db_path,
+    ):
+        """If both speed_plan and explicit bandwidth_* are provided in PATCH,
+        explicit wins (consistent with POST)."""
+        r = self._create(client, operator_login, display_name="Patch Override")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {
+            "speed_plan": "standard",
+            "bandwidth_down_mbps": 75,
+            "bandwidth_up_mbps": 25,
+        })
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (75, 25), (
+            "explicit bandwidth_* did not win over speed_plan in PATCH"
+        )
+
+    def test_patch_speed_plan_custom_keeps_existing_bandwidth(
+        self, client, operator_login, db_path,
+    ):
+        """speed_plan='custom' → bandwidth_* NOT touched, raw values stay as-is."""
+        r = self._create(client, operator_login,
+                         display_name="Patch Custom",
+                         bandwidth_down_mbps=33,
+                         bandwidth_up_mbps=44)
+        cust_id = r.json()["customer"]["id"]
+        # Now PATCH only speed_plan='custom' — bandwidth_* should stay 33/44
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "custom"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (33, 44), (
+            f"speed_plan='custom' unexpectedly changed bandwidth: {r.text}"
+        )
+
+    def test_patch_no_speed_plan_no_bandwidth_does_not_touch(
+        self, client, operator_login, db_path,
+    ):
+        """PATCH unrelated fields (e.g. display_name) → bandwidth_* unchanged."""
+        r = self._create(client, operator_login,
+                         display_name="Original Name",
+                         bandwidth_down_mbps=50,
+                         bandwidth_up_mbps=30)
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id,
+                        {"display_name": "Updated Name"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (50, 30), (
+            "bandwidth_* was touched on a no-bandwidth PATCH"
+        )
+
+    def test_patch_partial_explicit_bandwidth_rejected_400(
+        self, client, operator_login,
+    ):
+        """Only down provided in PATCH → 400 (consistent with POST)."""
+        r = self._create(client, operator_login, display_name="Patch Partial")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id,
+                        {"bandwidth_down_mbps": 50})
+        assert r.status_code == 400, r.text
+        assert "both" in r.text.lower() or "together" in r.text.lower(), r.text
+
+    def test_patch_invalid_speed_plan_rejected_422(
+        self, client, operator_login,
+    ):
+        """speed_plan='gigabit' is not in the Literal → Pydantic 422."""
+        r = self._create(client, operator_login, display_name="Patch Invalid")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "gigabit"})
+        assert r.status_code == 422, r.text
+
+    def test_patch_bandwidth_out_of_range_rejected_400(
+        self, client, operator_login,
+    ):
+        """bandwidth_down_mbps=1001 → 400 in PATCH (bounds check)."""
+        r = self._create(client, operator_login, display_name="Patch OOR")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {
+            "bandwidth_down_mbps": 1001,
+            "bandwidth_up_mbps": 20,
+        })
+        assert r.status_code == 400, r.text
+
+    def test_get_speed_plans_endpoint_returns_both_presets(
+        self, client, operator_login,
+    ):
+        """GET /api/speed_plans returns both SPEED_PLANS for the frontend."""
+        r = client.get(
+            "/api/speed_plans",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200, r.text
+        plans = r.json()
+        names = {p["name"] for p in plans}
+        assert names == {"standard", "asymmetric_40_20"}, (
+            f"unexpected speed plans: {names}"
+        )
+        # Spot-check the values
+        std = next(p for p in plans if p["name"] == "standard")
+        assert std["bandwidth_down_mbps"] == 20
+        assert std["bandwidth_up_mbps"] == 20
+        asym = next(p for p in plans if p["name"] == "asymmetric_40_20")
+        assert asym["bandwidth_down_mbps"] == 40
+        assert asym["bandwidth_up_mbps"] == 20
+
+
+class TestSpeedPlanPatch:
+    """v1.7.0 — speed_plan in PATCH /api/customers/{id} (per-customer bandwidth edit).
+
+    Mirrors TestSpeedPlan but exercises the PATCH endpoint. Backend precedence
+    (consistent with POST):
+      1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
+      2. speed_plan preset ('standard' / 'asymmetric_40_20')
+      3. speed_plan='custom' OR no speed_plan AND no explicit → don't touch bandwidth
+    """
+
+    def _create(self, client, operator_login, **extra):
+        body = {
+            "display_name": "Patch Speed Co",
+            "tier_name": "tier_5gb",
+            "device_name": "laptop",
+            "device_type": "Windows",
+        }
+        body.update(extra)
+        return client.post(
+            "/api/customers",
+            json=body,
+            cookies={"session": operator_login},
+        )
+
+    def _read_bandwidth(self, db_path, cust_id):
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT bandwidth_down_mbps, bandwidth_up_mbps FROM customers WHERE id = ?",
+            (cust_id,),
+        ).fetchone()
+        conn.close()
+        return row
+
+    def _patch(self, client, operator_login, cust_id, body):
+        return client.patch(
+            f"/api/customers/{cust_id}",
+            json=body,
+            cookies={"session": operator_login},
+        )
+
+    def test_patch_speed_plan_standard_sets_20_20(self, client, operator_login, db_path):
+        """Customer starts at 40/40 (custom). PATCH speed_plan=standard → 20/20."""
+        r = self._create(client, operator_login,
+                         display_name="Patch Std",
+                         bandwidth_down_mbps=40,
+                         bandwidth_up_mbps=40)
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        assert self._read_bandwidth(db_path, cust_id) == (40, 40)
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "standard"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (20, 20), (
+            f"speed_plan=standard in PATCH failed: {r.text}"
+        )
+
+    def test_patch_speed_plan_asymmetric_40_20(self, client, operator_login, db_path):
+        """Customer starts at 20/20. PATCH speed_plan=asymmetric_40_20 → 40/20."""
+        r = self._create(client, operator_login, display_name="Patch Asym")
+        assert r.status_code == 200, r.text
+        cust_id = r.json()["customer"]["id"]
+        assert self._read_bandwidth(db_path, cust_id) == (20, 20)
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "asymmetric_40_20"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (40, 20), (
+            f"speed_plan=asymmetric_40_20 in PATCH failed: {r.text}"
+        )
+
+    def test_patch_explicit_bandwidth_wins_over_speed_plan(
+        self, client, operator_login, db_path,
+    ):
+        """If both speed_plan and explicit bandwidth_* are provided in PATCH,
+        explicit wins (consistent with POST)."""
+        r = self._create(client, operator_login, display_name="Patch Override")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {
+            "speed_plan": "standard",
+            "bandwidth_down_mbps": 75,
+            "bandwidth_up_mbps": 25,
+        })
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (75, 25), (
+            "explicit bandwidth_* did not win over speed_plan in PATCH"
+        )
+
+    def test_patch_speed_plan_custom_keeps_existing_bandwidth(
+        self, client, operator_login, db_path,
+    ):
+        """speed_plan='custom' → bandwidth_* NOT touched, raw values stay as-is."""
+        r = self._create(client, operator_login,
+                         display_name="Patch Custom",
+                         bandwidth_down_mbps=33,
+                         bandwidth_up_mbps=44)
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "custom"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (33, 44), (
+            f"speed_plan='custom' unexpectedly changed bandwidth: {r.text}"
+        )
+
+    def test_patch_no_speed_plan_no_bandwidth_does_not_touch(
+        self, client, operator_login, db_path,
+    ):
+        """PATCH unrelated fields (e.g. display_name) → bandwidth_* unchanged."""
+        r = self._create(client, operator_login,
+                         display_name="Original Name",
+                         bandwidth_down_mbps=50,
+                         bandwidth_up_mbps=30)
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id,
+                        {"display_name": "Updated Name"})
+        assert r.status_code == 200, r.text
+        assert self._read_bandwidth(db_path, cust_id) == (50, 30), (
+            "bandwidth_* was touched on a no-bandwidth PATCH"
+        )
+
+    def test_patch_partial_explicit_bandwidth_rejected_400(
+        self, client, operator_login,
+    ):
+        """Only down provided in PATCH → 400 (consistent with POST)."""
+        r = self._create(client, operator_login, display_name="Patch Partial")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id,
+                        {"bandwidth_down_mbps": 50})
+        assert r.status_code == 400, r.text
+        assert "both" in r.text.lower() or "together" in r.text.lower(), r.text
+
+    def test_patch_invalid_speed_plan_rejected_422(
+        self, client, operator_login,
+    ):
+        """speed_plan='gigabit' is not in the Literal → Pydantic 422."""
+        r = self._create(client, operator_login, display_name="Patch Invalid")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "gigabit"})
+        assert r.status_code == 422, r.text
+
+    def test_patch_bandwidth_out_of_range_rejected_400(
+        self, operator_login, client,
+    ):
+        """bandwidth_down_mbps=1001 → 400 in PATCH (bounds check)."""
+        r = self._create(client, operator_login, display_name="Patch OOR")
+        cust_id = r.json()["customer"]["id"]
+        r = self._patch(client, operator_login, cust_id, {
+            "bandwidth_down_mbps": 1001,
+            "bandwidth_up_mbps": 20,
+        })
+        assert r.status_code == 400, r.text
+
+    def test_get_speed_plans_endpoint_returns_both_presets(
+        self, client, operator_login,
+    ):
+        """GET /api/speed_plans returns both SPEED_PLANS for the frontend."""
+        r = client.get(
+            "/api/speed_plans",
+            cookies={"session": operator_login},
+        )
+        assert r.status_code == 200, r.text
+        plans = r.json()
+        names = {p["name"] for p in plans}
+        assert names == {"standard", "asymmetric_40_20"}, (
+            f"unexpected speed plans: {names}"
+        )
+        std = next(p for p in plans if p["name"] == "standard")
+        assert std["bandwidth_down_mbps"] == 20
+        assert std["bandwidth_up_mbps"] == 20
+        asym = next(p for p in plans if p["name"] == "asymmetric_40_20")
+        assert asym["bandwidth_down_mbps"] == 40
+        assert asym["bandwidth_up_mbps"] == 20

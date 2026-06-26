@@ -13,6 +13,7 @@ Endpoints:
   GET  /api/customers                  list w/ tier, used, quota, over_quota, vip
   GET  /api/customers/{id}             + devices[] + alerts[]
   GET  /api/tiers                      tier defs (5GB/10GB/20GB/demo_100MB) — Tier 1/2/3 at $3/$5/$8 USD
+  GET  /api/speed_plans                per-customer bandwidth presets (standard 20/20, asymmetric_40_20)
   GET  /api/quota/{customer_id}        live used/quota + cap state
   POST /api/quota/{customer_id}/reset  sqlite UPDATE, returns reset_from_bytes
   GET  /api/vpn/sessions               docker exec swanctl --list-sas (raw)
@@ -1397,6 +1398,18 @@ def list_tiers(_: dict = Depends(require_session)):
     } for r in rows]
 
 
+# v1.7.0 — Expose SPEED_PLANS so the frontend (Create + Edit modals) can render
+# the dropdown options without duplicating the list. Single source of truth.
+@app.get("/api/speed_plans")
+def list_speed_plans(_: dict = Depends(require_session)):
+    """Per-customer speed-plan presets. Tiers drive DATA QUOTA, not bandwidth."""
+    return [
+        {"name": name, "bandwidth_down_mbps": plan["bandwidth_down_mbps"],
+         "bandwidth_up_mbps": plan["bandwidth_up_mbps"]}
+        for name, plan in sorted(SPEED_PLANS.items())
+    ]
+
+
 @app.get("/api/quota/{customer_id}")
 def get_quota(customer_id: int, _: dict = Depends(require_session)):
     rows = db_query(f"""
@@ -1766,8 +1779,16 @@ class CustomerUpdate(BaseModel):
     tier_name: Optional[str] = None  # change tier
     custom_cap_mb: Optional[int] = None  # if tier_name='custom'
     max_devices: Optional[int] = None  # 1..10
+    # v1.7.0 — speed_plan in PATCH. Per-customer bandwidth preset.
+    # 'standard'         → 20/20 mbps symmetric
+    # 'asymmetric_40_20' → 40 down / 20 up
+    # 'custom'           → keep raw bandwidth_* fields as the source of truth
+    # Precedence (consistent with ClientCreate): explicit bandwidth_* > speed_plan.
+    # If only speed_plan provided, it resolves to bandwidth_* via resolve_bandwidth().
+    # If neither provided, bandwidth_* columns are NOT touched.
+    speed_plan:        Optional[Literal["standard", "asymmetric_40_20", "custom"]] = None
     bandwidth_down_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
-    bandwidth_up_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
+    bandwidth_up_mbps:   Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
 
 
 class BulkAction(BaseModel):
@@ -1843,14 +1864,38 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         if not 1 <= req.max_devices <= 10:
             raise HTTPException(400, "max_devices must be 1..10")
         sets.append(f"max_devices = {int(req.max_devices)}")
-    if req.bandwidth_down_mbps is not None:
-        if not 1 <= req.bandwidth_down_mbps <= 1000:
-            raise HTTPException(400, "bandwidth_down_mbps must be 1..1000")
-        sets.append(f"bandwidth_down_mbps = {int(req.bandwidth_down_mbps)}")
-    if req.bandwidth_up_mbps is not None:
-        if not 1 <= req.bandwidth_up_mbps <= 1000:
-            raise HTTPException(400, "bandwidth_up_mbps must be 1..1000")
-        sets.append(f"bandwidth_up_mbps = {int(req.bandwidth_up_mbps)}")
+    # v1.7.0 — Bandwidth precedence (consistent with ClientCreate):
+    #   1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
+    #   2. speed_plan preset ('standard' / 'asymmetric_40_20')
+    #   3. 'custom' speed_plan → keep current bandwidth_* untouched
+    #   4. No speed_plan AND no explicit → don't touch bandwidth_* columns
+    speed_plan_effective = req.speed_plan
+    bw_explicit_provided = (req.bandwidth_down_mbps is not None) or (req.bandwidth_up_mbps is not None)
+    if bw_explicit_provided:
+        if (req.bandwidth_down_mbps is None) != (req.bandwidth_up_mbps is None):
+            raise HTTPException(
+                400,
+                "bandwidth_down_mbps and bandwidth_up_mbps must be provided together "
+                "(both or neither). To use a preset, set speed_plan instead.",
+            )
+        # explicit wins over speed_plan; ignore speed_plan
+        speed_plan_effective = None
+        bandwidth_down_mbps = int(req.bandwidth_down_mbps)
+        bandwidth_up_mbps = int(req.bandwidth_up_mbps)
+        validate_bandwidth(bandwidth_down_mbps, bandwidth_up_mbps)
+    elif speed_plan_effective is not None and speed_plan_effective != "custom":
+        # speed_plan preset resolves to bandwidth
+        bandwidth_down_mbps, bandwidth_up_mbps = resolve_bandwidth(
+            speed_plan_effective, None, None
+        )
+    else:
+        # speed_plan is None or 'custom' and no explicit → don't touch bandwidth_*
+        bandwidth_down_mbps = None
+        bandwidth_up_mbps = None
+    if bandwidth_down_mbps is not None:
+        sets.append(f"bandwidth_down_mbps = {bandwidth_down_mbps}")
+    if bandwidth_up_mbps is not None:
+        sets.append(f"bandwidth_up_mbps = {bandwidth_up_mbps}")
 
     # Tier change
     if req.tier_name is not None:
@@ -1874,6 +1919,12 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         sets.append(f"data_limit_bytes = {int(data_limit)}")
 
     if not sets:
+        # v1.7.0 — speed_plan='custom' sent standalone is a meaningful no-op
+        # (operator chose "keep current raw bandwidth values"). Accept as 200
+        # instead of 400 to avoid breaking the Edit modal's "Save with no
+        # bandwidth change" path.
+        if req.speed_plan == "custom" and not bw_explicit_provided:
+            return {"ok": True, "customer_id": int(customer_id), "no_op": True}
         raise HTTPException(400, "no fields to update")
 
     sets.append(f"updated_at = {int(time.time())}")
