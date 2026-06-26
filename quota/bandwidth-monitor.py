@@ -62,6 +62,10 @@ _spec.loader.exec_module(_nft_helpers)
 nft_add_mark_rule = _nft_helpers.add_mark_rule
 nft_remove_mark_rule = _nft_helpers.remove_mark_rule
 nft_mark_rule_present = _nft_helpers.mark_rule_present
+nft_add_download_mark_rule = _nft_helpers.add_download_mark_rule
+nft_remove_download_mark_rule = _nft_helpers.remove_download_mark_rule
+vip_to_download_mark = _nft_helpers.vip_to_download_mark
+vip_to_download_classid = _nft_helpers.vip_to_download_classid
 
 # === Config (paths) ===
 DB_PATH = Path("/var/lib/strongswan/ipsec.db")
@@ -186,30 +190,30 @@ def setup_qdiscs(iface: str):
     run(["tc", "class", "replace", "dev", iface, "parent", "1:1", "classid", "1:ffff", "htb",
          "rate", "1000mbit", "ceil", "1000mbit"])
 
-    # Ingress via ifb0 (only if available)
-    if INGRESS_SHAPING:
-        # Check if ingress qdisc already exists; if not, add it
-        ingress_check = run(["tc", "qdisc", "show", "dev", iface, "ingress"])
-        if "qdisc ingress" not in ingress_check.stdout:
-            run(["tc", "qdisc", "add", "dev", iface, "ingress"])
-
-        # Check if the mirred redirect filter is already there. If not, add it.
-        # 'tc filter show dev ens3 ingress' lists all filters. If we find
-        # an action with 'mirred ... ifb0' we're done; otherwise add it.
-        filter_check = run(["tc", "filter", "show", "dev", iface, "ingress"])
-        if "ifb0" not in filter_check.stdout:
-            run(["tc", "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "u32",
-                 "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", INGRESS_IFB])
-
-        # ifb0 side — use 'replace' for idempotency
+    # Ingress via ifb0 — DISABLED 2026-06-26 dl-cap fix.
+    # The OLD design used ifb0 + mirred redirect to shape DOWNLOAD traffic
+    # at ingress. This had two problems:
+    #   1. TC ingress runs BEFORE netfilter mangle, so even if we set a mark
+    #      in PREROUTING mangle, ifb0's HTB classifier wouldn't see it.
+    #   2. The catch-all u32 match (0/0) + mirred redirect STOLE all incoming
+    #      IPsec-decrypted packets, sending them to ifb0 instead of letting
+    #      them through ens3's egress path. This made the new egress-based
+    #      download cap (class 1:81, mark 0x81) useless because traffic
+    #      never reached ens3's egress.
+    # The NEW design uses egress tc with a separate download mark (0x80|octet)
+    # for download shaping. See add_download_mark_rule + apply_bandwidth.
+    if INGRESS_SHAPING and False:  # always skip — kept for future ifb-based shaping
+        # If we ever re-enable ifb0 ingress, ensure ifb is loaded and
+        # add the redirect. For now, set up ifb0's HTB structure only
+        # (no redirect), so ifb0 exists but is unused.
         run(["tc", "qdisc", "replace", "dev", INGRESS_IFB, "root", "handle", "1:", "htb", "default", "ffff"])
         run(["tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:", "classid", "1:1", "htb",
              "rate", "1000mbit", "ceil", "1000mbit"])
         run(["tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:1", "classid", "1:ffff", "htb",
              "rate", "1000mbit", "ceil", "1000mbit"])
-        log.info("HTB root qdiscs ready on %s and %s (egress + ingress)", iface, INGRESS_IFB)
+        log.info("HTB root qdiscs ready on %s and %s (egress + unused-ifb0)", iface, INGRESS_IFB)
     else:
-        log.info("HTB root qdisc ready on %s (egress only, no ifb)", iface)
+        log.info("HTB root qdisc ready on %s (egress only; ifb0 disabled per 2026-06-26 dl-cap fix)", iface)
 
 
 # === Per-user shaping ===
@@ -252,16 +256,31 @@ def user_bandwidth_rules_present(vip: str) -> bool:
     """
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
+    download_mark = vip_to_download_mark(vip)
+    download_classid = vip_to_download_classid(vip)
 
-    # Check nft mangle (4 placements: PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
-    for chain in ("prerouting", "postrouting", "forward"):
+    # Check UPLOAD nft mangle (FORWARD-s, POSTROUTING-s)
+    upload_present = False
+    for chain in ("postrouting", "forward"):
         out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", chain])
         if out.returncode != 0:
             continue
-        # nft output: `... meta mark set 0xN comment "bw:VIP" # handle H`
         if f'comment "bw:{vip}"' in out.stdout and f"meta mark set {mark}" in out.stdout:
-            return True
-    return False
+            upload_present = True
+            break
+    if not upload_present:
+        return False
+
+    # Check DOWNLOAD nft mangle (FORWARD ip daddr VIP)
+    out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", "forward"])
+    if out.returncode != 0:
+        return False
+    if f'comment "bw:{vip} (dl)"' not in out.stdout:
+        return False
+    if not _mark_in_nft_output(out.stdout, download_mark):
+        return False
+
+    return True
 
 
 def _class_present(iface: str, classid: str) -> bool:
@@ -280,19 +299,25 @@ def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
     """Apply bandwidth limits for a single user.
 
     Idempotent — each step is skipped if its target already exists.
-    Use 'tc replace' so a class with the same parameters is updated, not errored.
-    Use 'tc replace' for the egress class (idempotent under same params).
 
-    nft edition (2026-06-26): writes nft mangle MARK rules instead of iptables-legacy.
-    Uses helpers from bandwidth-monitor-nft.py (imported at module level).
+    nft edition (2026-06-26 + dl-cap fix):
+      - UPLOAD: mangle FORWARD/POSTROUTING saddr=VIP mark (unchanged). Egress
+        tc class rate=up_mbps. Works because mangle runs before MASQUERADE.
+      - DOWNLOAD (NEW): mangle PREROUTING 'ct reply daddr VIP' (matches the
+        conntrack reply dest, populated before nat un-NATs the wire dst).
+        Egress tc class with separate mark (0x80|octet) and rate=down_mbps.
+      - ifb0 ingress shaping REMOVED: TC ingress runs before netfilter mangle,
+        so the mark wouldn't be visible to ifb0's HTB classification.
     """
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
+    download_mark = vip_to_download_mark(vip)
+    download_classid = vip_to_download_classid(vip)
 
-    # 1. nft MARK rules in FOUR mangle placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s).
+    # 1. UPLOAD nft MARK rules (saddr=VIP, works because mangle < MASQUERADE).
+    # PREROUTING-d and FORWARD-d removed - 'ip daddr VIP' never matches due
+    # to conntrack NAT ordering (nat un-NATs wire dst AFTER mangle runs).
     for chain, match_flag in (
-        ("PREROUTING", "-d"),   # download: dst=VIP
-        ("FORWARD", "-d"),       # forwarded download: dst=VIP
         ("FORWARD", "-s"),       # forwarded upload: src=VIP
         ("POSTROUTING", "-s"),   # local-sourced upload
     ):
@@ -301,44 +326,55 @@ def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
                           subprocess.CompletedProcess(args=[], returncode=1,
                                                       stdout="", stderr="add_mark_rule failed"))
 
-    # 2. tc class on egress (user's upload = rate) — 'replace' is idempotent
+    # 2. DOWNLOAD nft MARK rule via ct reply daddr in PREROUTING (NEW)
+    if not nft_add_download_mark_rule(vip, download_mark):
+        log_if_failed(["nft", "prerouting-ct-reply", vip],
+                      subprocess.CompletedProcess(args=[], returncode=1,
+                                                  stdout="", stderr="add_download_mark_rule failed"))
+
+    # 3. UPLOAD egress tc class (rate=up_mbps) — 'replace' is idempotent
     result = run([
         "tc", "class", "replace", "dev", iface, "parent", "1:1",
         "classid", classid, "htb",
         "rate", f"{up_mbps}mbit", "ceil", f"{up_mbps}mbit",
     ])
     if not rc_ok(result):
-        log_if_failed(["tc", "class", "replace", "egress", classid], result)
+        log_if_failed(["tc", "class", "replace", "egress-up", classid], result)
 
-    # 3. tc filter on egress: route marked packets to the class (idempotent)
+    # 4. UPLOAD egress tc filter
     if not _filter_present(iface, "1:", mark):
         result = run([
             "tc", "filter", "replace", "dev", iface, "parent", "1:",
             "protocol", "ip", "handle", mark, "fw", "flowid", classid,
         ])
         if not rc_ok(result):
-            log_if_failed(["tc", "filter", "replace", "egress", mark], result)
+            log_if_failed(["tc", "filter", "replace", "egress-up", mark], result)
 
-    if INGRESS_SHAPING:
-        # 4. tc class on ifb0 (user's download = rate) — 'replace' is idempotent
+    # 5. DOWNLOAD egress tc class (rate=down_mbps) - NEW
+    result = run([
+        "tc", "class", "replace", "dev", iface, "parent", "1:1",
+        "classid", download_classid, "htb",
+        "rate", f"{down_mbps}mbit", "ceil", f"{down_mbps}mbit",
+    ])
+    if not rc_ok(result):
+        log_if_failed(["tc", "class", "replace", "egress-down", download_classid], result)
+
+    # 6. DOWNLOAD egress tc filter
+    if not _filter_present(iface, "1:", download_mark):
         result = run([
-            "tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:1",
-            "classid", classid, "htb",
-            "rate", f"{down_mbps}mbit", "ceil", f"{down_mbps}mbit",
+            "tc", "filter", "replace", "dev", iface, "parent", "1:",
+            "protocol", "ip", "handle", download_mark, "fw", "flowid", download_classid,
         ])
         if not rc_ok(result):
-            log_if_failed(["tc", "class", "replace", "ifb0", classid], result)
+            log_if_failed(["tc", "filter", "replace", "egress-down", download_mark], result)
 
-        # 5. tc filter on ifb0
-        if not _filter_present(INGRESS_IFB, "1:", mark):
-            result = run([
-                "tc", "filter", "replace", "dev", INGRESS_IFB, "parent", "1:",
-                "protocol", "ip", "handle", mark, "fw", "flowid", classid,
-            ])
-            if not rc_ok(result):
-                log_if_failed(["tc", "filter", "replace", "ifb0", mark], result)
+    # NOTE: ifb0 ingress shaping removed (2026-06-26 dl-cap fix). The ifb0
+    # setup (qdisc + redirect) is left in place but unused — it just has the
+    # default 1Gbit class and never sees per-VIP marks (TC ingress runs
+    # before netfilter mangle, so the mark set in PREROUTING mangle wouldn't
+    # be visible at ifb0 classification time).
 
-    log.info("Applied bandwidth for VIP %s: %d down / %d up mbit (ingress_shaping=%s)",
+    log.info("Applied bandwidth for VIP %s: %d down / %d up mbit (ingress_shaping=%s, dl-cap fixed)",
              vip, down_mbps, up_mbps, INGRESS_SHAPING)
 
 
@@ -346,23 +382,26 @@ def remove_bandwidth(vip: str, iface: str):
     """Remove nft + tc rules for a user that disconnected. Idempotent."""
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
+    download_mark = vip_to_download_mark(vip)
+    download_classid = vip_to_download_classid(vip)
 
-    # Remove nft MARK rules from all 4 placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
-    for chain in ("PREROUTING", "FORWARD", "POSTROUTING"):
+    # Remove UPLOAD nft MARK rules (FORWARD-s, POSTROUTING-s; PREROUTING-d removed in dl-cap fix)
+    for chain in ("FORWARD", "POSTROUTING"):
         nft_remove_mark_rule(vip, chain)
 
-    # Remove tc filter + class on egress.
-    # Note: 'tc filter del' REQUIRES prio to be specified when handle is set,
-    # otherwise kernel says "Cannot flush filters with protocol, handle or
-    # kind set." Default prio for 'tc filter add ... fw' is 49152.
+    # Remove DOWNLOAD nft MARK rule (PREROUTING ct reply daddr) - NEW
+    nft_remove_download_mark_rule(vip)
+
+    # Remove UPLOAD egress tc filter + class
+    # Note: 'tc filter del' REQUIRES prio to be specified when handle is set.
     run(["tc", "filter", "del", "dev", iface, "parent", "1:",
          "prio", "49152", "handle", mark, "fw"])
     run(["tc", "class", "del", "dev", iface, "classid", classid])
 
-    if INGRESS_SHAPING:
-        run(["tc", "filter", "del", "dev", INGRESS_IFB, "parent", "1:",
-             "prio", "49152", "handle", mark, "fw"])
-        run(["tc", "class", "del", "dev", INGRESS_IFB, "classid", classid])
+    # Remove DOWNLOAD egress tc filter + class - NEW
+    run(["tc", "filter", "del", "dev", iface, "parent", "1:",
+         "prio", "49152", "handle", download_mark, "fw"])
+    run(["tc", "class", "del", "dev", iface, "classid", download_classid])
 
     log.info("Removed bandwidth for VIP %s", vip)
 
