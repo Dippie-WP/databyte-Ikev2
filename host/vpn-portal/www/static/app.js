@@ -1754,6 +1754,22 @@
       if (isCustom && c.tier) {
         allTiers.push({ name: c.tier, display_name: c.tier_display || c.tier });
       }
+      // v1.7.0 — Load speed plans from backend (single source of truth).
+      // If fetch fails, fall back to a hardcoded list (matches backend SPEED_PLANS).
+      let speedPlans = [];
+      try {
+        speedPlans = await get('/api/speed_plans');
+      } catch {
+        speedPlans = [
+          { name: 'standard',         bandwidth_down_mbps: 20, bandwidth_up_mbps: 20 },
+          { name: 'asymmetric_40_20', bandwidth_down_mbps: 40, bandwidth_up_mbps: 20 },
+        ];
+      }
+      // Determine initial speed_plan selection from current bandwidth values.
+      const curDown = c.bandwidth_down_mbps || 20;
+      const curUp   = c.bandwidth_up_mbps   || 20;
+      const matched = speedPlans.find(p => p.bandwidth_down_mbps === curDown && p.bandwidth_up_mbps === curUp);
+      const initialSpeedPlan = matched ? matched.name : 'custom';
       // Helper: render a labeled form field.
       // Signature: labeledField(label, inputEl, fullWidth?)
       // Used in the Edit modal below.
@@ -1778,8 +1794,26 @@
               labeledField('Email', el('input', { type: 'email', cls: 'vp-input', id: 'ed-email', value: c.email || '' })),
               labeledField('Billing ID', el('input', { type: 'text', cls: 'vp-input', id: 'ed-bill', value: c.billing_id || '' })),
               labeledField('Max devices (1–10)', el('input', { type: 'number', min: 1, max: 10, cls: 'vp-input', id: 'ed-mdev', value: c.max_devices || 1 })),
-              labeledField('Bandwidth down (Mbps, 1–1000)', el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-down', value: c.bandwidth_down_mbps || 20 })),
-              labeledField('Bandwidth up (Mbps, 1–1000)', el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-up', value: c.bandwidth_up_mbps || 20 })),
+              // v1.7.0 — Speed plan (per-customer, NOT tier-driven). Three options:
+              //   'standard'         → 20/20 mbps symmetric (default; matches existing default)
+              //   'asymmetric_40_20' → 40 mbps down / 20 mbps up
+              //   'custom'           → keep the raw bandwidth inputs below as the source of truth
+              // Pre-selected from the customer's CURRENT bandwidth values. If they match
+              // a preset, that preset is selected; otherwise dropdown shows 'custom'.
+              labeledField('Speed plan',
+                el('select', { cls: 'vp-input', id: 'ed-speed-plan' },
+                  // Options populated after fetchSpeedPlans() resolves.
+                  el('option', { value: '__loading' }, 'Loading…'),
+                ),
+                el('div', { cls: 'vp-hint', id: 'ed-speed-plan-hint' },
+                  'Per-customer bandwidth. Independent of tier (tier controls data quota only).'),
+              ),
+              // Raw bandwidth inputs (advanced override). When dropdown = 'custom',
+              // these are the source of truth. When dropdown = a preset, they auto-sync.
+              labeledField('Custom bandwidth down (Mbps, 1–1000)',
+                el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-down', value: c.bandwidth_down_mbps || 20 })),
+              labeledField('Custom bandwidth up (Mbps, 1–1000)',
+                el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-up', value: c.bandwidth_up_mbps || 20 })),
               labeledField('Tier',
                 el('select', { cls: 'vp-input', id: 'ed-tier' },
                   ...allTiers.map(t => el('option', { value: t.name, selected: t.name === c.tier }, t.display_name || t.name)),
@@ -1817,6 +1851,18 @@
                   tier_name: $ti.value,
                   notes: $nt.value.trim() || null,
                 };
+                // v1.7.0 — speed_plan. If dropdown = 'custom', omit speed_plan so
+                // backend keeps the raw bandwidth_* as the source of truth.
+                // If dropdown = a preset, send speed_plan and let backend resolve.
+                // Backend precedence: explicit bandwidth_* > speed_plan > untouched.
+                const $sp = $('ed-speed-plan');
+                if ($sp && $sp.value && $sp.value !== 'custom' && $sp.value !== '__loading') {
+                  body.speed_plan = $sp.value;
+                } else if ($sp && $sp.value === 'custom') {
+                  // 'custom' = use raw bandwidth_* fields as authoritative.
+                  // Backend already handles this when speed_plan='custom'.
+                  body.speed_plan = 'custom';
+                }
                 // v1.6.5 — defense in depth: backend (db_query) now converts
                 // sqlite3 -json's "None" string to real null, but if a stale
                 // browser cache still has the old API shape (or if any other
@@ -1849,6 +1895,47 @@
         ),
       );
       openModal(modal);
+
+      // v1.7.0 — Populate the speed-plan dropdown with real options + wire handlers.
+      const $sp = document.getElementById('ed-speed-plan');
+      const $bwd = document.getElementById('ed-bw-down');
+      const $bwu = document.getElementById('ed-bw-up');
+      if ($sp) {
+        // Replace the 'Loading…' placeholder with actual options.
+        $sp.innerHTML = '';
+        for (const p of speedPlans) {
+          const label = p.name === 'standard'
+            ? `Standard — ${p.bandwidth_down_mbps} Mbps down / ${p.bandwidth_up_mbps} Mbps up (symmetric)`
+            : (p.name === 'asymmetric_40_20'
+                ? `Asymmetric — ${p.bandwidth_down_mbps} Mbps down / ${p.bandwidth_up_mbps} Mbps up`
+                : `${p.bandwidth_down_mbps}/${p.bandwidth_up_mbps}`);
+          $sp.appendChild(el('option', { value: p.name }, label));
+        }
+        // 'Custom' option: keeps raw bandwidth_* inputs as the source of truth.
+        $sp.appendChild(el('option', { value: 'custom' }, 'Custom (use raw bandwidth inputs below)'));
+        $sp.value = initialSpeedPlan;
+        // Change handler: when operator picks a preset, sync raw inputs.
+        $sp.addEventListener('change', () => {
+          if ($sp.value === 'custom' || $sp.value === '__loading') return;
+          const plan = speedPlans.find(p => p.name === $sp.value);
+          if (plan) {
+            $bwd.value = plan.bandwidth_down_mbps;
+            $bwu.value = plan.bandwidth_up_mbps;
+          }
+        });
+        // Raw input change handler: when operator edits a raw input to a value
+        // that matches a preset, auto-switch the dropdown to that preset.
+        // Otherwise, dropdown goes to 'custom'.
+        const syncDropdownFromRaw = () => {
+          const d = parseInt($bwd.value, 10);
+          const u = parseInt($bwu.value, 10);
+          if (!d || !u) return;
+          const match = speedPlans.find(p => p.bandwidth_down_mbps === d && p.bandwidth_up_mbps === u);
+          $sp.value = match ? match.name : 'custom';
+        };
+        $bwd.addEventListener('input', syncDropdownFromRaw);
+        $bwu.addEventListener('input', syncDropdownFromRaw);
+      }
     })();
   }
 
