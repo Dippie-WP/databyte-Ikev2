@@ -1,0 +1,28 @@
+[Unit]
+Description=strongSwan per-user bandwidth monitor (Phase 5D — tc classes + nft mangle MARK per user)
+Documentation=file:///home/zunaid/strongswan/quota/bandwidth-monitor.py
+After=docker.service quota-monitor.service
+Wants=quota-monitor.service
+
+# bandwidth-monitor.py is the daemon that:
+#   1. Reads active IKE_SAs from `docker exec strongswan swanctl --list-sas`
+#   2. Looks up each user's bandwidth_down_mbps / bandwidth_up_mbps from customers table
+#   3. For new connections: adds nft mangle MARK rule + tc class on egress
+#      (and ifb0 if available for ingress shaping)
+#   4. For disconnected users: removes the nft rule + tc class
+#   5. Polled every 60s (matches quota-monitor cadence)
+#
+# Run on the VPS host (NOT inside the strongSwan container).
+# Requires: nft (v1.0.6+ for meter support), tc (iproute2), ifb kernel module (for ingress shaping)
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/zunaid/strongswan/quota/bandwidth-monitor.py
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

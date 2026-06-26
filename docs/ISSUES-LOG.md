@@ -3,7 +3,87 @@
 Every bug we hit building strongSwan v1.2. Format: **date — title — what happened — fix — lesson**. Reverse-chronological.
 
 ---
+## Phase 5 (2026-06-26 11:30 UTC) — per-VIP counter rules dead code
 
+**Symptom:** After Phase 5 iptables→nftables migration at 11:30 UTC,
+all per-VIP quota counters showed `packets 0 bytes 0` even when
+customers were actively connected. `data_used_bytes` updates stopped.
+
+**Root cause:** `quota-monitor.py`'s `ensure_quota_rules()` function
+appended 508 per-VIP ACCEPT rules to the FORWARD chain at runtime.
+But the chain's source-of-truth `/etc/nftables.conf` had `counter drop`
+at the END of forward. When `nft -f` loaded the source ruleset, it
+set up the chain with `counter drop` AFTER the per-VIP rules — meaning
+the appended rules were ALSO after drop. Order matters: nftables
+short-circuits on first match. The per-VIP rules never fired.
+
+**Verification:** `nft -a list chain ip filter forward` showed
+handles 33-517 (per-VIP rules) coming AFTER handle 31 (`counter drop`).
+
+**Fix:** Replaced all 508 rules with 2 named meters (`client_src` and
+`client_dst`) in source-of-truth. Meters use `flags dynamic` so kernel
+auto-creates counter elements per VIP on first packet match. Single
+hash lookup vs 254 sequential rule evaluations.
+
+**Lesson (MEMORY #189, #190, #191):**
+- Always check `nft -a list chain` order vs source file when migrating.
+- Meters beat per-VIP rules for dynamic membership.
+- Always `nft -c -f <file>` BEFORE `nft -f <file>` for syntax safety.
+
+---
+## Phase 5 swanctl regex (2026-06-22 → 2026-06-26) — silent billing failure
+
+**Symptom:** `customers.data_used_bytes` not updating for new customers
+after strongSwan 6.0.7 deployment. Existing customers (zunaid) had
+stale values. quota-monitor logs consistently showed "no active SAs —
+nothing to bill".
+
+**Root cause:** `quota-monitor.py:_build_sa_list()` regex expected
+`swanctl --list-sas` output format:
+```
+remote '<eap-identity>' @ <ip>[<port>] [<vip>]
+```
+But strongSwan 6.0.7 changed the format to:
+```
+remote '<outer-ip>' @ <ip>[<port>] EAP: '<eap-identity>' [<vip>]
+```
+
+The EAP identity moved to after `EAP:`, and the first quoted string
+became the outer (NAT'd) IP, not the EAP identity. Old regex matched
+the outer IP as the "username" and the bracketed port as the "VIP",
+resulting in garbage that got filtered out by `[s for s in out if
+s["username"] and s["vip"]]`.
+
+**Impact:** All quota billing was silently failing since 2026-06-22
+(last commit before format change, ~4 days of zero billing).
+
+**Verification before fix:**
+```
+PARSED SAS: [{'uniqueid': '5', 'username': None, 'vip': None}]
+FILTERED: []  # nothing returned
+```
+
+**Fix:** Updated regex to capture EAP identity after `EAP:` and VIP
+from the bracketed IP at end of line:
+```python
+m = re.search(r"EAP:\s+'([^']+)'\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
+```
+
+**Verification after fix:**
+```
+VIP 10.99.0.1 (saalieg/laptop): +535786 bytes, used=535786 / 104857600 (0.5%)
+DB: saalieg data_used_bytes = 535786 (was 0)
+```
+
+**Lesson (MEMORY #192, #193):**
+- When a tool's output format changes between versions, always check
+  the actual stdout against your regex expectations. Don't assume
+  backwards compatibility.
+- Maintain a regression test that compares parsed output to known
+  live SAs (e.g. `customer with active SA → data_used_bytes > 0`).
+- Bind-mount source paths mean `git checkout HEAD -- file` can break
+  production. Verify the bind-mount first.
+---
 ## 5A.7 — Server-side MSS clamp (2026-06-18)
 
 **Symptom:** After 5A.6 fix, 5G phone could connect and `ifconfig.me` worked, but other sites (iana.org, wikipedia.org) gave `ERR_TIMED_OUT` after "took too long to respond".
@@ -22,7 +102,6 @@ Calculation: 1400 (phone MTU) - 40 (TCP+IP) - 70 (ESP+UDP+IP) = 1290, use 1260 f
 - The server is the one talking to remote sites (post-MASQ), so the server clamps the MSS in the SYNs it sends on the phone's behalf.
 
 ---
-
 ## 5A.6 — `install_virtual_ip = no` (gateway mode) (2026-06-18)
 
 **Symptom:** Phone connected, SA ESTABLISHED, VIP 10.99.0.50 assigned, MASQ matching, but `ip -s xfrm state` showed `out 0 bytes, 0 packets`. Phone could only send DNS queries through tunnel, no responses came back. conntrack from 10.99.0.50 = 0 for fresh connections.
@@ -50,7 +129,6 @@ charon {
 - **Don't trust "fix applied" without verification.** A file on the host is NOT loaded by the container unless the docker-compose has a corresponding bind-mount.
 
 ---
-
 ## 5A.6 follow-on: bind-mount not added → fix not loaded (2026-06-18 17:48)
 
 **Symptom:** After applying the `install_virtual_ip = no` fix, the bug came back. SA in counter was 100KB+ but out counter was 0. 10.99.0.50 was on lo again.
@@ -68,7 +146,6 @@ Then `docker compose --profile vpn up -d` to recreate the container with the new
 - **This was the strongest evidence for "we only work with facts and evidence now".** I should have `docker exec strongswan ls /etc/strongswan.d/` after creating the file, not assumed it was loaded.
 
 ---
-
 ## iOS .mobileconfig silently fails cert validation (2026-06-17)
 
 **Symptom:** Generated `.mobileconfig` profile (IKEv2 + EAP, with the strongSwan CA cert embedded), installed on iPhone, profile shows as installed but IKE never connects. iOS gives no useful error. `swanctl --list-sas` on server shows nothing for the iOS client.
@@ -84,7 +161,6 @@ Then `docker compose --profile vpn up -d` to recreate the container with the new
 - The strongSwan app on iOS works (uses PSK instead of cert), but the native client is the goal.
 
 ---
-
 ## charon-cmd is a TEST client, not a production client (2026-06-17)
 
 **Symptom:** Tested "client-side" with `charon-cmd` on the OC host (192.168.10.77). charon-cmd connected to the strongSwan container, SA established, VPN worked. Marked 5A.3 GREEN.
@@ -102,7 +178,6 @@ This is **server-correctness only**, not public-path. The real test is: phone on
 - charon-cmd is useful for unit testing (server config is correct) but not for end-to-end public-path tests.
 
 ---
-
 ## 5G IP rotation causes brief MOBIKE gaps (2026-06-17, ongoing)
 
 **Symptom:** On Vodacom 5G, the public IP rotates every few minutes. During the rotation:
@@ -117,7 +192,6 @@ This is **server-correctness only**, not public-path. The real test is: phone on
 - For commercial use (5D), MOBIKE keep-alives or shorter rekey times are mandatory.
 
 ---
-
 ## Build lessons: `libsqlite3-dev` vs `libsqlite3-0` (2026-06-17)
 
 **Symptom:** First build of v1.2 image (with attr-sql) failed at runtime with `charon: unable to load plugin attr-sql: libsqlite3.so.0: cannot open shared object file`.
@@ -141,7 +215,6 @@ RUN \
 - **Test the runtime, not just the build.** The first build "succeeded" — the image was created. The bug only manifested when charon tried to load the plugin.
 
 ---
-
 ## `--enable-pools` is a no-op flag (2026-06-17)
 
 **Symptom:** Initially assumed I needed `--enable-pools` for charon's IP pool feature.
@@ -153,7 +226,6 @@ RUN \
 - charon has a built-in IP pool, no flag needed.
 
 ---
-
 ## DB initializes on FIRST QUERY, not first start (2026-06-17)
 
 **Symptom:** On a fresh deploy, `/var/lib/strongswan/` directory was empty. Ran `swanctl --list-pools`, got an empty list. Couldn't tell if the schema was there.
@@ -166,7 +238,6 @@ RUN \
 - **Lazy initialization is a strongSwan pattern.** Don't be alarmed by empty dirs on fresh deploys. Run a query first.
 
 ---
-
 ## charon `swanctl.conf` `secrets {}` block, NOT the `users` table (2026-06-17)
 
 **Symptom:** Initially tried to insert EAP credentials into the `users` table in SQLite.
@@ -184,7 +255,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
   - The `users` table is for a different plugin
 
 ---
-
 ## Daily report pipeline: NUKED 2026-06-15 (out of scope for this repo)
 
 **Why I mention it:** This was a 6h build/test cycle that ended with the daily HTML+PDF report pipeline being removed entirely. Cron entry, gen_dr_html.py, log, output dir, all templates, SOP skill, design spec, historical reports, inbound Telegram copies, mempalace copies — all moved to `.Trash/`. 428KB pre-nuke archive.
@@ -194,7 +264,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Why it doesn't affect this repo:** The daily report was a workspace thing, not a strongSwan thing. The strongSwan runbook is docx (DAT-OPS-SEC-002 v1.2), unaffected.
 
 ---
-
 ## ops-tracker duplicate cleanup (2026-06-16)
 
 **Symptom:** Two ops-tracker services on the Pi: a Docker container AND a FastAPI sibling at `/home/zunaid/operations-tracker/` (no service, just code, abandoned 2026-04-22).
@@ -206,7 +275,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Lesson:** When refactoring a service, check for orphans. systemd unit names don't always reflect what they actually run.
 
 ---
-
 ## Pre-v1.2: charon-cmd race condition with VICI (2026-06-16)
 
 **Symptom:** Original `start.sh` ran `swanctl --load-creds && swanctl --load-conns && swanctl --load-pools` before the VICI socket was up. Sometimes worked, sometimes didn't.

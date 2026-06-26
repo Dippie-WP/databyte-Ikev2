@@ -50,3 +50,14 @@ rclone.conf
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Operator-managed runtime configs (contain live secrets; per-host deploy)
+# Tracked as .template / .example in this dir; this dir is the canonical repo copy.
+docker/swanctl/conf.d/rw-eap.conf
+docker/swanctl/conf.d/rw-psk.conf
+
+# Backup snapshots of entire swanctl/ directory (may contain keys/certs)
+docker/swanctl.bak.*/
+
+# OpenSSL CA serial number bookkeeping file (regenerated)
+docker/swanctl/x509ca/*.srl

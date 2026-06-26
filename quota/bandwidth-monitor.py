@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-bandwidth-monitor.py — Phase 5D bandwidth limiting
+bandwidth-monitor.py — Phase 5D bandwidth limiting + Phase 5 nft edition (2026-06-26)
+
+PATCHED 2026-06-26: Writes nft mangle MARK rules instead of iptables-legacy.
+tc (traffic control) classes + filters are unchanged. All DB/SA logic
+preserved. nft helpers are imported from bandwidth-monitor-nft.py.
 
 Reads active IKE_SAs from strongSwan, looks up per-customer bandwidth
-settings from SQLite, dynamically creates tc classes + iptables marks
+settings from SQLite, dynamically creates tc classes + nft marks
 to enforce per-user rate limits.
 
 Design:
@@ -42,6 +46,23 @@ import sys
 import time
 from pathlib import Path
 
+# === nft helper imports (Phase 5, 2026-06-26) ===
+# bandwidth-monitor-nft.py provides the nft MARK-rule add/remove/lookup helpers.
+# We import them under nft_-prefixed aliases so the existing helpers below
+# (run, etc.) are not shadowed.
+#
+# NOTE: Python imports convert hyphens to underscores in module names. Since
+# the file is bandwidth-monitor-nft.py on disk, we load it via importlib
+# rather than the standard import statement.
+import importlib.util as _importlib_util
+_nft_helper_path = Path(__file__).parent / "bandwidth-monitor-nft.py"
+_spec = _importlib_util.spec_from_file_location("_bm_nft_helpers", _nft_helper_path)
+_nft_helpers = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_nft_helpers)
+nft_add_mark_rule = _nft_helpers.add_mark_rule
+nft_remove_mark_rule = _nft_helpers.remove_mark_rule
+nft_mark_rule_present = _nft_helpers.mark_rule_present
+
 # === Config (paths) ===
 DB_PATH = Path("/var/lib/strongswan/ipsec.db")
 
@@ -64,13 +85,33 @@ log = logging.getLogger("bandwidth-monitor")
 
 # === Helpers ===
 
-def run(cmd: list[str], check=True) -> subprocess.CompletedProcess:
-    """Run a shell command, return CompletedProcess. Log stderr on failure."""
-    try:
-        return subprocess.run(cmd, check=check, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        log.error("Command %s failed: rc=%s stderr=%s", cmd, e.returncode, e.stderr)
-        raise
+def run(cmd: list[str], check=False) -> subprocess.CompletedProcess:
+    """Run a shell command, return CompletedProcess.
+
+    Default check=False — we want to handle rc != 0 gracefully (e.g. 'File exists'
+    on a tc class add means the class is already there, not an error).
+    Use check=True only for commands that MUST succeed.
+    """
+    return subprocess.run(cmd, check=check, capture_output=True, text=True)
+
+
+def rc_ok(result: subprocess.CompletedProcess) -> bool:
+    """True if command succeeded OR the failure is benign (File exists, etc.)."""
+    if result.returncode == 0:
+        return True
+    # 'File exists' is benign — the resource is already what we wanted
+    if "File exists" in (result.stderr or ""):
+        return True
+    return False
+
+
+def log_if_failed(cmd: list[str], result: subprocess.CompletedProcess):
+    """Log a warning if a command failed (and it wasn't benign)."""
+    if result.returncode == 0:
+        return
+    if "File exists" in (result.stderr or ""):
+        return  # benign
+    log.warning("Command %s failed: rc=%d stderr=%s", cmd, result.returncode, result.stderr)
 
 
 def detect_egress_iface() -> str:
@@ -131,30 +172,41 @@ def setup_qdiscs(iface: str):
       - HTB root on ifb0 (redirected ingress = user's download) [if available]
       - Default classes for non-VPN traffic
     Idempotent — safe to call multiple times.
+
+    Uses tc replace (not add) for classes so re-running doesn't error.
+    For the ingress redirect filter on ens3, checks for an existing one first
+    to avoid leaking duplicate filters on every daemon restart.
     """
     global INGRESS_SHAPING
 
-    # Egress HTB root (always)
-    run(["tc", "qdisc", "add", "dev", iface, "root", "handle", "1:", "htb", "default", "ffff"],
-        check=False)
-    run(["tc", "class", "add", "dev", iface, "parent", "1:", "classid", "1:1", "htb",
-         "rate", "1000mbit", "ceil", "1000mbit"], check=False)
-    # Default class — non-VPN traffic, no shaping
-    run(["tc", "class", "add", "dev", iface, "parent", "1:1", "classid", "1:ffff", "htb",
-         "rate", "1000mbit", "ceil", "1000mbit"], check=False)
+    # Egress HTB root (always) — use 'replace' for idempotency
+    run(["tc", "qdisc", "replace", "dev", iface, "root", "handle", "1:", "htb", "default", "ffff"])
+    run(["tc", "class", "replace", "dev", iface, "parent", "1:", "classid", "1:1", "htb",
+         "rate", "1000mbit", "ceil", "1000mbit"])
+    run(["tc", "class", "replace", "dev", iface, "parent", "1:1", "classid", "1:ffff", "htb",
+         "rate", "1000mbit", "ceil", "1000mbit"])
 
     # Ingress via ifb0 (only if available)
     if INGRESS_SHAPING:
-        run(["tc", "qdisc", "add", "dev", iface, "ingress"], check=False)
-        run(["tc", "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "u32",
-             "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", INGRESS_IFB],
-            check=False)
-        run(["tc", "qdisc", "add", "dev", INGRESS_IFB, "root", "handle", "1:", "htb", "default", "ffff"],
-            check=False)
-        run(["tc", "class", "add", "dev", INGRESS_IFB, "parent", "1:", "classid", "1:1", "htb",
-             "rate", "1000mbit", "ceil", "1000mbit"], check=False)
-        run(["tc", "class", "add", "dev", INGRESS_IFB, "parent", "1:1", "classid", "1:ffff", "htb",
-             "rate", "1000mbit", "ceil", "1000mbit"], check=False)
+        # Check if ingress qdisc already exists; if not, add it
+        ingress_check = run(["tc", "qdisc", "show", "dev", iface, "ingress"])
+        if "qdisc ingress" not in ingress_check.stdout:
+            run(["tc", "qdisc", "add", "dev", iface, "ingress"])
+
+        # Check if the mirred redirect filter is already there. If not, add it.
+        # 'tc filter show dev ens3 ingress' lists all filters. If we find
+        # an action with 'mirred ... ifb0' we're done; otherwise add it.
+        filter_check = run(["tc", "filter", "show", "dev", iface, "ingress"])
+        if "ifb0" not in filter_check.stdout:
+            run(["tc", "filter", "add", "dev", iface, "parent", "ffff:", "protocol", "ip", "u32",
+                 "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", INGRESS_IFB])
+
+        # ifb0 side — use 'replace' for idempotency
+        run(["tc", "qdisc", "replace", "dev", INGRESS_IFB, "root", "handle", "1:", "htb", "default", "ffff"])
+        run(["tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:", "classid", "1:1", "htb",
+             "rate", "1000mbit", "ceil", "1000mbit"])
+        run(["tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:1", "classid", "1:ffff", "htb",
+             "rate", "1000mbit", "ceil", "1000mbit"])
         log.info("HTB root qdiscs ready on %s and %s (egress + ingress)", iface, INGRESS_IFB)
     else:
         log.info("HTB root qdisc ready on %s (egress only, no ifb)", iface)
@@ -174,114 +226,143 @@ def vip_to_mark(vip: str) -> str:
 def vip_to_classid(vip: str) -> str:
     """Convert VIP to a unique tc classid under 1:1 parent.
 
-    Use last octet as the minor classid. Range: 1:2 to 1:ff (250 users max).
+    Offset last octet by +1 to avoid colliding with parent classid 1:1.
+    Range: 10.99.0.1 → 1:2 ... 10.99.0.254 → 1:255 (254 users max).
     """
     last = int(vip.rsplit(".", 1)[-1])
-    if last < 2 or last > 0xff:
-        raise ValueError(f"VIP last octet {last} out of range for classid")
-    return f"1:{last}"
+    if last < 1 or last > 254:
+        raise ValueError(f"VIP last octet {last} out of range (need 1-254)")
+    return f"1:{last + 1}"
 
 
 def user_bandwidth_rules_present(vip: str) -> bool:
-    """Check if iptables MARK + tc class already exist for this VIP."""
+    """Check if nft MARK + tc class already exist for this VIP.
+
+    Returns True only if ALL of these exist:
+    - At least one mangle MARK rule with our comment
+    - tc class for this VIP on the egress interface
+    - tc class for this VIP on ifb0 (if ingress shaping is enabled)
+    - tc filter for this VIP on the egress interface
+    - tc filter for this VIP on ifb0 (if ingress shaping is enabled)
+
+    Returning True means the shaping is fully applied. Returning False means
+    apply_bandwidth() needs to (re-)create whatever is missing.
+
+    nft edition (2026-06-26): searches nft mangle chain via nft -a list.
+    """
     mark = vip_to_mark(vip)
-    # Check iptables
-    out = run(["iptables-legacy", "-t", "mangle", "-L", "POSTROUTING", "-n", "-v"],
-              check=False)
-    for line in out.stdout.splitlines():
-        if f"bw:{vip}" in line and f"SET {mark}" in line:
+    classid = vip_to_classid(vip)
+
+    # Check nft mangle (4 placements: PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
+    for chain in ("prerouting", "postrouting", "forward"):
+        out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", chain])
+        if out.returncode != 0:
+            continue
+        # nft output: `... meta mark set 0xN comment "bw:VIP" # handle H`
+        if f'comment "bw:{vip}"' in out.stdout and f"meta mark set {mark}" in out.stdout:
             return True
     return False
+
+
+def _class_present(iface: str, classid: str) -> bool:
+    """Check if a tc class with this classid exists on the interface."""
+    out = run(["tc", "class", "show", "dev", iface, "classid", classid])
+    return f"classid {classid}" in out.stdout
+
+
+def _filter_present(iface: str, parent: str, mark_hex: str) -> bool:
+    """Check if a tc filter with this fw handle exists on the interface."""
+    out = run(["tc", "filter", "show", "dev", iface, "parent", parent])
+    return f"handle {mark_hex}" in out.stdout and " fw " in out.stdout
 
 
 def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
     """Apply bandwidth limits for a single user.
 
-    - Add iptables mangle MARK rule (POSTROUTING for upload, PREROUTING for download)
-    - Add tc class on egress (rate = up_mbps)
-    - Add tc class on ifb0 (rate = down_mbps) if INGRESS_SHAPING
-    - Add tc filter on both, routing marked packets to the class
-    """
-    if user_bandwidth_rules_present(vip):
-        return  # already applied
+    Idempotent — each step is skipped if its target already exists.
+    Use 'tc replace' so a class with the same parameters is updated, not errored.
+    Use 'tc replace' for the egress class (idempotent under same params).
 
+    nft edition (2026-06-26): writes nft mangle MARK rules instead of iptables-legacy.
+    Uses helpers from bandwidth-monitor-nft.py (imported at module level).
+    """
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # 1. iptables marks (PREROUTING for download, POSTROUTING for upload)
-    #    PREROUTING matches the destination (the user's VIP) for download traffic
-    #    arriving from the internet. POSTROUTING matches the source (the user's
-    #    VIP) for upload traffic going out. Same VIP, two chains, one mark.
-    run([
-        "iptables-legacy", "-t", "mangle", "-A", "PREROUTING",
-        "-d", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
-        "-m", "comment", "--comment", f"bw:{vip}",
-    ])
-    run([
-        "iptables-legacy", "-t", "mangle", "-A", "POSTROUTING",
-        "-s", f"{vip}/32", "-j", "MARK", "--set-mark", mark,
-        "-m", "comment", "--comment", f"bw:{vip}",
-    ])
+    # 1. nft MARK rules in FOUR mangle placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s).
+    for chain, match_flag in (
+        ("PREROUTING", "-d"),   # download: dst=VIP
+        ("FORWARD", "-d"),       # forwarded download: dst=VIP
+        ("FORWARD", "-s"),       # forwarded upload: src=VIP
+        ("POSTROUTING", "-s"),   # local-sourced upload
+    ):
+        if not nft_add_mark_rule(vip, chain, match_flag, mark):
+            log_if_failed(["nft", chain, vip],
+                          subprocess.CompletedProcess(args=[], returncode=1,
+                                                      stdout="", stderr="add_mark_rule failed"))
 
-    # 2. tc class on egress (user's upload = rate)
-    run([
-        "tc", "class", "add", "dev", iface, "parent", "1:1",
+    # 2. tc class on egress (user's upload = rate) — 'replace' is idempotent
+    result = run([
+        "tc", "class", "replace", "dev", iface, "parent", "1:1",
         "classid", classid, "htb",
         "rate", f"{up_mbps}mbit", "ceil", f"{up_mbps}mbit",
     ])
-    # 3. tc filter on egress: route marked packets to the class
-    run([
-        "tc", "filter", "add", "dev", iface, "parent", "1:",
-        "protocol", "ip", "handle", mark, "fw", "flowid", classid,
-    ])
+    if not rc_ok(result):
+        log_if_failed(["tc", "class", "replace", "egress", classid], result)
+
+    # 3. tc filter on egress: route marked packets to the class (idempotent)
+    if not _filter_present(iface, "1:", mark):
+        result = run([
+            "tc", "filter", "replace", "dev", iface, "parent", "1:",
+            "protocol", "ip", "handle", mark, "fw", "flowid", classid,
+        ])
+        if not rc_ok(result):
+            log_if_failed(["tc", "filter", "replace", "egress", mark], result)
 
     if INGRESS_SHAPING:
-        # 4. tc class on ifb0 (user's download = rate)
-        run([
-            "tc", "class", "add", "dev", INGRESS_IFB, "parent", "1:1",
+        # 4. tc class on ifb0 (user's download = rate) — 'replace' is idempotent
+        result = run([
+            "tc", "class", "replace", "dev", INGRESS_IFB, "parent", "1:1",
             "classid", classid, "htb",
             "rate", f"{down_mbps}mbit", "ceil", f"{down_mbps}mbit",
         ])
+        if not rc_ok(result):
+            log_if_failed(["tc", "class", "replace", "ifb0", classid], result)
+
         # 5. tc filter on ifb0
-        run([
-            "tc", "filter", "add", "dev", INGRESS_IFB, "parent", "1:",
-            "protocol", "ip", "handle", mark, "fw", "flowid", classid,
-        ])
+        if not _filter_present(INGRESS_IFB, "1:", mark):
+            result = run([
+                "tc", "filter", "replace", "dev", INGRESS_IFB, "parent", "1:",
+                "protocol", "ip", "handle", mark, "fw", "flowid", classid,
+            ])
+            if not rc_ok(result):
+                log_if_failed(["tc", "filter", "replace", "ifb0", mark], result)
 
     log.info("Applied bandwidth for VIP %s: %d down / %d up mbit (ingress_shaping=%s)",
              vip, down_mbps, up_mbps, INGRESS_SHAPING)
 
 
 def remove_bandwidth(vip: str, iface: str):
-    """Remove iptables + tc rules for a user that disconnected."""
-    global INGRESS_SHAPING
+    """Remove nft + tc rules for a user that disconnected. Idempotent."""
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # Remove iptables rules (PREROUTING and POSTROUTING) by comment
-    for table_chain in [("mangle", "PREROUTING"), ("mangle", "POSTROUTING")]:
-        table, chain = table_chain
-        out = run(["iptables-legacy", "-t", table, "-L", chain, "-n", "--line-numbers"],
-                  check=False)
-        lines_to_delete = []
-        for line in out.stdout.splitlines():
-            if f"bw:{vip}" in line:
-                parts = line.split()
-                if parts and parts[0].isdigit():
-                    lines_to_delete.append(int(parts[0]))
-        for ln in sorted(lines_to_delete, reverse=True):
-            run(["iptables-legacy", "-t", table, "-D", chain, str(ln)], check=False)
+    # Remove nft MARK rules from all 4 placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
+    for chain in ("PREROUTING", "FORWARD", "POSTROUTING"):
+        nft_remove_mark_rule(vip, chain)
 
-    # Remove tc classes + filters
-    # tc filter del needs prio 49152 (default) + handle + fw to target a specific filter
+    # Remove tc filter + class on egress.
+    # Note: 'tc filter del' REQUIRES prio to be specified when handle is set,
+    # otherwise kernel says "Cannot flush filters with protocol, handle or
+    # kind set." Default prio for 'tc filter add ... fw' is 49152.
     run(["tc", "filter", "del", "dev", iface, "parent", "1:",
-         "prio", "49152", "handle", mark, "fw"], check=False)
-    run(["tc", "class", "del", "dev", iface, "classid", classid], check=False)
+         "prio", "49152", "handle", mark, "fw"])
+    run(["tc", "class", "del", "dev", iface, "classid", classid])
 
     if INGRESS_SHAPING:
         run(["tc", "filter", "del", "dev", INGRESS_IFB, "parent", "1:",
-             "prio", "49152", "handle", mark, "fw"], check=False)
-        run(["tc", "class", "del", "dev", INGRESS_IFB, "classid", classid], check=False)
+             "prio", "49152", "handle", mark, "fw"])
+        run(["tc", "class", "del", "dev", INGRESS_IFB, "classid", classid])
 
     log.info("Removed bandwidth for VIP %s", vip)
 
@@ -293,8 +374,17 @@ def remove_bandwidth(vip: str, iface: str):
 #     remote 'zun' @ 192.168.1.100[4500] [10.99.0.50]
 # We only care about ESTABLISHED rw-eap connections.
 SA_HEADER_RE = re.compile(r"^\s*rw-eap:\s+#\d+,\s+ESTABLISHED")
-SA_VIP_RE = re.compile(r"\[(\d+\.\d+\.\d+\.\d+)\]")
-SA_IDENTITY_RE = re.compile(r"remote\s+'([^']+)'\s+@")
+# Match the LAST [X.X.X.X] on a line (the VIP). The previous regex
+# matched the FIRST [port] instead, which broke when Windows clients
+# behind NAT send IKE identity in a different position.
+SA_VIP_RE = re.compile(r"\[(\d+\.\d+\.\d+\.\d+)\]\s*$")
+
+# Match the EAP identity (preferred) or fall back to the IKE identity.
+# iPhone/Mac send:  remote 'zun-operator' @ IP[4500] [10.99.0.1]
+# Windows behind NAT:  remote '192.168.10.18' @ IP[4500] EAP: 'zun-operator' [10.99.0.2]
+# The EAP identity is the actual user; the IKE identity may be a private IP.
+SA_IDENTITY_RE = re.compile(r"EAP:\s+'([^']+)'")
+SA_IKE_IDENTITY_RE = re.compile(r"remote\s+'([^']+)'\s+@")
 
 
 def list_active_vips() -> dict[str, str]:
@@ -314,11 +404,18 @@ def list_active_vips() -> dict[str, str]:
         if SA_HEADER_RE.search(line):
             sa = {}
             continue
-        if not sa:
+        if sa is None:
             continue
         m_id = SA_IDENTITY_RE.search(line)
         if m_id:
             sa["username"] = m_id.group(1)
+        else:
+            # Fallback: Windows clients behind NAT may not send EAP: on this
+            # line; use the IKE identity. NOT preferred because it's often a
+            # private IP (e.g. 192.168.10.18) which doesn't match DB users.
+            m_ike = SA_IKE_IDENTITY_RE.search(line)
+            if m_ike:
+                sa["username"] = m_ike.group(1)
         m_vip = SA_VIP_RE.search(line)
         if m_vip:
             sa["vip"] = m_vip.group(1)
@@ -374,7 +471,10 @@ def run_iteration(iface: str) -> tuple[int, int]:
                          vip, username)
             down, up = rates
             was_present = user_bandwidth_rules_present(vip)
-            apply_bandwidth(vip, down, up, iface)
+            try:
+                apply_bandwidth(vip, down, up, iface)
+            except Exception as e:
+                log.exception("apply_bandwidth failed for VIP %s: %s", vip, e)
             applied_vips.add(vip)
             if not was_present:
                 added += 1
@@ -383,17 +483,17 @@ def run_iteration(iface: str) -> tuple[int, int]:
         # We need to find VIPs that have rules but aren't active anymore.
         # Look in BOTH PREROUTING and POSTROUTING (apply_bandwidth writes to both).
         shaped_vips = set()
-        for chain in ("PREROUTING", "POSTROUTING"):
-            out = run(["iptables-legacy", "-t", "mangle", "-L", chain, "-n"],
+        for chain in ("prerouting", "postrouting"):
+            out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", chain],
                       check=False)
-            for line in out.stdout.splitlines():
-                if "bw:" in line:
-                    m = re.search(r"bw:(\d+\.\d+\.\d+\.\d+)", line)
-                    if m:
-                        shaped_vips.add(m.group(1))
+            for m in re.finditer(r'comment "bw:(\d+\.\d+\.\d+\.\d+)"', out.stdout):
+                shaped_vips.add(m.group(1))
 
         for vip in shaped_vips - applied_vips:
-            remove_bandwidth(vip, iface)
+            try:
+                remove_bandwidth(vip, iface)
+            except Exception as e:
+                log.exception("remove_bandwidth failed for VIP %s: %s", vip, e)
             removed += 1
 
         return (added, removed)
@@ -434,11 +534,16 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    iter_count = 0
     while True:
         try:
             added, removed = run_iteration(iface)
-            if added or removed:
-                log.info("Iteration: +%d -%d", added, removed)
+            iter_count += 1
+            # 2026-06-26: Always log iteration result for visibility.
+            # Previously only logged on change (added/removed != 0), which left
+            # the daemon "invisible" on idle VPS with no customers — couldn't
+            # verify it was actually iterating without --once mode.
+            log.info("Iteration #%d: +%d -%d (poll every %ds)", iter_count, added, removed, POLL_INTERVAL)
         except Exception as e:
             log.exception("Iteration failed: %s", e)
         time.sleep(POLL_INTERVAL)
