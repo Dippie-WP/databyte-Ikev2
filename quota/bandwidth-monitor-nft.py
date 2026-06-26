@@ -237,6 +237,82 @@ def remove_download_mark_rule(vip: str) -> bool:
     return False
 
 
+# === DOWNLOAD MARK via OUTPUT mangle (for locally-generated replies) ===
+
+def add_download_output_rule(remote_ip, mark):
+    """Add mangle OUTPUT MARK rule for DOWNLOAD using ip daddr remote_ip.
+
+    Why OUTPUT (in addition to FORWARD):
+      FORWARD catches packets DECRYPTED from xfrm and routed back through
+      the box (internet to VPS to tunnel). Covers speedtest, HTTPS, etc.
+      OUTPUT catches LOCALLY GENERATED packets from VPS-resident daemons
+      (iperf3 server, future apps) replying to tunnel clients. Without
+      this rule, iperf3 download bypasses the cap.
+      In OUTPUT, the SKB has src=VPS public IP, dst=tunnel client IP.
+      After xfrm encrypts it, mark survives to POSTROUTING and is
+      classified by egress tc.
+    """
+    if download_output_rule_present(remote_ip, mark):
+        log.debug("Download OUTPUT MARK rule already present: remote_ip=%s", remote_ip)
+        return True
+
+    comment = f"bw-dl-output:{remote_ip}"
+    cmd = [
+        "/usr/sbin/nft", "add", "rule", "ip", "mangle", "output",
+        "ip", "daddr", f"{remote_ip}/32",
+        "meta", "mark", "set", mark,
+        "comment", f'"{comment}"',
+    ]
+    result = run(cmd)
+    if result.returncode == 0:
+        log.info("Added nft DOWNLOAD OUTPUT MARK rule: remote_ip=%s mark=%s",
+                 remote_ip, mark)
+        return True
+    log.error("nft add download OUTPUT rule failed for %s: %s",
+              remote_ip, result.stderr)
+    return False
+
+
+def download_output_rule_present(remote_ip, mark):
+    """Check if the DOWNLOAD OUTPUT MARK rule for this remote_ip exists."""
+    out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", "output"])
+    if out.returncode != 0:
+        return False
+    target = f'comment "bw-dl-output:{remote_ip}"'
+    return target in out.stdout and _mark_in_nft_output(out.stdout, mark)
+
+
+def get_download_output_rule_handle(remote_ip):
+    """Find the nft handle for this remote_ip DOWNLOAD OUTPUT MARK rule."""
+    out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", "output"])
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        if f'comment "bw-dl-output:{remote_ip}"' in line:
+            m = re.search(r"handle\s+(\d+)", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def remove_download_output_rule(remote_ip):
+    """Remove DOWNLOAD OUTPUT MARK rule. Idempotent."""
+    handle = get_download_output_rule_handle(remote_ip)
+    if not handle:
+        log.debug("No DOWNLOAD OUTPUT MARK rule to remove: remote_ip=%s", remote_ip)
+        return True
+    cmd = ["/usr/sbin/nft", "delete", "rule", "ip", "mangle", "output", "handle", handle]
+    result = run(cmd)
+    if result.returncode == 0:
+        log.info("Removed nft DOWNLOAD OUTPUT MARK rule: remote_ip=%s handle=%s",
+                 remote_ip, handle)
+        return True
+    log.error("nft delete download OUTPUT rule failed for %s: %s",
+              remote_ip, result.stderr)
+    return False
+
+
+
     for line in out.stdout.splitlines():
         if f'comment "bw:{vip}"' in line:
             m = re.search(r"handle\s+(\d+)", line)
