@@ -44,8 +44,6 @@ If you DON'T use firewalld, you can use the iptables rules in `host/iptables/rul
 
 ### 1.3 iptables (MSS clamp — CRITICAL for 5G)
 
-> **Backend:** `iptables-legacy` (not iptables-nft). Debian 13 defaults to nft; `scripts/bootstrap-xneelo.sh` line 188-194 pins alternatives to legacy before Step 8 loads any rules. Don't switch — charon VICI + bandwidth-monitor depend on legacy semantics.
-
 ```bash
 sudo apt install iptables-persistent
 # Netfilter asks to save current rules — say yes
@@ -83,14 +81,21 @@ Outputs:
 
 ```bash
 cd docker/swanctl/conf.d
-cp rw-eap.conf.template rw-eap.conf
+cp rw-eap.conf.example rw-eap.conf
 cp rw-psk.conf.template rw-psk.conf
+```
 
+> **rw-eap.conf is in .gitignore (operator-managed).** It contains live EAP
+> secrets for all your customers. NEVER commit rw-eap.conf to git.
+> Use rw-eap.conf.example as the starting template (5 placeholder EAP
+> blocks + comment block explaining the format).
+
+```bash
 # Edit rw-eap.conf:
 #   - Uncomment the `secrets { eap-USERNAME { id = USERNAME; secret = "..."; } }` block
 #   - Set your username + password
 
-# Edit rw-psk.conf:
+# Edit rw-psk.conf (also in .gitignore):
 #   - Uncomment the `secrets { ike-psk { ...; secret = "..."; } }` block
 #   - Set your PSK
 ```
@@ -180,56 +185,6 @@ sudo chmod 644 /etc/cron.d/strongswan-db-backup
    - CA certificate: select the installed one
 5. Connect. Verify you get a VIP in the 10.99.0.0/24 range, and `https://ifconfig.me` shows the server's public IP.
 
-### Windows 10/11 (works, EAP-MSCHAPv2)
-
-Windows has a built-in IKEv2 client — no app install required. Two scripts
-ship in the repo to make it one-shot:
-
-| Script | Purpose |
-|---|---|
-| `scripts/setup-windows-vpn.ps1` | Full setup: install CA cert, create VPN connection, configure crypto, connect. **First-time use.** |
-| `scripts/connect-databyte-vpn.ps1` | Idempotent: recreate connection + reconnect. **Re-runs any time.** Profile XML pre-configures EAP-MSCHAPv2 (no dialog at first connect) and ForceTunnel (no split tunneling). |
-| `scripts/strongswan-ca.crt.pem` | Bundled CA cert (must be installed before first connect — see #43). |
-
-**One-shot operator setup (Windows PowerShell 5.1+, as Administrator):**
-
-```powershell
-# Pull the three files from the OC host (or copy them via your channel)
-Invoke-WebRequest http://OC_HOST:8888/connect-databyte-vpn.ps1 -OutFile connect-databyte-vpn.ps1
-Invoke-WebRequest http://OC_HOST:8888/strongswan-ca.crt.pem -OutFile strongswan-ca.crt.pem
-Invoke-WebRequest http://OC_HOST:8888/README-windows-vpn.md -OutFile README-windows-vpn.md
-
-# Run the script (it installs the CA cert, creates the connection, configures crypto, and connects)
-.\connect-databyte-vpn.ps1
-```
-
-The script bakes in operator credentials (`zun-operator` / EAP secret), the
-server FQDN (`myvpn.databyte.co.za`), crypto match (AES256/SHA256/Group14/ECP384),
-and the EAP-MSCHAPv2 profile XML. Re-running it is safe — it recreates the
-connection and reconnects.
-
-**Verify end-to-end (Windows):**
-
-```powershell
-# 1. Get-VpnConnection shows the tunnel up
-Get-VpnConnection -Name 'Databyte VPN' | Select-Object Name, ConnectionStatus
-
-# 2. Public IP is the VPS, not your ISP
-(Invoke-WebRequest -Uri 'https://ifconfig.me' -UseBasicParsing).Content
-
-# 3. Cap is enforced (download to public iperf3 target)
-iperf3.exe -c iperf.angolacables.co.ao -p 9200 -t 30
-# Expected: ~17 Mbps (cap minus XFRM overhead). See #49 — VPS-local tests bypass the cap.
-```
-
-**Known issues** (full list in 5D-BANDWIDTH-LIMITING.md lessons):
-
-- **#43**: silent hang if CA cert not in Trusted Root CAs — the script handles this via `Import-Certificate`.
-- **#47**: split tunneling on by default — handled via `<RoutingPolicyType>ForceTunnel</RoutingPolicyType>` in profile XML.
-- **#48**: PowerShell 5.1 parser error on `} catch {` — script tested on Windows 10/11 stock 5.1.
-
-For the bundled README, see `scripts/README-windows-vpn.md`.
-
 ### iOS (broken, see ISSUES-LOG)
 
 The native IKEv2 client silently fails cert validation. Workaround for now: use **strongSwan app** (paid, ~$5) with PSK profile. Fix coming in v1.3 with Let's Encrypt cert.
@@ -280,8 +235,3 @@ The DB is bind-mounted, not in the image — your data is preserved.
 | Phone connects, VPN shows OK, but no traffic flows | install_virtual_ip=yes default | Verify `00-virtual-ip.conf` is bind-mounted (5A.6) |
 | Stuck in CONNECTING | Network reachability | Check router port-forwards, public IP |
 | iana.org / Cloudflare sites time out, others work | 5G MTU | MSS clamp 1260 (5A.7) |
-| Windows: IKEv2 connects but iperf3 returns 0 bytes | CA cert not in Trusted Root CAs | `Import-Certificate` (see #43) |
-| Windows: VPN connects but `ifconfig.me` shows ISP IP, not VPS | Split tunneling on | Profile XML `ForceTunnel` (see #47) |
-| Windows: PowerShell parse error on `} catch {` | PS 5.1 parser quirk | Put `catch` on its own line (see #48) |
-| VPS-local iperf3 (`-c 127.0.0.1`) shows unshaped speed | Cap only engages on FORWARD | Test via public target, e.g. `iperf.angolacables.co.ao:9200` (#49) |
-| Port 9102/8080/3000 unreachable from public internet on Xneelo | Edge firewall blocks non-22 TCP | Add Security Group rule in Xneelo control panel (#50) |

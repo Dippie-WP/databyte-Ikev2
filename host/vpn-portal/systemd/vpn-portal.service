@@ -1,57 +1,26 @@
 [Unit]
-Description=databyte VPN Portal — FastAPI backend (v1.7.0)
+Description=databyte VPN Portal — FastAPI backend (5C.1)
 Documentation=file:///opt/vpn-portal/README.md
-After=network-online.target docker.service
+After=network-online.target
 Wants=network-online.target
-Requires=docker.service
 
 [Service]
-Type=notify
-User=vpn-portal
-Group=vpn-portal
-SupplementaryGroups=docker
+Type=simple
+User=root
 WorkingDirectory=/opt/vpn-portal
-EnvironmentFile=/etc/vpn-portal.env
-# Gunicorn + UvicornWorker (production ASGI), Unix socket for nginx
-# - 4 workers (2*CPU + 1 default; tune per host)
-# - max-requests 1000 + jitter = memory leak safety net
-# - graceful-timeout 30s for in-flight requests to finish
-ExecStart=/opt/vpn-portal/.venv/bin/gunicorn app:app \
-  --worker-class uvicorn.workers.UvicornWorker \
-  --workers 4 \
-  --bind unix:/run/vpn-portal/gunicorn.sock \
-  --timeout 120 \
-  --graceful-timeout 30 \
-  --max-requests 1000 \
-  --max-requests-jitter 50 \
-  --access-logfile - \
-  --error-logfile -
-ExecReload=/bin/kill -s HUP $MAINPID
+EnvironmentFile=-/etc/vpn-portal.env
+ExecStart=/opt/vpn-portal/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8080 --workers 1
 Restart=on-failure
 RestartSec=5
-
-# ---- Hardening ----
+# Hardening (relax for SSH-from-app needs; tighten when running as non-root user)
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-# Read/write paths needed at runtime
-ReadWritePaths=/run/vpn-portal /var/log/vpn-portal /var/lib/strongswan
-# Make socket dir at start (gunicorn doesn't create it)
-RuntimeDirectory=vpn-portal
-RuntimeDirectoryMode=0750
-# Cap memory + CPU if runaway (defensive)
-MemoryMax=512M
-TasksMax=64
-
+ProtectSystem=full
+ProtectHome=read-only
+# Need SSH key + access; keep /root/.ssh readable
+ReadOnlyPaths=/opt/vpn-portal
 # Logs go to journal
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=vpn-portal
 
 [Install]
 WantedBy=multi-user.target

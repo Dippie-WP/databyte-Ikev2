@@ -2,9 +2,9 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
-## Current state (live 2026-06-21 17:50 UTC)
+## Current state (live 2026-06-26 18:10 UTC)
 
-**Latest tag: v1.3.0** — customer portal at `/portal/` (lab build, LAN-only) + operator dashboard polish (v1.2.11-14 rolled up under v1.3.0).
+**Latest tag: v1.4.0** — nftables meter-based quota tracking + swanctl EAP regex fix + repo alignment with deployed state.
 
 **Phase status:**
 | Phase | Description | Status |
@@ -33,10 +33,13 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | v1.2.13 | Bulk operations (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 11:05 UTC |
 | v1.2.14 | Column sort + active sessions (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 12:28 UTC |
 | **v1.3.0** | **Customer portal at `/portal/` (lab) + diagnosis protocol + charon defaults audit** | **✅ DONE — 2026-06-21 17:50 UTC** |
+| **Phase 5** | **iptables-legacy → native nftables migration (vpn-prod-01, IPv4 only)** | **✅ DONE — 2026-06-26 11:30 UTC** |
+| **Phase 6** | **nft named meters replace 508 per-VIP rules + swanctl EAP regex fix** | **✅ DONE — 2026-06-26 17:55 UTC** |
+| **v1.4.0** | **Repo alignment (deployed → canonical) + Docker image rebuild + tag v1.4.0** | **✅ DONE — 2026-06-26** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0** (21 total). **v1.2.5 deleted.**
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0**, **v1.4.0** (22 total). **v1.2.5 deleted.**
 
 ### v1.3.0 customer portal (lab, 2026-06-21)
 

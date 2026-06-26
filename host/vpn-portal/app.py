@@ -2,18 +2,15 @@
 """
 databyte VPN Portal — FastAPI backend (5C.1, MVP)
 
-Single-file app. Reads SQLite + charon state from the VPN gateway (VPS in prod
-via 127.0.0.1, LXC 903 lab via 192.168.10.98 — selected by VPN_HOST env var).
-Wraps swanctl/ipBan/firewalld.
+Single-file app. Reads SQLite from LXC 903 via SSH. Wraps swanctl/ipBan/firewalld.
 
 Endpoints:
   GET  /api/health                     public — service + DB + charon reach
-  POST /api/login                      admin auth (Argon2id + DB session cookie)
-  POST /api/logout                     deletes DB session + clears cookie
+  POST /api/login                      admin auth (bcrypt + HMAC-signed cookie)
+  POST /api/logout
   GET  /api/customers                  list w/ tier, used, quota, over_quota, vip
   GET  /api/customers/{id}             + devices[] + alerts[]
   GET  /api/tiers                      tier defs (5GB/10GB/20GB/demo_100MB) — Tier 1/2/3 at $3/$5/$8 USD
-  GET  /api/speed_plans                per-customer bandwidth presets (standard 20/20, asymmetric_40_20)
   GET  /api/quota/{customer_id}        live used/quota + cap state
   POST /api/quota/{customer_id}/reset  sqlite UPDATE, returns reset_from_bytes
   GET  /api/vpn/sessions               docker exec swanctl --list-sas (raw)
@@ -29,13 +26,12 @@ Endpoints:
   GET  /api/security/deadman           ipban-ctl deadman status (raw)
 
 Config via env:
-  VPN_HOST       VPN gateway IP/host (default 192.168.10.98). On VPS, set to 127.0.0.1
+  VPN_HOST       LXC 903 IP/host (default 192.168.10.98)
   SSH_KEY        path to SSH private key (default /root/.ssh/id_ed25519_vpn)
-  DB_PATH        SQLite on the gateway (default /var/lib/strongswan/ipsec.db)
+  DB_PATH        SQLite on 903 (default /var/lib/strongswan/ipsec.db)
   ADMIN_USER     admin username (default admin)
-  ADMIN_PASS_HASH  Argon2id hash of admin password (REQUIRED). Generate with:
-                    python -c "import portal_auth; print(portal_auth.hash_operator_password('YOURPASS'))"
-  COOKIE_SECURE   "true" / "1" to set Secure flag on cookies (REQUIRED when behind HTTPS)
+  ADMIN_PASS_HASH  bcrypt hash of admin password (REQUIRED)
+  SESSION_SECRET  HMAC secret (random default; set explicitly for multi-instance)
 """
 import os
 import sys
@@ -47,13 +43,12 @@ import hashlib
 import secrets
 import subprocess
 import logging
-import asyncio
-import contextlib
 from collections import defaultdict
 from datetime import datetime
-from typing import Optional, Literal
-import portal_auth  # v1.3.0 customer portal auth + v1.3.1 operator sessions
+from typing import Optional
+import portal_auth  # v1.3.0 customer portal auth
 
+import bcrypt
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -65,41 +60,13 @@ SSH_KEY         = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
 DB_PATH         = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
 ADMIN_USER      = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS_HASH = os.environ.get("ADMIN_PASS_HASH", "")
+SESSION_SECRET  = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
+SESSION_TTL     = int(os.environ.get("SESSION_TTL", "86400"))   # 24h
 RATE_LIMIT_PER_MIN = 5
 SSH_TIMEOUT     = 10
 
 # ---------- Logging ----------
-# CP7 JSON logging. Emits one JSON object per line on stdout (captured by
-# journald → Loki/Promtail/etc). Fields: ts, level, logger, msg, plus any
-# extra fields passed via extra={...} to the logger call.
-import json as _json
-class _JsonFormatter(logging.Formatter):
-    def format(self, record):
-        payload = {
-            "ts": datetime.utcfromtimestamp(record.created).isoformat() + "Z",
-            "level": record.levelname,
-            "logger": record.name,
-            "msg": record.getMessage(),
-        }
-        # Promote any extra fields attached to the record
-        for k, v in record.__dict__.items():
-            if k not in ("name", "msg", "args", "levelname", "levelno", "pathname",
-                         "filename", "module", "exc_info", "exc_text", "stack_info",
-                         "lineno", "funcName", "created", "msecs", "relativeCreated",
-                         "thread", "threadName", "processName", "process", "message",
-                         "taskName"):
-                try:
-                    _json.dumps(v)  # only include JSON-serializable values
-                    payload[k] = v
-                except (TypeError, ValueError):
-                    payload[k] = repr(v)
-        if record.exc_info:
-            payload["exc"] = self.formatException(record.exc_info)
-        return _json.dumps(payload, separators=(",", ":"))
-
-_log_handler = logging.StreamHandler()
-_log_handler.setFormatter(_JsonFormatter())
-logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("vpn-portal")
 
 # ---------- App ----------
@@ -121,38 +88,6 @@ if os.path.isdir(WWW_DIR):
     def portal_index():
         return FileResponse(os.path.join(WWW_DIR, "portal", "index.html"))
 
-# ---------- Session cleanup (HIGH #3 fix) ----------
-# Both purge_expired_sessions() (customer) and purge_expired_operator_sessions()
-# (operator) are defined in portal_auth.py but were never called, so expired
-# sessions accumulated indefinitely. Fix: asyncio background task that runs
-# every 5 min, deletes expired rows from both tables. Idempotent + safe to run
-# concurrently with reads (SQLite WAL mode allows concurrent readers + 1 writer).
-async def _session_cleanup_loop():
-    while True:
-        try:
-            await asyncio.sleep(300)  # 5 min
-            c = portal_auth.purge_expired_sessions()
-            o = portal_auth.purge_expired_operator_sessions()
-            if c or o:
-                log.info("session cleanup: deleted customer=%d operator=%d", c, o)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            log.warning("session cleanup error: %s", e)
-
-@app.on_event("startup")
-async def _start_session_cleanup():
-    app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
-    log.info("session cleanup task scheduled (every 5 min)")
-
-@app.on_event("shutdown")
-async def _stop_session_cleanup():
-    task = getattr(app.state, "session_cleanup_task", None)
-    if task:
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
 # ---------- Rate limit (in-memory, per-IP) ----------
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 
@@ -165,18 +100,44 @@ def rate_limit(ip: str):
     _login_attempts[ip] = attempts + [now]
 
 
-# ---------- Session: server-side (DB-backed) ----------
-#
-# v1.3.1 — replaced the HMAC-signed-JSON cookie pattern with an opaque random
-# token + DB lookup (operator_sessions table). Trade-off: we can now revoke
-# (logout-everywhere, ban stolen cookie). Cookie value is `secrets.token_urlsafe(32)`
-# — 256 bits of entropy, not user data.
-#
-# The require_session dep delegates to portal_auth.require_operator_session
-# which does the cookie name + DB lookup + sliding expiry dance. We keep the
-# name `require_session` so we don't have to touch every route signature.
+# ---------- Session signing (HMAC, no external dep) ----------
+def sign_session(data: dict) -> str:
+    payload = json.dumps(data, sort_keys=True, separators=(",", ":")).encode()
+    sig = hmac.new(SESSION_SECRET.encode(), payload, hashlib.sha256).hexdigest()
+    return f"{payload.hex()}.{sig}"
 
-require_session = portal_auth.require_operator_session
+
+def verify_session(token: str) -> Optional[dict]:
+    try:
+        payload_hex, sig = token.split(".", 1)
+        payload = bytes.fromhex(payload_hex)
+        expected = hmac.new(SESSION_SECRET.encode(), payload, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            return None
+        data = json.loads(payload)
+        if time.time() - data.get("iat", 0) > SESSION_TTL:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def require_session(
+    session: Optional[str] = Cookie(None),
+    portal_session: Optional[str] = Cookie(None, alias="portal_session"),
+) -> dict:
+    # v1.3.0 — defense in depth: if a portal_session cookie is being sent to
+    # an operator endpoint, that's wrong. Reject it. The portal cookie should
+    # be scoped to Path=/portal/ and the browser should not send it here, but
+    # we double-check at the app layer too.
+    if portal_session and not session:
+        raise HTTPException(401, "Portal session not valid for operator endpoints")
+    if not session:
+        raise HTTPException(401, "Not authenticated")
+    data = verify_session(session)
+    if not data:
+        raise HTTPException(401, "Invalid or expired session")
+    return data
 
 
 # ---------- SSH + DB helpers ----------
@@ -204,24 +165,9 @@ def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") ->
 
 
 def db_query(sql: str) -> list:
-    """Query SQLite on the VPN gateway, return list of dicts.
-
-    sqlite3 -json serializes NULL as the literal string "None" (sqlite3 CLI
-    quirk, not real JSON null). That breaks the customer-edit modal — the
-    form pre-fills with the text "None" instead of an empty input, and
-    Save then sends the string "None" to the backend, which fails email
-    validation. Caught 2026-06-25 by Zun. Fix: convert any "None" string
-    back to None at the boundary so the rest of the code sees proper nulls.
-    Tests use Python's json.dumps which already produces real null, so this
-    only affects the live sqlite3 CLI path.
-    """
+    """Query SQLite on the VPN gateway, return list of dicts."""
     out = ssh_903(["sqlite3", "-json", DB_PATH, sql])
-    rows = json.loads(out) if out.strip() else []
-    for r in rows:
-        for k, v in r.items():
-            if v == "None":
-                r[k] = None
-    return rows
+    return json.loads(out) if out.strip() else []
 
 
 def db_exec(sql: str) -> None:
@@ -233,74 +179,68 @@ def db_exec(sql: str) -> None:
 def leases_active() -> list:
     """Currently active virtual-IP leases with customer + device info.
 
-    Source: charon's live pool (swanctl --list-pools --leases). Replaces the
-    attr-sql `addresses` table which is empty (charon uses an inline pool
-    defined in swanctl.conf, not the DB-managed pool the original design
-    assumed — see docs/ARCHITECTURE.md §"Sticky VIP via attr-sql").
+    Joins the strongSwan attr-sql pool with the 5B customers/devices layer.
+    Note: identities.data is a BLOB; we CAST to TEXT to make the join work.
+    Includes per-customer usage data so the Sessions tab can show how much
+    each active session has used vs its tier limit.
 
-    Enrichment layers:
-      1. DB devices/customers/tiers — joined on device_name = pool-lease identity
-      2. SA parser (swanctl --list-sas) — adds public_ip, remote_port, algo
-
-    Output shape is identical to the old addresses-table version (back-compat
-    for the UI in app.js + the customer_active_sessions endpoint).
+    Also enriches each lease with live SA data from swanctl --list-sas:
+    public_ip, remote_port, ike_proposal, device_type (inferred from algo).
+    Device hostname + OS version come from the devices table if set.
     """
-    pool_leases = swanctl_list_pool_leases()
-    if not pool_leases:
-        return []
-
-    # Fetch all active devices joined with their strongSwan user + customer + tier.
-    # Index by users.name (the EAP identity, e.g. 'saalieg-laptop') — that is
-    # what charon's --list-pools --leases reports. The portal's `device_name`
-    # is a user-friendly label ('laptop') and does NOT match the pool identity.
-    # Join path: users.name (EAP identity) -> users.id -> devices.strongswan_user_id
-    #                                              -> devices.customer_id -> customers.id
-    device_sql = """
-      SELECT u.id              AS user_id,
-             u.name            AS eap_identity,
-             d.id              AS device_id,
-             d.device_name     AS device_name,
-             d.device_type     AS device_type_meta,
-             d.os_version      AS os_version_meta,
-             d.hostname        AS hostname_meta,
-             d.last_seen_at    AS acquired_at,
-             c.id              AS customer_id,
-             c.name            AS customer_name,
-             c.is_operator     AS is_operator,
-             c.data_used_bytes AS data_used_bytes,
-             c.data_limit_bytes AS data_limit_bytes,
-             c.over_quota      AS over_quota,
-             c.tier_id         AS tier_id,
-             t.name            AS tier_name
-      FROM users u
-      LEFT JOIN devices   d ON d.strongswan_user_id = u.id AND d.is_active = 1
+    sql = """
+      SELECT
+        hex(a.address)        AS hex_addr,
+        i.id                 AS identity_id,
+        CAST(i.data AS TEXT) AS identity_name,
+        d.id                 AS device_id,
+        d.device_name        AS device_name,
+        d.device_type        AS device_type_meta,
+        d.os_version         AS os_version_meta,
+        d.hostname           AS hostname_meta,
+        c.id                 AS customer_id,
+        c.name               AS customer_name,
+        c.is_operator        AS is_operator,
+        c.data_used_bytes    AS data_used_bytes,
+        c.data_limit_bytes   AS data_limit_bytes,
+        c.over_quota         AS over_quota,
+        c.tier_id            AS tier_id,
+        t.name               AS tier_name,
+        a.acquired           AS acquired_at
+      FROM addresses a
+      JOIN identities i ON i.id = a.identity
+      LEFT JOIN devices   d ON d.device_name = CAST(i.data AS TEXT)
       LEFT JOIN customers c ON c.id = d.customer_id
       LEFT JOIN tiers     t ON t.id = c.tier_id
+      WHERE a.acquired > 0 AND a.released = 0
+      ORDER BY a.acquired DESC
     """
     try:
-        all_users = db_query(device_sql)
+        rows = db_query(sql)
     except HTTPException:
         return []
-    # Index by EAP identity (matches charon pool lease)
-    devices_by_identity = {
-        u["eap_identity"]: u for u in all_users if u.get("eap_identity")
-    }
-
-    # Parse live SAs once — keyed by VIP for enrichment.
+    # Parse live SAs once — keyed by VIP
     sas_by_vip = {}
     for sa in swanctl_parse_sas():
         if sa.get("vip"):
             sas_by_vip[sa["vip"]] = sa
 
     out = []
-    for pl in pool_leases:
-        vip      = pl["vip"]
-        identity = pl["identity"]
-        r        = devices_by_identity.get(identity, {})
-        sa       = sas_by_vip.get(vip, {})
+    for r in rows:
+        hex_addr = r.get("hex_addr") or ""
+        # hex '0A630005' -> '10.99.0.5'
+        try:
+            ip = ".".join(str(int(hex_addr[i:i+2], 16)) for i in (0, 2, 4, 6))
+        except Exception:
+            ip = "?"
+        used   = r.get("data_used_bytes")  or 0
+        limit  = r.get("data_limit_bytes") or 0
+        pct    = (used / limit * 100) if limit else 0
 
-        algo     = sa.get("algo")
-        algo_fp  = sa.get("algo_fingerprint") or fingerprint_device(algo or "")
+        sa = sas_by_vip.get(ip, {})
+        algo  = sa.get("algo")
+        algo_fp = sa.get("algo_fingerprint") or fingerprint_device(algo or "")
+        # Prefer manually-set device_type; fall back to inferred
         manual_type = r.get("device_type_meta")
         if manual_type:
             device_type = {"label": manual_type, "confidence": 1.0, "source": "manual"}
@@ -309,39 +249,32 @@ def leases_active() -> list:
         else:
             device_type = {"label": None, "confidence": 0, "source": None}
 
-        used  = r.get("data_used_bytes")  or 0
-        limit = r.get("data_limit_bytes") or 0
-        pct   = (used / limit * 100) if limit else 0
-
         out.append({
-            "address":             vip,
-            "identity_id":         None,  # was attr-sql identities.id; not used downstream
-            "identity_name":       identity,
-            "device_id":           r.get("device_id"),
-            "device_name":         r.get("device_name") or identity,
-            "device_type":         device_type,
-            "os_version":          r.get("os_version_meta"),
-            "hostname":            r.get("hostname_meta"),
-            "customer_id":         r.get("customer_id"),
-            "customer_name":       r.get("customer_name") or "(unknown identity)",
-            "is_operator":         bool(r.get("is_operator")),
-            "data_used_bytes":     used,
-            "data_limit_bytes":    limit,
-            "data_pct":            round(pct, 1),
-            "over_quota":          bool(r.get("over_quota")),
-            "tier_name":           r.get("tier_name"),
-            "acquired_at":         r.get("acquired_at"),
-            "public_ip":           sa.get("remote_ip"),
-            "remote_port":         sa.get("remote_port"),
-            "ike_proposal":        algo,
-            "sa_state":            sa.get("state"),
+            "address":           ip,
+            "identity_id":       r.get("identity_id"),
+            "identity_name":     r.get("identity_name"),
+            "device_id":         r.get("device_id"),
+            "device_name":       r.get("device_name"),
+            "device_type":       device_type,
+            "os_version":        r.get("os_version_meta"),
+            "hostname":          r.get("hostname_meta"),
+            "customer_id":       r.get("customer_id"),
+            "customer_name":     r.get("customer_name"),
+            "is_operator":       bool(r.get("is_operator")),
+            "data_used_bytes":   used,
+            "data_limit_bytes":  limit,
+            "data_pct":          round(pct, 1),
+            "over_quota":        bool(r.get("over_quota")),
+            "tier_name":         r.get("tier_name"),
+            "acquired_at":       r.get("acquired_at"),
+            "public_ip":         sa.get("remote_ip"),
+            "remote_port":       sa.get("remote_port"),
+            "ike_proposal":      algo,
+            "sa_state":          sa.get("state"),
             "sa_established_secs": sa.get("established_secs"),
-            "sa_bytes_in":         sa.get("bytes_in"),
-            "sa_bytes_out":        sa.get("bytes_out"),
-            "sa_uniqueid":         sa.get("uniqueid"),
-            # v1.4.6 — live pool state (not in old addresses-table shape)
-            "online":              pl["online"],
-            "pool":                pl.get("pool"),
+            "sa_bytes_in":       sa.get("bytes_in"),
+            "sa_bytes_out":      sa.get("bytes_out"),
+            "sa_uniqueid":       sa.get("uniqueid"),
         })
     return out
 
@@ -391,8 +324,8 @@ def fingerprint_device(algo_str: str) -> dict:
 # swanctl --list-sas parser — extracts structured data for the UI.
 # Format (strongSwan 6.x):
 #   rw-eap: #22, ESTABLISHED, IKEv2, <spi_i>_i <spi_r>_r*
-#     local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]
-#     remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.2]
+#     local  'vpn.homelab.local' @ 192.168.10.98[4500]
+#     remote 'demo-phone' @ 105.174.188.166[51234] [10.99.0.5]
 #     AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
 #     established 614s ago, rekeying in 79344s, reauth in 78406s
 #     net: #3, reqid 1, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-256/HMAC_SHA2_256_128
@@ -400,7 +333,7 @@ def fingerprint_device(algo_str: str) -> dict:
 #       in  cbe261ee, 4199276 bytes, 52155 packets,     0s ago
 #       out 040b08d2, 128451591 bytes, 105627 packets,     0s ago
 #       local  0.0.0.0/0
-#       remote 10.99.0.2/32
+#       remote 10.99.0.5/32
 # SPIs end with _i / _r role markers; responder SPI also gets a trailing *
 _SA_HEADER_RE = re.compile(
     r"^(?P<conn>\S+):\s+#(?P<id>\d+),\s+(?P<state>\S+),\s+(?P<version>\S+),\s+"
@@ -411,9 +344,7 @@ _SA_LOCAL_RE  = re.compile(
     r"local\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
 )
 _SA_REMOTE_RE = re.compile(
-    r"remote\s+'(?P<id>[^']*)'"
-    r"\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
-    r"(?:\s+EAP:\s+'(?P<eap_id>[^']*)')?"
+    r"remote\s+'(?P<id>[^']*)'\s+@\s+(?P<ip>\S+?)\[(?P<port>\d+)\]"
     r"(?:\s+\[(?P<vip>\d+\.\d+\.\d+\.\d+)\])?"
 )
 _SA_ALGO_RE   = re.compile(r"^\s*([A-Z][A-Z0-9_/-]+(?:/[A-Z0-9_]+)+)\s*$")
@@ -424,17 +355,18 @@ _SA_INOUT_RE  = re.compile(
 )
 
 
-def _parse_sas_text(raw: str) -> list:
-    """Pure parser for swanctl --list-sas output. Testable without SSH/charon.
+def swanctl_parse_sas() -> list:
+    """Parse swanctl --list-sas output into structured records keyed by VIP.
 
     Returns list of dicts: {uniqueid, conn, state, version, local_id, local_ip,
-    local_port, remote_id, eap_id, remote_ip, remote_port, vip, algo,
-    algo_fingerprint, established_secs, bytes_in, bytes_out, pkts_in, pkts_out}.
-
-    remote_id is set to the EAP identity (when present) so the UI shows the
-    username (saalieg-laptop) instead of the client's public IP. Falls back to
-    the IKE identity (ip-based) for non-EAP conns (rw-psk).
+    local_port, remote_id, remote_ip, remote_port, vip, algo, algo_fingerprint,
+    established_secs, bytes_in, bytes_out, pkts_in, pkts_out}.
     """
+    raw = ""
+    try:
+        raw = swanctl_list_sas()
+    except Exception:
+        return []
     sas = []
     cur = None
     in_child = False
@@ -447,8 +379,7 @@ def _parse_sas_text(raw: str) -> list:
                 "state":            m.group("state"),
                 "version":          m.group("version"),
                 "local_id":         None, "local_ip": None, "local_port": None,
-                "remote_id":        None, "eap_id": None,
-                "remote_ip":        None, "remote_port": None,
+                "remote_id":        None, "remote_ip": None, "remote_port": None,
                 "vip":              None,
                 "algo":             None, "algo_fingerprint": None,
                 "established_secs": None,
@@ -468,15 +399,10 @@ def _parse_sas_text(raw: str) -> list:
         m = _SA_REMOTE_RE.search(line)
         if m:
             cur["remote_id"]   = m.group("id")
-            cur["eap_id"]      = m.group("eap_id")
             cur["remote_ip"]   = m.group("ip")
             cur["remote_port"] = int(m.group("port"))
             if m.group("vip"):
                 cur["vip"] = m.group("vip")
-            # Prefer EAP username as the displayed remote_id (matches the
-            # rw-eap.conf eap-X block and the customers.devices.device_name).
-            if cur["eap_id"]:
-                cur["remote_id"] = cur["eap_id"]
             continue
         # Algorithm line — bare token list, not preceded by 'in'/'out'/'local'/'remote'
         if not in_child:
@@ -505,68 +431,6 @@ def _parse_sas_text(raw: str) -> list:
                 cur["bytes_out"] = int(m.group("bytes"))
                 cur["pkts_out"]  = int(m.group("pkts"))
     return sas
-
-
-def swanctl_parse_sas() -> list:
-    """Fetch swanctl --list-sas and parse it. Thin wrapper around _parse_sas_text."""
-    try:
-        return _parse_sas_text(swanctl_list_sas())
-    except Exception:
-        return []
-
-
-# swanctl --list-pools --leases parser — extract live pool state.
-# Format (strongSwan 6.x):
-#   rw-pool              10.99.0.1                           1 / 1 / 254
-#     10.99.0.1                      offline  'safwaan-laptop'
-#     10.99.0.2                      online   'saalieg-laptop'
-# The header line is the pool summary (name, base addr, used/total/size).
-# Indented (2+ spaces) lines are individual leases: VIP, status, identity.
-_POOL_LEASE_RE = re.compile(
-    r"^\s+(?P<vip>\d+\.\d+\.\d+\.\d+)\s+"
-    r"(?P<status>online|offline)\s+"
-    r"'(?P<identity>[^']*)'\s*$"
-)
-
-
-def _parse_pool_leases_text(raw: str) -> list:
-    """Pure parser for swanctl --list-pools --leases output. Returns list of
-    dicts: {pool, vip, status, identity, online}. Testable without SSH/charon.
-    """
-    leases = []
-    current_pool = None
-    for line in raw.splitlines():
-        if not line.strip():
-            continue
-        if not line.startswith(" "):
-            # Header line: pool_name base_ip used/total/size
-            parts = line.split()
-            if parts:
-                current_pool = parts[0]
-            continue
-        m = _POOL_LEASE_RE.match(line)
-        if m:
-            leases.append({
-                "pool":     current_pool,
-                "vip":      m.group("vip"),
-                "status":   m.group("status"),
-                "identity": m.group("identity"),
-                "online":   m.group("status") == "online",
-            })
-    return leases
-
-
-def swanctl_list_pool_leases() -> list:
-    """Fetch live pool leases from charon. Returns [] on error (no leases)."""
-    try:
-        out = ssh_903([
-            "docker", "exec", "strongswan",
-            "swanctl", "--uri=tcp://127.0.0.1:4502",
-            "--list-pools", "--leases",
-        ])
-        return _parse_pool_leases_text(out)
-    except Exception:
-        return []
 
 
 def swanctl_list_pools() -> list:
@@ -628,8 +492,8 @@ class WhitelistAddRequest(BaseModel):
 DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")
 SLUG_RE        = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$")  # customers.name + users.name
 EMAIL_RE       = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")          # RFC 5322 lite
-RW_EAP_CONF    = os.environ.get("RW_EAP_CONF",        "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
-BACKUP_DIR     = os.environ.get("RW_EAP_BACKUP_DIR",   "/home/zunaid/strongswan/swanctl/conf.d/.backups")
+RW_EAP_CONF    = "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"
+BACKUP_DIR     = "/home/zunaid/strongswan/swanctl/conf.d/.backups"
 ALLOWED_DEVICE_TYPES = {"iOS", "Android", "Windows", "macOS", "Linux", "Other"}
 
 
@@ -644,7 +508,7 @@ def ntlm_hash_bytes(pw: str) -> bytes:
 
 
 def read_rw_eap_conf() -> str:
-    """Read rw-eap.conf from VPN_HOST (LXC 903 lab or VPS, via env vars). Returns empty string on failure."""
+    """Read rw-eap.conf from LXC 903. Returns empty string on failure."""
     try:
         return ssh_903(["cat", RW_EAP_CONF])
     except HTTPException:
@@ -727,61 +591,6 @@ def slugify(s: str) -> str:
     return s[:32] or "client"
 
 
-# Speed-plan lookup table (v1.5.0). Per-customer, NOT tier-driven.
-# Tiers (tier_5gb/tier_10gb/tier_20gb) only set DATA QUOTA, not bandwidth.
-# Operator picks the speed plan at customer creation; explicit bandwidth_*
-# overrides win.
-SPEED_PLANS = {
-    "standard":         {"bandwidth_down_mbps": 20, "bandwidth_up_mbps": 20},
-    "asymmetric_40_20": {"bandwidth_down_mbps": 40, "bandwidth_up_mbps": 20},
-}
-
-
-def resolve_bandwidth(
-    speed_plan: Optional[str],
-    explicit_down: Optional[int],
-    explicit_up: Optional[int],
-) -> tuple[int, int]:
-    """Return (down_mbps, up_mbps) for a new customer.
-
-    Precedence (high to low):
-      1. Explicit bandwidth_down_mbps / bandwidth_up_mbps from the request body
-         (advanced override). Both must be provided if either is — partial is an error.
-      2. speed_plan lookup ('standard' or 'asymmetric_40_20').
-      3. Default = 'standard' (20/20).
-    """
-    # If either explicit value is set, both must be — partial is ambiguous.
-    if (explicit_down is None) != (explicit_up is None):
-        raise HTTPException(
-            400,
-            "bandwidth_down_mbps and bandwidth_up_mbps must be provided together "
-            "(both or neither). To use a preset, set speed_plan instead."
-        )
-
-    if explicit_down is not None and explicit_up is not None:
-        return int(explicit_down), int(explicit_up)
-
-    if speed_plan is not None:
-        if speed_plan not in SPEED_PLANS:
-            raise HTTPException(
-                400,
-                f"speed_plan must be one of {sorted(SPEED_PLANS.keys())}, got '{speed_plan}'"
-            )
-        plan = SPEED_PLANS[speed_plan]
-        return plan["bandwidth_down_mbps"], plan["bandwidth_up_mbps"]
-
-    # Default: standard (20/20 symmetric). Matches existing schema default.
-    return SPEED_PLANS["standard"]["bandwidth_down_mbps"], SPEED_PLANS["standard"]["bandwidth_up_mbps"]
-
-
-def validate_bandwidth(down_mbps: int, up_mbps: int) -> None:
-    """Bounds-check the resolved bandwidth. 1..1000 mbps per the existing schema."""
-    if not 1 <= down_mbps <= 1000:
-        raise HTTPException(400, f"bandwidth_down_mbps must be 1..1000, got {down_mbps}")
-    if not 1 <= up_mbps <= 1000:
-        raise HTTPException(400, f"bandwidth_up_mbps must be 1..1000, got {up_mbps}")
-
-
 # ---------- v1.2.7 Pydantic models ----------
 class ClientCreate(BaseModel):
     # Customer
@@ -796,21 +605,6 @@ class ClientCreate(BaseModel):
     tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_5gb', 'tier_10gb', 'tier_20gb') OR 'custom'")
     custom_cap_mb:    Optional[int] = Field(None, ge=1, le=1024*1024,
                                            description="Cap in MiB. Required iff tier_name=='custom'")
-    # v1.5.0 — Speed plan (per-customer, NOT tier-driven). Two preset options:
-    #   'standard'           → 20/20 mbps symmetric (default; matches existing default)
-    #   'asymmetric_40_20'   → 40 mbps down / 20 mbps up
-    # Precedence: explicit bandwidth_down_mbps / bandwidth_up_mbps (below) wins.
-    # If both omitted → defaults to 'standard'.
-    speed_plan:       Optional[Literal["standard", "asymmetric_40_20"]] = Field(
-        None,
-        description="Per-customer bandwidth preset. 'standard' (20/20) or 'asymmetric_40_20' (40/20). "
-                    "If both speed_plan and explicit bandwidth_* are provided, explicit wins."
-    )
-    # Per-customer bandwidth (advanced override). Wins over speed_plan when set.
-    bandwidth_down_mbps: Optional[int] = Field(None, ge=1, le=1000,
-                                               description="Override download mbps (1..1000). Wins over speed_plan.")
-    bandwidth_up_mbps:   Optional[int] = Field(None, ge=1, le=1000,
-                                               description="Override upload mbps (1..1000). Wins over speed_plan.")
     # Device (1 creds = 1 device, per v1.2.6 model)
     device_name:      str           = Field(..., min_length=1, max_length=32)
     device_type:      str           = Field(..., description="iOS/Android/Windows/macOS/Linux/Other")
@@ -844,127 +638,32 @@ def health():
     }
 
 
-@app.get("/api/admin/audit")
-def admin_audit(
-    request: Request,
-    since: Optional[int] = None,         # unix epoch; default = last 24h
-    limit: int = 100,                    # max rows to return
-    action: Optional[str] = None,        # substring match on action column
-    actor: Optional[str] = None,         # exact match on actor column
-):
-    """CP7 — operator audit trail. Returns recent audit_log rows.
-
-    Auth: requires a valid operator session cookie. Returns 401 otherwise.
-    Query params:
-      - since: unix epoch; default = now - 24h
-      - limit: cap rows (default 100, max 1000)
-      - action: filter to actions containing this substring (e.g. "login", "delete")
-      - actor: filter to exact actor match (e.g. "admin", "portal", "system")
-    """
-    # Inline auth check (mirrors require_session dep). Doing it manually here so
-    # the endpoint can be defined anywhere in the file without depending on the
-    # order of FastAPI dep registration.
-    import portal_auth as _pa
-    sess_cookie = request.cookies.get(_pa.OPERATOR_COOKIE)
-    if not sess_cookie:
-        raise HTTPException(401, "Not authenticated")
-    sess = _pa.verify_operator_session(sess_cookie)
-    if not sess:
-        raise HTTPException(401, "Session expired")
-    if limit < 1: limit = 1
-    if limit > 1000: limit = 1000
-    if since is None: since = int(time.time()) - 86400
-
-    where = [f"created_at >= {int(since)}"]
-    if action:
-        # SQL injection guard: action is a filter keyword, not user-supplied SQL
-        safe_action = action.replace("'", "''")
-        where.append(f"action LIKE '%{safe_action}%'")
-    if actor:
-        safe_actor = actor.replace("'", "''")
-        where.append(f"actor = '{safe_actor}'")
-
-    rows = db_query(
-        f"SELECT id, actor, action, target_type, target_id, payload, created_at "
-        f"FROM audit_log WHERE {' AND '.join(where)} "
-        f"ORDER BY created_at DESC LIMIT {int(limit)};"
-    )
-    # Parse payload JSON, fall back to raw string
-    out = []
-    for r in rows:
-        try:
-            payload = _json.loads(r["payload"]) if r["payload"] else None
-        except (ValueError, TypeError):
-            payload = r["payload"]
-        out.append({
-            "id": r["id"],
-            "actor": r["actor"],
-            "action": r["action"],
-            "target_type": r["target_type"],
-            "target_id": r["target_id"],
-            "payload": payload,
-            "ts": datetime.utcfromtimestamp(r["created_at"]).isoformat() + "Z",
-        })
-    return {"rows": out, "count": len(out), "since": int(since), "limit": int(limit)}
-
-
 @app.post("/api/login")
 def login(req: LoginRequest, request: Request, response: Response):
-    # Unix socket requests have no client info (request.client is None).
-    # Behind nginx, prefer X-Forwarded-For from trusted proxy.
-    ip = (
-        (request.headers.get("x-forwarded-for", "").split(",")[0].strip() if request.headers.get("x-forwarded-for") else None)
-        or (request.client.host if request.client else None)
-        or "127.0.0.1"
-    )
+    ip = request.client.host
     rate_limit(ip)
     if not ADMIN_PASS_HASH:
         log.error("ADMIN_PASS_HASH not set — refusing login")
         raise HTTPException(503, "Server not configured")
-    # Constant-time username compare — avoid username enumeration
     if not hmac.compare_digest(req.username.encode(), ADMIN_USER.encode()):
-        # Spend comparable time on the wrong-username path so attackers can't
-        # tell apart "user doesn't exist" from "wrong password" via timing.
-        # Argon2id verify on a dummy hash burns ~70ms.
-        portal_auth.verify_operator_password(
-            "$argon2id$v=19$m=19456,t=2,p=1$YWFhYWFhYWFhYWFhYWFhYQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG",
-            req.password or "x",
-        )
-        log.info("login FAIL (no user) ip=%s identity=%s", ip, req.username)
+        # Constant-time compare to avoid username enumeration (length-bake aside)
         raise HTTPException(401, "Invalid credentials")
-    pw_match = portal_auth.verify_operator_password(ADMIN_PASS_HASH, req.password)
+    pw_bytes = req.password.encode()
+    pw_match = bcrypt.checkpw(pw_bytes, ADMIN_PASS_HASH.encode())
+    log.info("login debug user=%s pw_repr=%s pw_len=%d hash_repr=%s pw_match=%s",
+             req.username, repr(pw_bytes[:30]), len(pw_bytes),
+             repr(ADMIN_PASS_HASH[:30]), pw_match)
     if not pw_match:
-        log.info("login FAIL (bad password) ip=%s identity=%s", ip, req.username)
         raise HTTPException(401, "Invalid credentials")
-    ua = request.headers.get("user-agent", "")
-    session_id = portal_auth.create_operator_session(req.username, ua, ip)
-    secure_cookie = os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
-    response.set_cookie(
-        key="session",
-        value=session_id,
-        httponly=True,
-        samesite="lax",
-        secure=secure_cookie,  # only True when behind HTTPS
-        max_age=portal_auth.OPERATOR_TTL,
-        path="/",
-    )
-    log.info("login ok user=%s ip=%s session_id_prefix=%s",
-             req.username, ip, session_id[:8])
-    # CP7 — audit_log entry for every login
-    try:
-        payload = _json.dumps({"ip": ip, "ua": ua, "session_id_prefix": session_id[:8]})
-        db_exec(f"""INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
-                    VALUES ('admin', 'operator_login', 'user', 0, '{payload.replace("'", "''")}', strftime('%s','now'));""")
-    except Exception as e:
-        log.warning("audit_log write failed for login: %s", e)
+    token = sign_session({"u": req.username, "iat": time.time()})
+    response.set_cookie(key="session", value=token, httponly=True, samesite="lax",
+                        max_age=SESSION_TTL, path="/")
+    log.info("login ok user=%s ip=%s", req.username, ip)
     return {"ok": True, "user": req.username}
 
 
 @app.post("/api/logout")
-def logout(request: Request, response: Response):
-    session_id = request.cookies.get("session")
-    if session_id:
-        portal_auth.delete_operator_session(session_id)
+def logout(response: Response):
     response.delete_cookie("session", path="/")
     return {"ok": True}
 
@@ -1009,7 +708,6 @@ def list_customers(
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
                c.over_quota, c.billing_id, c.email, c.max_devices,
-               c.bandwidth_down_mbps, c.bandwidth_up_mbps,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -1037,8 +735,6 @@ def list_customers(
             "billing_id": r.get("billing_id"),
             "email": r.get("email"),
             "max_devices": r.get("max_devices"),
-            "bandwidth_down_mbps": r.get("bandwidth_down_mbps") or 20,
-            "bandwidth_up_mbps": r.get("bandwidth_up_mbps") or 20,
             "used_bytes": used,
             "quota_bytes": quota,
             "pct": round(used / quota * 100, 1) if quota else 0,
@@ -1141,14 +837,6 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     if not SLUG_RE.match(eap_identity):
         raise HTTPException(400, f"derived EAP identity '{eap_identity}' is too long (max 32)")
 
-    # 1b. v1.5.0 — Resolve bandwidth (speed_plan + explicit override).
-    # Per-customer, NOT tier-driven (Bug-fix from roadmap: tier drives data
-    # quota, NOT bandwidth). Defaults to 'standard' (20/20) if both omitted.
-    bandwidth_down_mbps, bandwidth_up_mbps = resolve_bandwidth(
-        req.speed_plan, req.bandwidth_down_mbps, req.bandwidth_up_mbps
-    )
-    validate_bandwidth(bandwidth_down_mbps, bandwidth_up_mbps)
-
     # 2. Resolve tier
     if req.tier_name == "custom":
         ts = int(time.time())
@@ -1191,11 +879,9 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         db_exec(
             f"INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
             f"over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
-            f"bandwidth_down_mbps, bandwidth_up_mbps, "
             f"created_at, updated_at, notes, billing_id, email) VALUES "
             f"({_q(cust_name)}, {_q(req.display_name)}, {_q(req.telegram_username)}, 0, 1, "
             f"0, {int(data_limit)}, 0, {int(tier_id)}, 'active', 1, "
-            f"{int(bandwidth_down_mbps)}, {int(bandwidth_up_mbps)}, "
             f"{now}, {now}, {_q(req.notes)}, {_q(req.billing_id)}, {_q(req.email)});"
         )
         cust_id = db_query(f"SELECT id FROM customers WHERE name = {_q(cust_name)};")[0]["id"]
@@ -1210,12 +896,6 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             f"os_version, notes, is_active, created_at, updated_at) VALUES "
             f"({int(cust_id)}, {int(user_id)}, {_q(req.device_name)}, {_q(req.device_type)}, "
             f"{_q(req.os_version)}, {_q(req.notes)}, 1, {now}, {now});"
-        )
-
-        # v1.4.0 — Bug #2: populate customers.user_id with the user's PK.
-        # Operator customers (is_operator=1) have no user and skip this path.
-        db_exec(
-            f"UPDATE customers SET user_id = {int(user_id)} WHERE id = {int(cust_id)};"
         )
         dev_id = db_query(f"SELECT id FROM devices WHERE device_name = {_q(req.device_name)} "
                           f"AND customer_id = {int(cust_id)};")[0]["id"]
@@ -1303,7 +983,6 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
                c.is_operator, c.is_active, c.status, c.data_used_bytes,
                c.data_limit_bytes, c.over_quota, c.notes, c.created_at, c.updated_at,
                c.billing_id, c.email,
-               c.bandwidth_down_mbps, c.bandwidth_up_mbps, c.max_devices,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -1398,18 +1077,6 @@ def list_tiers(_: dict = Depends(require_session)):
     } for r in rows]
 
 
-# v1.7.0 — Expose SPEED_PLANS so the frontend (Create + Edit modals) can render
-# the dropdown options without duplicating the list. Single source of truth.
-@app.get("/api/speed_plans")
-def list_speed_plans(_: dict = Depends(require_session)):
-    """Per-customer speed-plan presets. Tiers drive DATA QUOTA, not bandwidth."""
-    return [
-        {"name": name, "bandwidth_down_mbps": plan["bandwidth_down_mbps"],
-         "bandwidth_up_mbps": plan["bandwidth_up_mbps"]}
-        for name, plan in sorted(SPEED_PLANS.items())
-    ]
-
-
 @app.get("/api/quota/{customer_id}")
 def get_quota(customer_id: int, _: dict = Depends(require_session)):
     rows = db_query(f"""
@@ -1463,50 +1130,44 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     steps.append({"step": "db_reset", "ok": True, "reset_from_bytes": db_reset_from})
 
     # 2. Restore EAP secrets if KILLED
-    # v1.6.7 — Bug fix: must query the EAP IDENTITY (users.name), not device_name.
-    # rw-eap.conf blocks use `id = zade-cellphone` (EAP identity format =
-    # `{customer.name}-{device.device_name}`), not `cellphone`. The old code
-    # checked `"zade-cellphone" in ["cellphone"]` which always failed, so
-    # KILLED detection missed every customer after a hard cut. Caught by Zun
-    # 2026-06-25: "I reset zade data usage after he reach the hard cut but
-    # he was still unable to connect back to the vpn after the data reset".
     devs = db_query(
-        f"SELECT u.name AS eap_identity "
-        f"FROM devices d JOIN users u ON u.id = d.strongswan_user_id "
-        f"WHERE d.customer_id = {int(customer_id)};"
+        f"SELECT d.device_name FROM devices d WHERE d.customer_id = {int(customer_id)};"
     )
     secret_restored = False
     secret_devices = []
     backup_path = ""
 
     if devs:
-        dev_names = [d.get("eap_identity") for d in devs if d.get("eap_identity")]
+        dev_names = [d.get("device_name") for d in devs if d.get("device_name")]
 
         # 2a. Read the current conf file (ssh_903 with no bash -c)
         try:
-            conf = ssh_903(["cat", RW_EAP_CONF])
+            conf = ssh_903(["cat", "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
         except HTTPException as e:
             conf = ""
             steps.append({"step": "read_conf", "ok": False, "error": str(e.detail)})
 
         # 2b. Find latest backup via `ls -1` + local sort (avoids bash -c)
         try:
-            ls_out = ssh_903(["ls", "-1", BACKUP_DIR + "/"])
+            ls_out = ssh_903(["ls", "-1", "/home/zunaid/strongswan/swanctl/conf.d/.backups/"])
             files = [f.strip() for f in ls_out.splitlines()
                      if f.strip().startswith("rw-eap.conf.bak-quotamon-")]
             if files:
                 # Filenames include unix epoch — newest is the largest number
                 files.sort()
-                backup_path = BACKUP_DIR + "/" + files[-1]
+                backup_path = "/home/zunaid/strongswan/swanctl/conf.d/.backups/" + files[-1]
         except HTTPException as e:
             steps.append({"step": "find_backup", "ok": False, "error": str(e.detail)})
 
         # 2c. Detect KILLED secrets for any of this customer's devices.
         # Parse the conf locally: find blocks "id = X\nsecret = Y" and check Y for KILLED.
-        # State machine: track current block's id; on each secret line, check if it's
-        # KILLED AND belongs to one of our customer's devices.
         killed_devs = []
         if conf:
+            for line in conf.splitlines():
+                m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
+                if m_id and m_id.group(1) in dev_names:
+                    dev_in_block = m_id.group(1)
+            # Use a simple state-machine parser
             current_id = None
             for line in conf.splitlines():
                 m_id = re.match(r"^\s*id\s*=\s*(\S+)\s*$", line)
@@ -1524,7 +1185,7 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
         # 2d. If any KILLED, restore backup + reload charon
         if secret_devices and backup_path:
             try:
-                ssh_903(["cp", backup_path, RW_EAP_CONF])
+                ssh_903(["cp", backup_path, "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf"])
                 ssh_903([
                     "docker", "exec", "strongswan",
                     "swanctl", "--uri=tcp://127.0.0.1:4502", "--load-creds"
@@ -1762,10 +1423,7 @@ def deadman(_: dict = Depends(require_session)):
                              "SELECT COUNT(*) FROM IPAddresses WHERE State > 0;"]).strip()
         active_bans = int(count_out) if count_out.isdigit() else 0
     except HTTPException:
-        # SSH failed — could be ipBan not installed (e.g. VPS uses OS firewall + fail2ban
-        # instead of ipban). Return 0 instead of -1 so the dashboard shows a clean count,
-        # not a misleading negative. The `service` field will carry the actual error.
-        active_bans = 0
+        active_bans = -1
     return {"service": svc, "active_bans": active_bans, "log_tail": log_tail}
 
 
@@ -1779,16 +1437,6 @@ class CustomerUpdate(BaseModel):
     tier_name: Optional[str] = None  # change tier
     custom_cap_mb: Optional[int] = None  # if tier_name='custom'
     max_devices: Optional[int] = None  # 1..10
-    # v1.7.0 — speed_plan in PATCH. Per-customer bandwidth preset.
-    # 'standard'         → 20/20 mbps symmetric
-    # 'asymmetric_40_20' → 40 down / 20 up
-    # 'custom'           → keep raw bandwidth_* fields as the source of truth
-    # Precedence (consistent with ClientCreate): explicit bandwidth_* > speed_plan.
-    # If only speed_plan provided, it resolves to bandwidth_* via resolve_bandwidth().
-    # If neither provided, bandwidth_* columns are NOT touched.
-    speed_plan:        Optional[Literal["standard", "asymmetric_40_20", "custom"]] = None
-    bandwidth_down_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
-    bandwidth_up_mbps:   Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
 
 
 class BulkAction(BaseModel):
@@ -1864,38 +1512,6 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         if not 1 <= req.max_devices <= 10:
             raise HTTPException(400, "max_devices must be 1..10")
         sets.append(f"max_devices = {int(req.max_devices)}")
-    # v1.7.0 — Bandwidth precedence (consistent with ClientCreate):
-    #   1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
-    #   2. speed_plan preset ('standard' / 'asymmetric_40_20')
-    #   3. 'custom' speed_plan → keep current bandwidth_* untouched
-    #   4. No speed_plan AND no explicit → don't touch bandwidth_* columns
-    speed_plan_effective = req.speed_plan
-    bw_explicit_provided = (req.bandwidth_down_mbps is not None) or (req.bandwidth_up_mbps is not None)
-    if bw_explicit_provided:
-        if (req.bandwidth_down_mbps is None) != (req.bandwidth_up_mbps is None):
-            raise HTTPException(
-                400,
-                "bandwidth_down_mbps and bandwidth_up_mbps must be provided together "
-                "(both or neither). To use a preset, set speed_plan instead.",
-            )
-        # explicit wins over speed_plan; ignore speed_plan
-        speed_plan_effective = None
-        bandwidth_down_mbps = int(req.bandwidth_down_mbps)
-        bandwidth_up_mbps = int(req.bandwidth_up_mbps)
-        validate_bandwidth(bandwidth_down_mbps, bandwidth_up_mbps)
-    elif speed_plan_effective is not None and speed_plan_effective != "custom":
-        # speed_plan preset resolves to bandwidth
-        bandwidth_down_mbps, bandwidth_up_mbps = resolve_bandwidth(
-            speed_plan_effective, None, None
-        )
-    else:
-        # speed_plan is None or 'custom' and no explicit → don't touch bandwidth_*
-        bandwidth_down_mbps = None
-        bandwidth_up_mbps = None
-    if bandwidth_down_mbps is not None:
-        sets.append(f"bandwidth_down_mbps = {bandwidth_down_mbps}")
-    if bandwidth_up_mbps is not None:
-        sets.append(f"bandwidth_up_mbps = {bandwidth_up_mbps}")
 
     # Tier change
     if req.tier_name is not None:
@@ -1919,12 +1535,6 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         sets.append(f"data_limit_bytes = {int(data_limit)}")
 
     if not sets:
-        # v1.7.0 — speed_plan='custom' sent standalone is a meaningful no-op
-        # (operator chose "keep current raw bandwidth values"). Accept as 200
-        # instead of 400 to avoid breaking the Edit modal's "Save with no
-        # bandwidth change" path.
-        if req.speed_plan == "custom" and not bw_explicit_provided:
-            return {"ok": True, "customer_id": int(customer_id), "no_op": True}
         raise HTTPException(400, "no fields to update")
 
     sets.append(f"updated_at = {int(time.time())}")
@@ -1935,142 +1545,6 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         "fields": list(req.model_dump(exclude_none=True).keys()),
     })
     return {"ok": True, "customer_id": int(customer_id)}
-
-
-# ---------- v1.3.2 — Rotate EAP credentials (Bug #4 fix) ----------
-
-def _replace_eap_secret(identity: str, new_password: str) -> None:
-    """Replace the `secret = "..."` line inside the eap-{identity} block.
-    Preserves block id (EAP identity is immutable by design — see Lesson #193,
-    Bug #4 history). Idempotent only if new_password matches current; otherwise
-    raises 404 if block not found.
-
-    The EAP identity in rw-eap.conf is the source of truth for charon. We
-    MUST keep it stable across rotations or the customer's Windows laptop
-    will silently fail auth (Lesson #193 lineage).
-    """
-    conf = read_rw_eap_conf()
-    block_id = f"eap-{identity}"
-    # Match the block: eap-X { ... secret = "..." ... }
-    block_pat = re.compile(
-        rf"(^\s*{re.escape(block_id)}\s*\{{[^}}]*?secret\s*=\s*)\"[^\"]*\"",
-        re.MULTILINE | re.DOTALL,
-    )
-    if not block_pat.search(conf):
-        raise HTTPException(404, f"EAP block '{block_id}' not found in rw-eap.conf")
-    new_conf = block_pat.sub(rf'\1"{new_password}"', conf, count=1)
-    write_rw_eap_conf(new_conf)
-
-
-@app.post("/api/customers/{customer_id}/rotate_eap")
-def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session)):
-    """v1.3.2 — rotate the EAP password for a customer's active device.
-
-    Generates a new random password, computes new NTLM hash, updates
-    users.password in DB, replaces the secret inside the existing
-    eap-{identity} block in rw-eap.conf (the EAP identity itself is
-    preserved — only the password changes), then reloads charon creds.
-
-    Behavior:
-      - Identity is NEVER changed (Lesson #193 lineage, Bug #4 history).
-      - Customer's Windows laptop will silently fail auth until they
-        re-onboard with the new credentials via the installer token flow.
-      - The customer's `eap_rotated_at` is set to now so the UI can
-        surface a "credentials rotated" banner.
-      - Operator does NOT receive the new password in the response —
-        it travels to the customer only via the installer token flow
-        (defense in depth: operator screen, logs, screenshots all
-        excluded from credential exposure).
-
-    Refuses on:
-      - Missing customer (404)
-      - Operator account (403) — operator has no EAP creds to rotate
-      - Archived customer (409)
-      - Customer with no devices (409)
-    """
-    cust_rows = db_query(
-        f"SELECT id, name, is_operator, status, user_id FROM customers WHERE id = {int(customer_id)};"
-    )
-    if not cust_rows:
-        raise HTTPException(404, "Customer not found")
-    cust = cust_rows[0]
-    if cust["is_operator"]:
-        raise HTTPException(403, "cannot rotate EAP for the operator account")
-    if cust["status"] == "archived":
-        raise HTTPException(409, "cannot rotate EAP for an archived customer (unarchive first)")
-
-    # Find the customer's active device (still needed for the is_active check;
-    # we keep the devices join as a sanity check that devices and the FK agree).
-    devices = db_query(
-        f"SELECT id, strongswan_user_id, device_name, is_active FROM devices "
-        f"WHERE customer_id = {int(customer_id)} ORDER BY id LIMIT 1;"
-    )
-    if not devices:
-        raise HTTPException(409, "customer has no devices; nothing to rotate")
-    dev = devices[0]
-
-    # v1.4.0 — Bug #2: use customers.user_id FK directly when populated.
-    # Falls back to devices.strongswan_user_id for pre-migration customers
-    # where user_id is still NULL (operator-only, archived, etc.).
-    eap_user_id = cust.get("user_id") or dev["strongswan_user_id"]
-
-    # Look up EAP identity from users table
-    user_rows = db_query(
-        f"SELECT id, name FROM users WHERE id = {int(eap_user_id)};"
-    )
-    if not user_rows:
-        raise HTTPException(500, f"customer points to missing users row id={eap_user_id}")
-    eap_identity = user_rows[0]["name"]
-
-    # Generate new password
-    new_password = secrets.token_urlsafe(16)
-    ntlm = ntlm_hash_bytes(new_password)
-    now = int(time.time())
-
-    # 1. Update users.password (BLOB column holds NTLM hash as X'...')
-    db_exec(
-        f"UPDATE users SET password = X'{ntlm.hex().upper()}' WHERE id = {int(user_rows[0]['id'])};"
-    )
-
-    # 2. Replace the secret in rw-eap.conf (preserve EAP identity)
-    _replace_eap_secret(eap_identity, new_password)
-
-    # 3. Mark customer as rotated (timestamp column added in v1.3.2 migration)
-    db_exec(
-        f"UPDATE customers SET eap_rotated_at = {now} WHERE id = {int(customer_id)};"
-    )
-
-    # 4. Reload charon creds so the new secret is active
-    reload_charon_creds()
-
-    # 5. Audit (the new_password is NOT in the audit payload — no plaintext in logs)
-    _audit(user.get("name") or "operator", "customer_eap_rotate", {
-        "_target_type": "customer",
-        "_target_id":   int(customer_id),
-        "customer_name": cust["name"],
-        "eap_identity":  eap_identity,
-        "device_id":     dev["id"],
-        "device_name":   dev["device_name"],
-        "rotated_at":    now,
-    })
-
-    log.info(
-        "EAP rotated customer=%s identity=%s device=%s by=%s",
-        cust["name"], eap_identity, dev["device_name"],
-        user.get("name") or "operator",
-    )
-
-    return {
-        "ok": True,
-        "customer_id":  int(customer_id),
-        "customer_name": cust["name"],
-        "eap_identity": eap_identity,
-        "eap_rotated_at": now,
-        "device_id":    dev["id"],
-        "device_name":  dev["device_name"],
-        # Operator gets confirmation; new password travels ONLY via installer token flow.
-        "next_step":    "customer must re-onboard via the installer token to receive new credentials",
-    }
 
 
 @app.post("/api/customers/{customer_id}/archive")
@@ -2279,34 +1753,6 @@ class PortalLoginRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=256)
 
 
-@app.post("/api/csp-report")
-async def csp_report(request: Request):
-    """CP7/LOW2 — CSP violation report endpoint.
-
-    Browsers POST a JSON report to this URL when CSP blocks a resource.
-    Body format: {"csp-report": {"violated-directive": "...", "blocked-uri": "...", ...}}.
-
-    We log at WARN level so they show up in fail2ban-style alerts later.
-    No auth (reports are from browsers of unauthenticated visitors).
-
-    Returns 204 No Content to prevent client retries.
-    """
-    try:
-        body = await request.json()
-    except Exception:
-        return Response(status_code=204)
-    report = body.get("csp-report", body) if isinstance(body, dict) else {}
-    violated = report.get("violated-directive", "?")
-    blocked = report.get("blocked-uri", "?")
-    doc_uri = report.get("document-uri", "?")
-    log.warning(
-        "CSP report: violated=%s blocked=%s doc=%s ua=%s",
-        violated, blocked, doc_uri,
-        request.headers.get("user-agent", "?")[:120],
-    )
-    return Response(status_code=204)
-
-
 @app.post("/api/portal/login")
 def portal_login(req: PortalLoginRequest, request: Request, response: Response):
     """Customer logs in with their VPN credentials (EAP identity + password).
@@ -2345,15 +1791,12 @@ def portal_login(req: PortalLoginRequest, request: Request, response: Response):
         user_agent=ua,
         ip_address=ip,
     )
-    # Cookie scoped to /api/portal/ — browser does NOT send this to /api/*
-    # Secure flag controlled by COOKIE_SECURE env (set to true behind HTTPS).
-    secure_cookie = os.environ.get("COOKIE_SECURE", "false").lower() in ("1", "true", "yes")
+    # Cookie scoped to /portal/ — browser does NOT send this to /api/*
     response.set_cookie(
         key=portal_auth.PORTAL_COOKIE,
         value=session_id,
         httponly=True,
         samesite="strict",
-        secure=secure_cookie,
         max_age=portal_auth.PORTAL_TTL,
         path="/api/portal/",
     )
@@ -2432,21 +1875,6 @@ def portal_me(session: dict = Depends(portal_auth.require_portal_session)):
         "logged_in_as": session["identity"],
         "session_created_at": session["created_at"],
     }
-
-
-# ---------- installer_tokens (v1.5.0) ----------
-# One-time installer tokens for production customer onboarding.
-# See installer_tokens.py for full design notes.
-# Registered AFTER db_query/db_exec/_q are defined, but BEFORE entrypoint.
-import installer_tokens  # noqa: E402
-installer_tokens.register(
-    app,
-    db_query=db_query,
-    db_exec=db_exec,
-    q=_q,
-    audit_fn=_audit,
-    require_session_dep=require_session,
-)
 
 
 # ---------- Entrypoint ----------

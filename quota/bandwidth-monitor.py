@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-bandwidth-monitor.py — Phase 5D bandwidth limiting
+bandwidth-monitor.py — Phase 5D bandwidth limiting + Phase 5 nft edition (2026-06-26)
+
+PATCHED 2026-06-26: Writes nft mangle MARK rules instead of iptables-legacy.
+tc (traffic control) classes + filters are unchanged. All DB/SA logic
+preserved. nft helpers are imported from bandwidth-monitor-nft.py.
 
 Reads active IKE_SAs from strongSwan, looks up per-customer bandwidth
-settings from SQLite, dynamically creates tc classes + iptables marks
+settings from SQLite, dynamically creates tc classes + nft marks
 to enforce per-user rate limits.
 
 Design:
@@ -41,6 +45,23 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# === nft helper imports (Phase 5, 2026-06-26) ===
+# bandwidth-monitor-nft.py provides the nft MARK-rule add/remove/lookup helpers.
+# We import them under nft_-prefixed aliases so the existing helpers below
+# (run, etc.) are not shadowed.
+#
+# NOTE: Python imports convert hyphens to underscores in module names. Since
+# the file is bandwidth-monitor-nft.py on disk, we load it via importlib
+# rather than the standard import statement.
+import importlib.util as _importlib_util
+_nft_helper_path = Path(__file__).parent / "bandwidth-monitor-nft.py"
+_spec = _importlib_util.spec_from_file_location("_bm_nft_helpers", _nft_helper_path)
+_nft_helpers = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(_nft_helpers)
+nft_add_mark_rule = _nft_helpers.add_mark_rule
+nft_remove_mark_rule = _nft_helpers.remove_mark_rule
+nft_mark_rule_present = _nft_helpers.mark_rule_present
 
 # === Config (paths) ===
 DB_PATH = Path("/var/lib/strongswan/ipsec.db")
@@ -215,7 +236,7 @@ def vip_to_classid(vip: str) -> str:
 
 
 def user_bandwidth_rules_present(vip: str) -> bool:
-    """Check if iptables MARK + tc class already exist for this VIP.
+    """Check if nft MARK + tc class already exist for this VIP.
 
     Returns True only if ALL of these exist:
     - At least one mangle MARK rule with our comment
@@ -226,24 +247,21 @@ def user_bandwidth_rules_present(vip: str) -> bool:
 
     Returning True means the shaping is fully applied. Returning False means
     apply_bandwidth() needs to (re-)create whatever is missing.
+
+    nft edition (2026-06-26): searches nft mangle chain via nft -a list.
     """
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # Check iptables mangle
-    found_mangle = False
-    for chain in ("PREROUTING", "POSTROUTING", "FORWARD"):
-        out = run(["iptables-legacy", "-t", "mangle", "-L", chain, "-n", "-v"])
-        for line in out.stdout.splitlines():
-            if f"bw:{vip}" in line and mark in line:
-                found_mangle = True
-                break
-        if found_mangle:
-            break
-    if not found_mangle:
-        return False
-
-    return True
+    # Check nft mangle (4 placements: PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
+    for chain in ("prerouting", "postrouting", "forward"):
+        out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", chain])
+        if out.returncode != 0:
+            continue
+        # nft output: `... meta mark set 0xN comment "bw:VIP" # handle H`
+        if f'comment "bw:{vip}"' in out.stdout and f"meta mark set {mark}" in out.stdout:
+            return True
+    return False
 
 
 def _class_present(iface: str, classid: str) -> bool:
@@ -264,28 +282,24 @@ def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
     Idempotent — each step is skipped if its target already exists.
     Use 'tc replace' so a class with the same parameters is updated, not errored.
     Use 'tc replace' for the egress class (idempotent under same params).
+
+    nft edition (2026-06-26): writes nft mangle MARK rules instead of iptables-legacy.
+    Uses helpers from bandwidth-monitor-nft.py (imported at module level).
     """
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # 1. iptables marks in FOUR mangle rules (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s).
-    for chain, match_flag, addr in (
-        ("PREROUTING", "-d", f"{vip}/32"),   # download: dst=VIP
-        ("FORWARD", "-d", f"{vip}/32"),       # forwarded download: dst=VIP
-        ("FORWARD", "-s", f"{vip}/32"),       # forwarded upload: src=VIP
-        ("POSTROUTING", "-s", f"{vip}/32"),   # local-sourced upload
+    # 1. nft MARK rules in FOUR mangle placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s).
+    for chain, match_flag in (
+        ("PREROUTING", "-d"),   # download: dst=VIP
+        ("FORWARD", "-d"),       # forwarded download: dst=VIP
+        ("FORWARD", "-s"),       # forwarded upload: src=VIP
+        ("POSTROUTING", "-s"),   # local-sourced upload
     ):
-        # Check if rule already present
-        out = run(["iptables-legacy", "-t", "mangle", "-C", chain,
-                   match_flag, addr, "-j", "MARK", "--set-mark", mark,
-                   "-m", "comment", "--comment", f"bw:{vip}"])
-        if out.returncode == 0:
-            continue  # already there
-        result = run(["iptables-legacy", "-t", "mangle", "-A", chain,
-                      match_flag, addr, "-j", "MARK", "--set-mark", mark,
-                      "-m", "comment", "--comment", f"bw:{vip}"])
-        if not rc_ok(result):
-            log_if_failed(["iptables", chain, vip], result)
+        if not nft_add_mark_rule(vip, chain, match_flag, mark):
+            log_if_failed(["nft", chain, vip],
+                          subprocess.CompletedProcess(args=[], returncode=1,
+                                                      stdout="", stderr="add_mark_rule failed"))
 
     # 2. tc class on egress (user's upload = rate) — 'replace' is idempotent
     result = run([
@@ -329,23 +343,13 @@ def apply_bandwidth(vip: str, down_mbps: int, up_mbps: int, iface: str):
 
 
 def remove_bandwidth(vip: str, iface: str):
-    """Remove iptables + tc rules for a user that disconnected. Idempotent."""
+    """Remove nft + tc rules for a user that disconnected. Idempotent."""
     mark = vip_to_mark(vip)
     classid = vip_to_classid(vip)
 
-    # Remove iptables rules from all 4 placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
-    for chain, match_flag in (
-        ("PREROUTING", "-d"),
-        ("FORWARD", "-d"),
-        ("FORWARD", "-s"),
-        ("POSTROUTING", "-s"),
-    ):
-        # -D is forgiving: rc != 0 if rule doesn't exist, which is fine
-        run([
-            "iptables-legacy", "-t", "mangle", "-D", chain,
-            match_flag, f"{vip}/32", "-j", "MARK", "--set-mark", mark,
-            "-m", "comment", "--comment", f"bw:{vip}",
-        ])
+    # Remove nft MARK rules from all 4 placements (PREROUTING-d, FORWARD-d, FORWARD-s, POSTROUTING-s)
+    for chain in ("PREROUTING", "FORWARD", "POSTROUTING"):
+        nft_remove_mark_rule(vip, chain)
 
     # Remove tc filter + class on egress.
     # Note: 'tc filter del' REQUIRES prio to be specified when handle is set,
@@ -479,14 +483,11 @@ def run_iteration(iface: str) -> tuple[int, int]:
         # We need to find VIPs that have rules but aren't active anymore.
         # Look in BOTH PREROUTING and POSTROUTING (apply_bandwidth writes to both).
         shaped_vips = set()
-        for chain in ("PREROUTING", "POSTROUTING"):
-            out = run(["iptables-legacy", "-t", "mangle", "-L", chain, "-n"],
+        for chain in ("prerouting", "postrouting"):
+            out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", chain],
                       check=False)
-            for line in out.stdout.splitlines():
-                if "bw:" in line:
-                    m = re.search(r"bw:(\d+\.\d+\.\d+\.\d+)", line)
-                    if m:
-                        shaped_vips.add(m.group(1))
+            for m in re.finditer(r'comment "bw:(\d+\.\d+\.\d+\.\d+)"', out.stdout):
+                shaped_vips.add(m.group(1))
 
         for vip in shaped_vips - applied_vips:
             try:
@@ -533,11 +534,16 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    iter_count = 0
     while True:
         try:
             added, removed = run_iteration(iface)
-            if added or removed:
-                log.info("Iteration: +%d -%d", added, removed)
+            iter_count += 1
+            # 2026-06-26: Always log iteration result for visibility.
+            # Previously only logged on change (added/removed != 0), which left
+            # the daemon "invisible" on idle VPS with no customers — couldn't
+            # verify it was actually iterating without --once mode.
+            log.info("Iteration #%d: +%d -%d (poll every %ds)", iter_count, added, removed, POLL_INTERVAL)
         except Exception as e:
             log.exception("Iteration failed: %s", e)
         time.sleep(POLL_INTERVAL)

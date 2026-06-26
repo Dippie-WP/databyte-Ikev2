@@ -22,7 +22,8 @@ Isolation guarantees:
   - Login rate limit: 5 attempts/IP/min (same as operator login)
   - Audit: every login (success + fail) and every portal API call logged
 
-Production build (v1.0.0+, 2026-06-24): live at https://vpn-portal.databyte.co.za/portal/ via Cloudflare proxy.
+Lab build (2026-06-21): LAN-only at http://192.168.10.98:8080/portal/.
+No HTTPS, no public exposure. Re-do for production when going client-facing.
 """
 
 import hashlib
@@ -34,99 +35,18 @@ import subprocess
 import time
 from typing import Optional
 
-from argon2 import PasswordHasher, Type
-from argon2.exceptions import VerifyMismatchError, InvalidHashError
-
-import logging
 from fastapi import Cookie, HTTPException, Request, Response
-
-log = logging.getLogger("vpn-portal.portal_auth")
 
 
 # Portal session cookie name. Different from operator "session" cookie.
 # The operator require_session dep explicitly REJECTS this cookie name.
 PORTAL_COOKIE = "portal_session"
 
-# Operator session cookie name. Distinct from portal_session for the same
-# reason (separation of concerns, defense in depth).
-OPERATOR_COOKIE = "session"
-
-# 1h sliding expiry for the customer portal.
-#
-# Threat model: customer portal session grants ability to:
-#   - view usage / data burned
-#   - download mobileconfig / Windows installer with embedded EAP creds
-#   - reset EAP password (v1.3.x feature)
-# Stolen phone + stolen cookie = full account takeover until expiry.
-# 1h sliding window limits blast radius to a single coffee-shop session.
-# Was 30 days until 2026-06-24 fix (Bug #1: portal idle expiry 30d).
-PORTAL_TTL = 3600
-
-# Absolute maximum lifetime for a customer portal session (Bug #2/R2 fix 2026-06-25).
-#
-# Without this, a session that stays active (slides forward every hour) can
-# live indefinitely — a single continuously-used session could persist for
-# months, defeating the point of "≤ 1h sliding window". The absolute cap
-# forces a full re-auth after 7 days even if the user is active every hour.
-# Threat model: passive observation of a long-lived cookie is a higher-value
-# target than an active 1h sliding session.
-# Computed from `created_at` so no DB schema change needed.
-CUSTOMER_MAX_SESSION_AGE = 7 * 86400  # 7 days in seconds
-
-# Operator session TTL — 8h sliding. After 8h inactivity, operator must re-auth.
-# Longer because operators need to manage customers throughout a workday.
-OPERATOR_TTL = 8 * 3600
+# 30-day sliding expiry. After 30 days of inactivity, the customer must log in again.
+PORTAL_TTL = 30 * 24 * 3600
 
 # Login rate limit (per IP per minute). Same as operator login.
 PORTAL_RATE_LIMIT = 5
-
-# Argon2id parameters per OWASP 2026 Password Storage Cheat Sheet:
-# - memory_cost: 19 MiB
-# - time_cost: 2 iterations
-# - parallelism: 1
-# https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
-_ARGON2 = PasswordHasher(
-    time_cost=2,
-    memory_cost=19 * 1024,   # 19 MiB in KiB
-    parallelism=1,
-    hash_len=32,
-    salt_len=16,
-    type=Type.ID,
-)
-
-
-# ---------- Operator password hashing (Argon2id) ----------
-
-def hash_operator_password(password: str) -> str:
-    """Hash an operator password using Argon2id with OWASP 2026 parameters.
-
-    Returns the encoded hash string (includes salt + parameters). Safe to store
-    in DB or env file. ~70ms per hash on modern hardware.
-    """
-    return _ARGON2.hash(password)
-
-
-def verify_operator_password(stored_hash: str, submitted: str) -> bool:
-    """Constant-time verify of submitted password against stored Argon2id hash.
-
-    Returns False on any error (wrong hash, malformed stored hash, etc.) to
-    avoid leaking which failure mode occurred.
-    """
-    if not stored_hash or not submitted:
-        return False
-    try:
-        _ARGON2.verify(stored_hash, submitted)
-        return True
-    except (VerifyMismatchError, InvalidHashError, Exception):
-        return False
-
-
-def operator_password_needs_rehash(stored_hash: str) -> bool:
-    """Check if stored hash uses outdated Argon2id parameters (for future migration)."""
-    try:
-        return _ARGON2.check_needs_rehash(stored_hash)
-    except Exception:
-        return True  # Treat malformed as needs-rehash
 
 
 # ---------- Password hash helpers ----------
@@ -225,8 +145,8 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
             "c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
             "c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
             "FROM devices d JOIN customers c ON c.id = d.customer_id "
-            "WHERE d.strongswan_user_id = ?",
-            (user_row["id"],)
+            "WHERE d.device_name = ?",
+            (identity,)
         ).fetchone()
         if not device_row:
             return None
@@ -307,16 +227,6 @@ def verify_session(session_id: str, slide: bool = True) -> Optional[dict]:
         ).fetchone()
         if not row:
             return None
-        # Bug #2/R2 absolute cap (added 2026-06-25): even if expires_at (1h sliding)
-        # keeps being refreshed, a session older than CUSTOMER_MAX_SESSION_AGE
-        # must be rejected and deleted. Without this, a continuously-active
-        # session would live forever.
-        if (now - row["created_at"]) > CUSTOMER_MAX_SESSION_AGE:
-            conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
-            log.warning("portal session %s... exceeded absolute max age %ds, deleted",
-                        session_id[:8], CUSTOMER_MAX_SESSION_AGE)
-            return None
         if row["expires_at"] < now:
             conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
             conn.commit()
@@ -369,115 +279,4 @@ def require_portal_session(portal_session: Optional[str] = Cookie(None)) -> dict
     info = verify_session(portal_session)
     if not info:
         raise HTTPException(401, "Invalid or expired session")
-    return info
-
-
-# ---------- Operator sessions (DB-backed, server-side) ----------
-
-def create_operator_session(username: str, user_agent: str, ip_address: str) -> str:
-    """Create a new operator session. Returns the session_id (random URL-safe token).
-
-    Token format: secrets.token_urlsafe(32) — 256 bits of entropy. Stored as-is
-    in the operator_sessions table; the same value goes into the cookie.
-    """
-    session_id = secrets.token_urlsafe(32)
-    now = int(time.time())
-    expires = now + OPERATOR_TTL
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO operator_sessions (session_id, username, created_at, last_active, expires_at, user_agent, ip_address) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (session_id, username, now, now, expires, user_agent[:256], ip_address[:64])
-        )
-        conn.commit()
-    return session_id
-
-
-def verify_operator_session(session_id: str, slide: bool = True) -> Optional[dict]:
-    """Look up an operator session by session_id. Returns the row dict, or None.
-
-    Side effects (when slide=True): refreshes last_active + extends expires_at
-    (sliding 8h window). Sessions past expires_at are deleted and return None.
-    Revoked sessions (revoked=1) return None.
-    """
-    now = int(time.time())
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT session_id, username, created_at, last_active, expires_at, revoked "
-            "FROM operator_sessions WHERE session_id = ?",
-            (session_id,)
-        ).fetchone()
-        if not row:
-            return None
-        if row["revoked"]:
-            return None
-        if row["expires_at"] < now:
-            conn.execute("DELETE FROM operator_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
-            return None
-        if slide:
-            new_expires = now + OPERATOR_TTL
-            conn.execute(
-                "UPDATE operator_sessions SET last_active = ?, expires_at = ? WHERE session_id = ?",
-                (now, new_expires, session_id)
-            )
-            conn.commit()
-        return dict(row)
-
-
-def delete_operator_session(session_id: str) -> None:
-    """Delete an operator session (logout). Idempotent."""
-    with _db() as conn:
-        conn.execute("DELETE FROM operator_sessions WHERE session_id = ?", (session_id,))
-        conn.commit()
-
-
-def revoke_all_operator_sessions(username: Optional[str] = None) -> int:
-    """Mark sessions as revoked. If username is given, only that user's. Returns count.
-
-    Used for: "logout everywhere", suspicious activity response, after password
-    change, after role change.
-    """
-    with _db() as conn:
-        if username:
-            cur = conn.execute(
-                "UPDATE operator_sessions SET revoked = 1 WHERE username = ? AND revoked = 0",
-                (username,)
-            )
-        else:
-            cur = conn.execute("UPDATE operator_sessions SET revoked = 1 WHERE revoked = 0")
-        conn.commit()
-        return cur.rowcount
-
-
-def purge_expired_operator_sessions() -> int:
-    """Delete expired operator sessions. Returns count deleted. Call periodically."""
-    now = int(time.time())
-    with _db() as conn:
-        cur = conn.execute("DELETE FROM operator_sessions WHERE expires_at < ?", (now,))
-        conn.commit()
-        return cur.rowcount
-
-
-# ---------- Operator session FastAPI dep ----------
-
-def require_operator_session(
-    request: Request,
-    session: Optional[str] = Cookie(None, alias=OPERATOR_COOKIE),
-    portal_session: Optional[str] = Cookie(None, alias=PORTAL_COOKIE),
-) -> dict:
-    """FastAPI dep: require a valid operator session. Returns session info dict.
-
-    Only accepts the operator session cookie. Portal session cookies are rejected
-    (defense in depth — portal_session cookie scoped to /portal/ but we double-check).
-    """
-    if portal_session and not session:
-        raise HTTPException(401, "Portal session not valid for operator endpoints")
-    if not session:
-        raise HTTPException(401, "Not authenticated")
-    info = verify_operator_session(session)
-    if not info:
-        raise HTTPException(401, "Invalid or expired session")
-    # Stash for /api/audit-style logging
-    request.state.operator_session = info
     return info

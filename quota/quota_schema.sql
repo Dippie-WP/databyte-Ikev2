@@ -73,9 +73,6 @@ CREATE TABLE IF NOT EXISTS devices (
     is_active           INTEGER NOT NULL DEFAULT 1,   -- admin can disable single device
     last_seen_v4        TEXT,                         -- last VIP assigned (text "10.99.0.3")
     last_seen_at        INTEGER,                      -- Unix epoch of last IKE_SA establish
-    device_type         TEXT DEFAULT NULL,            -- v1.2.8: 'iOS/macOS' | 'Windows 10/11' | 'Android' | 'Linux' (UI hint only)
-    os_version          TEXT DEFAULT NULL,            -- v1.2.8: e.g. "Windows 11 23H2", "iOS 17.5"
-    hostname            TEXT DEFAULT NULL,            -- v1.2.8: device hostname or human label
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL,
     notes               TEXT

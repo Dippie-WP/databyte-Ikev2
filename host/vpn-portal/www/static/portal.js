@@ -1,8 +1,6 @@
-// v1.4.0 — Customer portal SPA. Vanilla JS, no framework.
+// v1.3.0 — Customer portal SPA. Vanilla JS, no framework.
 // Login → /api/portal/login → cookie → /api/portal/usage → render.
 // On 401, show login. On logout, clear and show login.
-// v1.4.0: refactored fill.style.width → fill.style.setProperty('--pct', ...)
-// for strict-CSP compliance (no inline style attributes).
 
 (function () {
   'use strict';
@@ -120,10 +118,7 @@
 
       const pct = Math.min(100, u.data_pct || 0);
       const fill = document.getElementById('vp-meter-fill');
-      // v1.4.0 — strict-CSP compliant: use CSS custom property via CSSOM API.
-      // element.setProperty is allowed by strict CSP per W3C CSP3 §6.7.3.1.
-      // Only the `style="..."` *attribute* is blocked; CSSOM writes are not.
-      fill.style.setProperty('--pct', pct + '%');
+      fill.style.width = pct + '%';
       fill.classList.remove('vp-warn', 'vp-over');
       if (u.over_quota || pct >= 100) {
         fill.classList.add('vp-over');
