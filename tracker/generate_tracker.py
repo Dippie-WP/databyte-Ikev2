@@ -118,6 +118,10 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-26 04:33", "Portal v1.7.0 — speed_plan in PATCH + Edit modal dropdown (per Zun #22367)",
+     "Edit customer modal had no speed-plan dropdown — operators had to type raw Mbps. PATCH silently rejected speed_plan in body ('no fields to update'). Zun flagged: 'ensure it's 100% working'.",
+     "host/vpn-portal/{app.py,www/static/app.js} (commit 3fcc9ca) + 9 L1 tests + new GET /api/speed_plans endpoint",
+     "🟡 Med", "Deployed to VPS. SHA matches. 56/56 customer_lifecycle tests. 6/6 live dry runs against myvpn.databyte.co.za.", "✅"),
     ("2026-06-25 19:15", "Portal v1.6.6 — Customers page Refresh button moved to top",
      "Refresh button was at the bottom of the customer list — invisible without scrolling. Zun asked 'put this button on top'.",
      "host/vpn-portal/www/static/app.js (commit 1496eda) — moved Refresh from vp-btn-row after table to vp-page-head-r next to +New client",
