@@ -1,12 +1,30 @@
 #!/usr/bin/env python3
 """
-quota-monitor.py — Phase 5B.3
+quota-monitor.py — Phase 6 nft METER edition (2026-06-26)
 
-Reads per-VIP iptables-legacy byte counters, resolves VIP → customer,
+MIGRATED 2026-06-26 17:23 SAST: Reads counters from nft NAMED METERS instead
+of per-rule `comment "quota:VIP"` ACCEPT counters.
+
+  - Replaces Phase 5 (2026-06-26): per-VIP ACCEPT rules + ensure_quota_rules()
+  - Reads TWO meters:
+      ip filter client_src { ip saddr counter }  → outbound (upload)
+      ip filter client_dst { ip daddr counter }  → inbound (download)
+  - Meters are declared in /etc/nftables.conf (source-of-truth, loaded at
+    boot by nftables.service). NO runtime rule installation here.
+  - Kernel auto-creates counter elements per VIP on first packet via
+    `flags dynamic`.
+  - 508 per-VIP rules → 2 meter rules. Single hash lookup vs 254 sequential
+    evaluations per direction at high pps.
+
+FIX (Phase 5 regression): ensure_quota_rules() previously appended per-VIP
+ACCEPT rules AFTER the chain's `counter drop` rule, making them dead code.
+Meters load in correct chain position from source-of-truth file.
+
+Reads per-VIP netfilter byte counters, resolves VIP → customer,
 applies 80% warn + 100% hard-cut rules.
 
 Data flow (one iteration):
-  1. Snapshot per-VIP byte counters from FORWARD chain
+  1. Snapshot per-VIP byte counters from named meters (client_src, client_dst)
   2. Join counter[VIP] with leases.address (active leases only)
   3. Join leases.identity → users.id → devices.strongswan_user_id
      → devices.customer_id → customers
@@ -19,10 +37,10 @@ Data flow (one iteration):
         set over_quota=1, write audit + alerts
   5. Sleep POLL_INTERVAL, repeat
 
-Source of truth: iptables-legacy FORWARD chain comments `quota:VIP`.
+Source of truth: nft named meters in /etc/nftables.conf.
 DB is the persistence layer for cumulative usage + alert state.
 
-Run on the LXC 903 HOST (not in the strongSwan container).
+Run on the VPS HOST (not in the strongSwan container).
 The script uses `docker exec strongswan` for swanctl VICI calls.
 
 Usage:
@@ -50,7 +68,13 @@ CONF_BACKUP_DIR = Path("/home/zunaid/strongswan/swanctl/conf.d/.backups")
 VIP_PREFIX = "10.99.0."
 
 # Poll interval (seconds)
-POLL_INTERVAL = 60
+# Changed 2026-06-25 from 60s → 10s per Zun's directive (msg #22356).
+# At 60s with 40Mbps cap and 5-10 Mbps real LTE throughput, customers
+# were burning ~35-70 MB/min — zade hit 100% mid-poll and overran by
+# ~34 MB before the next poll detected it. 10s reduces max overrun to
+# ~6-12 MB while keeping CPU reasonable (10s × 40 customers × ~5ms/poll
+# = 20ms/s = 2% CPU). See HEARTBEAT 2026-06-25 19:47 UTC.
+POLL_INTERVAL = 10
 
 # Alert thresholds (percent)
 WARN_PCT = 80
@@ -63,60 +87,73 @@ SWANCTL_PREFIX = ["docker", "exec", "strongswan", "swanctl", "--uri=tcp://127.0.
 # === Logging ===
 log = logging.getLogger("quota-monitor")
 
-# === iptables counter parsing ===
+# === nft METER parsing (Phase 6, 2026-06-26) ===
+#
+# Meter output line example (from `nft list meter ip filter client_src`):
+#   elements = { 10.99.0.5 counter packets 200 bytes 8000,
+#                 10.99.0.7 counter packets 50 bytes 2000 }
+#
+# client_src meter: created by `ip saddr 10.99.0.0/24 meter client_src { ip saddr counter } accept`
+# client_dst meter: created by `ip daddr 10.99.0.0/24 meter client_dst { ip daddr counter } accept`
+#
+# Counter elements are auto-created by the kernel on first match
+# (`flags dynamic`). No runtime rule installation required.
+METER_ELEM_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)\s+counter packets (\d+) bytes (\d+)")
 
-# Output line example (iptables-legacy -L FORWARD -nvx):
-#   1560 1660173 ACCEPT all -- * * 10.99.0.5 0.0.0.0/0 /* quota:10.99.0.5 */
-# When split on whitespace, we get exactly 12 fields:
-#   [pkts, bytes, target, prot, opt, in, out, source, dest, "/*", "quota:VIP", "*/"]
-# We use simple split() to avoid regex parsing pain.
-QUOTA_COMMENT_RE = re.compile(r"quota:(\d+\.\d+\.\d+\.\d+)")
 
+def _read_meter(meter_name: str) -> dict[str, tuple[int, int]]:
+    """Read {VIP: (packets, bytes)} from a named meter in `ip filter` table.
 
-def sample_counters() -> dict[str, tuple[int, int, int, int]]:
-    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)}.
-
-    Two rules per VIP: outbound (source=VIP) and inbound (destination=VIP).
-    We group them in one pass.
+    Returns empty dict on failure (e.g. meter missing during transition).
     """
     try:
         out = subprocess.run(
-            ["iptables-legacy", "-L", "FORWARD", "-nvx"],
+            ["/usr/sbin/nft", "list", "meter", "ip", "filter", meter_name],
             capture_output=True, text=True, check=True,
         )
     except subprocess.CalledProcessError as e:
-        log.error("iptables-legacy failed: rc=%s stderr=%s", e.returncode, e.stderr)
+        log.error("nft list meter ip filter %s failed: rc=%s stderr=%s",
+                  meter_name, e.returncode, e.stderr)
         return {}
 
-    out_counters: dict[str, tuple[int, int, int, int]] = {}
-    for line in out.stdout.splitlines():
-        # Skip the header line
-        if line.startswith("Chain") or line.startswith("target"):
-            continue
-        m = QUOTA_COMMENT_RE.search(line)
-        if not m:
-            continue
+    result: dict[str, tuple[int, int]] = {}
+    for m in METER_ELEM_RE.finditer(out.stdout):
         vip = m.group(1)
         if not vip.startswith(VIP_PREFIX):
             continue
-        parts = line.split()
-        # parts = [pkts, bytes, target, prot, opt, in, out, source, dest, "/*", "quota:VIP", "*/"]
-        if len(parts) < 9:
-            continue
         try:
-            pkts = int(parts[0])
-            bytes_ = int(parts[1])
+            pkts = int(m.group(2))
+            bytes_ = int(m.group(3))
         except ValueError:
             continue
-        src = parts[7]
-        # out_counters[vip] = (out_pkts, out_bytes, in_pkts, in_bytes)
-        cur = out_counters.get(vip, (0, 0, 0, 0))
-        if src == vip:
-            cur = (cur[0] + pkts, cur[1] + bytes_, cur[2], cur[3])
-        else:
-            cur = (cur[0], cur[1], cur[2] + pkts, cur[3] + bytes_)
-        out_counters[vip] = cur
-    return out_counters
+        result[vip] = (pkts, bytes_)
+    return result
+
+
+def sample_counters() -> dict[str, tuple[int, int, int, int]]:
+    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)} from named meters.
+
+    Phase 6 (2026-06-26): reads two named meters instead of 508 per-rule counters.
+      client_src meter: {ip saddr 10.99.0.X} → outbound (upload)
+      client_dst meter: {ip daddr 10.99.0.X} → inbound (download)
+
+    Return shape unchanged from Phase 5 so downstream logic (delta
+    computation, DB writes, alert thresholds) needs no modification.
+
+    Meters live in /etc/nftables.conf — declared in source-of-truth, loaded
+    at boot by nftables.service. No runtime rule installation needed here.
+    """
+    src = _read_meter("client_src")
+    dst = _read_meter("client_dst")
+
+    all_vips = set(src) | set(dst)
+    out: dict[str, tuple[int, int, int, int]] = {}
+    for vip in all_vips:
+        out_pkts, out_bytes = src.get(vip, (0, 0))
+        in_pkts, in_bytes = dst.get(vip, (0, 0))
+        out[vip] = (out_pkts, out_bytes, in_pkts, in_bytes)
+    return out
+
 
 
 # === DB queries ===
@@ -188,8 +225,9 @@ def list_active_sas() -> list[dict]:
             continue
         if sa is None:
             continue
-        # "  remote 'demo-phone' @ 102.249.0.0[33094] [10.99.0.5]"
-        m = re.search(r"remote\s+'([^']+)'\s+@\s+\S+\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
+        # "  remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.1]"
+        # strongSwan 6.0.7 format: EAP identity after "EAP:", VIP is bracketed IP at end of line
+        m = re.search(r"EAP:\s+'([^']+)'\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
         if m:
             sa["username"] = m.group(1)
             sa["vip"] = m.group(2)
@@ -518,6 +556,12 @@ class QuotaMonitor:
 
         log.info("starting daemon (poll every %ds, warn=%d%%, cut=%d%%)",
                  POLL_INTERVAL, WARN_PCT, CUT_PCT)
+
+        # Phase 6 (2026-06-26): no runtime rule installation needed.
+        # Quota meters (`client_src` / `client_dst`) live in /etc/nftables.conf
+        # and load at boot via nftables.service. Kernel auto-creates counter
+        # elements per VIP on first packet match.
+
         while running:
             try:
                 self.run_once()

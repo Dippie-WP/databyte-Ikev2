@@ -6,6 +6,135 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v1.4.0 — 2026-06-26
+
+**Phase 5/6 quota metering on nftables + repo alignment with deployed state.**
+
+#### 1. nft METER migration (replaces 508 per-VIP rules)
+
+The quota engine (`quota-monitor.py`) was reading counters from 254
+outbound + 254 inbound per-VIP ACCEPT rules (508 rules total) in the
+nftables FORWARD chain. Replaced with **two named meters** in source:
+
+```
+ip saddr 10.99.0.0/24 add @client_src { ip saddr counter } accept
+ip daddr 10.99.0.0/24 add @client_dst { ip daddr counter } accept
+```
+
+- **Why:** Per-VIP rules were appended after `counter drop` in FORWARD
+  by `ensure_quota_rules()` (Phase 5 2026-06-26 11:30 UTC), making them
+  **dead code**. Quota tracking silently broke. (Bug #189 in MEMORY.)
+- **How:** Meters use `flags dynamic` — kernel auto-creates counter
+  elements per VIP on first packet. 508 sequential rule evaluations
+  become 2 hash lookups at high pps.
+- **Source-of-truth:** `host/nftables/nftables.conf.vps-prod` (tracked
+  in repo, applied via `host/nftables/apply.sh`).
+
+#### 2. Fix `swanctl --list-sas` EAP identity parsing
+
+strongSwan 6.0.7 changed `swanctl --list-sas` output format. The old
+regex expected `remote '<eap-id>' @ ip[port] [vip]`, but actual output
+is `remote '<outer-ip>' @ ip[port] EAP: '<eap-id>' [vip]`. New regex
+captures EAP identity after `EAP:` and VIP from the bracketed IP at end
+of line.
+
+- **Impact:** All quota billing was silently returning empty since
+  2026-06-22 (last commit before format change). Existing customers
+  with pre-fix data (zunaid) had stale `data_used_bytes`. New
+  customers (saalieg, zade, …) had `data_used_bytes = 0` forever.
+- **Fix:** `quota-monitor.py:228-230` — regex updated to match actual
+  format. Verified end-to-end: saalieg now bills correctly.
+
+#### 3. Bandwidth monitor: iptables-legacy → nft mangle MARK
+
+`bandwidth-monitor.py` now writes nft mangle MARK rules instead of
+iptables-legacy. Phase 5D nft edition (committed 2026-06-26).
+
+- **Why:** Phase 5 (2026-06-26) migrated firewall manager from
+  iptables-legacy to nftables. bandwidth-monitor was still using
+  iptables-legacy, which now has empty FORWARD chain.
+- **Helper module:** `quota/bandwidth-monitor-nft.py` provides
+  `add_mark_rule`, `remove_mark_rule`, `mark_rule_present`.
+
+#### 4. Repo alignment (deployed → canonical)
+
+Closed the canonical-vs-deployed drift that had accumulated since
+2026-06-22:
+
+- `quota/quota-monitor.py` — Phase 6 (meter + regex fix)
+- `quota/bandwidth-monitor.py` — Phase 5D nft edition
+- `quota/bandwidth-monitor-nft.py` — helper module (NEW)
+- `host/systemd/quota-monitor.service` — Phase 6 description
+- `host/systemd/bandwidth-monitor.service` — NEW (was only in `/etc`)
+- `host/nftables/nftables.conf.vps-prod` — NEW (production ruleset)
+- `host/nftables/apply.sh` — NEW (validates + installs to /etc)
+- `host/ssl/ISRG_Root_X1.crt` + `X2.crt` + `install-isrg-roots.sh` —
+  tracked for repeatable LE chain install on Debian 13
+- `host/ssl/README.md` — NEW
+- `docker/swanctl/conf.d/rw-eap.conf` — UNTRACKED (operator-managed,
+  contains 29 live EAP secrets). `.example` template tracked.
+- `docker/swanctl/conf.d/rw-psk.conf` — UNTRACKED (operator-managed).
+
+`.gitignore` updated to exclude operator-managed configs:
+```
+docker/swanctl/conf.d/rw-eap.conf
+docker/swanctl/conf.d/rw-psk.conf
+docker/swanctl.bak.*/         # full swanctl/ backups
+docker/swanctl/x509ca/*.srl   # OpenSSL bookkeeping
+```
+
+#### 5. Docker image: `zun/strongswan:1.4.0`
+
+Rebuilt from canonical source. Same strongSwan 6.0.7 base + EAP-MSCHAPv2
++ attr-sql + sqlite as before. Tagged `1.4.0` for traceability.
+
+**Important:** Container-side code (charon, swanctl) is unchanged from
+`6.0.7-mschapv2-attrsql`. The new tag is just a rebuild to align image
+metadata with repo tag `v1.4.0`. No production restart required — same
+image content, new label.
+
+#### 6. Verification
+
+- `nft list ruleset` — 127 lines, 2 meter rules in forward chain
+- `nft list meter ip filter client_src` — saalieg `10.99.0.1`
+  `packets 2614 bytes 535838`, ticking every 10s
+- `customers.data_used_bytes` — saalieg updates from 0 → 535786 (live)
+- All systemd services active: `nftables`, `fail2ban`, `docker`,
+  `quota-monitor`, `bandwidth-monitor`, `ipban`, `nginx`
+- charon ESTABLISHED SA: `rw-eap #5 saalieg-laptop @ 102.182.117.43`
+- `myvpn.databyte.co.za/api/health` → HTTP 200
+
+#### 7. Files changed
+
+```
+M  .gitignore                                     (+6 -0)
+M  docker/start.sh                                (chmod +x, path fix)
+D  docker/swanctl/conf.d/rw-eap.conf              (untrack; live preserved)
+A  docker/swanctl/conf.d/rw-eap.conf.example      (NEW: sanitized template)
+A  host/nftables/nftables.conf.vps-prod           (NEW: 13627 bytes)
+A  host/nftables/apply.sh                         (NEW)
+A  host/ssl/ISRG_Root_X1.crt                      (already there, now tracked)
+A  host/ssl/ISRG_Root_X2.crt                      (already there, now tracked)
+A  host/ssl/install-isrg-roots.sh                 (already there, now tracked)
+A  host/ssl/README.md                             (NEW)
+M  host/systemd/quota-monitor.service             (Phase 6 description)
+A  host/systemd/bandwidth-monitor.service         (NEW: was only in /etc)
+M  quota/bandwidth-monitor.py                     (Phase 5D nft edition)
+A  quota/bandwidth-monitor-nft.py                 (NEW: helper module)
+M  quota/quota-monitor.py                         (Phase 6 meter + EAP regex)
+```
+
+#### 8. Lessons (logged in ~/self-improving/memory.md)
+
+- **#189**: Migration scripts that append rules after `counter drop`
+  create dead code. Always check `nft -a list chain` order vs source.
+- **#190**: Meters > per-VIP rules for dynamic membership (`flags
+  dynamic`, hash lookup, trivial per-element reset).
+- **#191**: `nft -c -f <file>` BEFORE `nft -f <file>` for syntax safety.
+- **#192**: `git rm --cached` for files that can't be moved (bind-mount
+  paths). Lets you untrack without affecting live processes.
+- **#193**: Verify bind-mount sources before `git checkout` operations
+  on tracked files. Files in bind-mounted dirs are the live ones.
 ### v1.2.15 — 2026-06-21
 
 **Edit Customer modal: fix PATCH not firing (Zun reported)** — reported via Telegram that editing customer "saalieg" was a no-op.

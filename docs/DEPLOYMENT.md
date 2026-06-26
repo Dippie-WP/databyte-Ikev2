@@ -81,14 +81,21 @@ Outputs:
 
 ```bash
 cd docker/swanctl/conf.d
-cp rw-eap.conf.template rw-eap.conf
+cp rw-eap.conf.example rw-eap.conf
 cp rw-psk.conf.template rw-psk.conf
+```
 
+> **rw-eap.conf is in .gitignore (operator-managed).** It contains live EAP
+> secrets for all your customers. NEVER commit rw-eap.conf to git.
+> Use rw-eap.conf.example as the starting template (5 placeholder EAP
+> blocks + comment block explaining the format).
+
+```bash
 # Edit rw-eap.conf:
 #   - Uncomment the `secrets { eap-USERNAME { id = USERNAME; secret = "..."; } }` block
 #   - Set your username + password
 
-# Edit rw-psk.conf:
+# Edit rw-psk.conf (also in .gitignore):
 #   - Uncomment the `secrets { ike-psk { ...; secret = "..."; } }` block
 #   - Set your PSK
 ```

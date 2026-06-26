@@ -5,4 +5,9 @@
 # daemon is ready. This eliminates the previous race condition where
 # the wrapper had to manually call swanctl --load-all and could fire
 # it before VICI was accepting connections.
-exec ./charon "$@"
+#
+# Use absolute path: charon lives at /usr/local/bin/charon (symlink to
+# /usr/libexec/ipsec/charon, created in the Dockerfile). The image's
+# WORKDIR is /strongswan-build which is empty after build, so ./charon
+# would not resolve.
+exec /usr/local/bin/charon "$@"
