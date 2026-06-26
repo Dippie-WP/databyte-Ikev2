@@ -31,6 +31,30 @@ def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
+def _mark_in_nft_output(stdout: str, mark: str) -> bool:
+    """Check if a mark is present in nft list output, normalizing hex form.
+
+    nft prints marks like 'meta mark set 0x00000081' (8 hex digits, zero-
+    padded). Our caller passes '0x81' (short form). Strip leading zeros
+    from both before comparing so '0x81' matches '0x00000081'.
+
+    Also match decimal form ('meta mark set 129' for mark 0x81 = 129).
+    """
+    m = re.match(r"0x([0-9a-fA-F]+)", mark)
+    if not m:
+        return False
+    short = m.group(1).lstrip("0") or "0"
+    decimal = str(int(short, 16))
+
+    for pat in (
+        rf"meta mark set 0x0*{short}(?![0-9a-fA-F])",
+        rf"meta mark set {decimal}(?![0-9])",
+    ):
+        if re.search(pat, stdout):
+            return True
+    return False
+
+
 def vip_to_mark(vip: str) -> str:
     """Convert VIP (10.99.0.50) to nft mark (hex 0xN).
     nft accepts hex marks: `meta mark set 0xN` — same format as iptables.
@@ -43,6 +67,29 @@ def vip_to_classid(vip: str) -> str:
     """HTB classid (preserved from original)."""
     last = int(vip.rsplit(".", 1)[1])
     return f"1:{last:x}"
+
+def vip_to_download_mark(vip: str) -> str:
+    """Download-direction mark for a VIP.
+
+    Uses high bit (0x80) to distinguish from upload marks (0x01-0xfe).
+    254 VIPs × 2 directions = 508 marks, well within 16-bit fw handle range.
+    """
+    last = int(vip.rsplit(".", 1)[1])
+    return f"0x{last | 0x80:x}"
+
+
+def vip_to_download_classid(vip: str) -> str:
+    """Download-direction egress tc classid.
+
+    Offset 128 from upload classid to avoid collisions
+    (upload = 1:1..1:fe, download = 1:129..1:382).
+    """
+    last = int(vip.rsplit(".", 1)[1])
+    if last < 1 or last > 254:
+        raise ValueError(f"VIP last octet {last} out of range (need 1-254)")
+    return f"1:{last + 0x80:x}"
+
+
 
 
 # === nft mark rule management ===
@@ -101,6 +148,95 @@ def get_mark_rule_handle(vip: str, chain: str) -> str | None:
     out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", nft_chain])
     if out.returncode != 0:
         return None
+
+def add_download_mark_rule(vip: str, mark: str) -> bool:
+    """Add FORWARD mangle MARK rule for DOWNLOAD using 'ip daddr VIP'.
+
+    Why FORWARD (not PREROUTING):
+      - For an IPsec tunnel with TS=0.0.0.0/0 and mode=tunnel, strongSwan
+        installs xfrm policies dir out + dir fwd. Decrypted download
+        packets are routed FORWARD through the box before being
+        re-encrypted and sent back out ens3.
+      - In FORWARD mangle, the packet has:
+          * ip daddr = the VIP (10.99.0.1) — decrypted inner packet
+            going TO the client
+          * ip saddr = some internet source (e.g. Cloudflare)
+      - This is the symmetric counterpart to the upload rule:
+          * UPLOAD: POSTROUTING 'ip saddr VIP' (mangle before MASQUERADE)
+          * DOWNLOAD: FORWARD 'ip daddr VIP' (mangle on decrypted packet)
+
+    Why this is the only working placement (history of attempts):
+      - PREROUTING 'ip daddr VIP' → never matches. Wire dst at PREROUTING
+        time is still VPS public IP 154.65.110.44 (NAT un-NATs at -100,
+        mangle runs at -150).
+      - PREROUTING 'ct reply daddr VIP' → never matches. VIP is the
+        conntrack ORIGINAL src, not the REPLY dst. Verified counter=0.
+      - PREROUTING 'ip saddr VIP' → matches outgoing (upload) packets but
+        the mark is dropped when xfrm decrypts and creates a new SKB for
+        the inner packet. Verified: mark 0x81 counter at POSTROUTING = 0.
+      - FORWARD 'ip daddr VIP' → ✓ matches decrypted download packets,
+        mark survives through xfrm re-encryption to POSTROUTING/egress.
+
+    The mark persists through xfrm output → POSTROUTING → ens3 egress tc,
+    where it's classified into class 1:130+ (rate=down_mbps).
+    """
+    if download_mark_rule_present(vip, mark):
+        log.debug("Download MARK rule already present: vip=%s", vip)
+        return True
+
+    comment = f"bw:{vip} (dl)"
+    cmd = [
+        "/usr/sbin/nft", "add", "rule", "ip", "mangle", "forward",
+        "ip", "daddr", f"{vip}/32",
+        "meta", "mark", "set", mark,
+        "comment", f'"{comment}"',
+    ]
+    result = run(cmd)
+    if result.returncode == 0:
+        log.info("Added nft DOWNLOAD MARK rule: vip=%s mark=%s (ip daddr in FORWARD mangle)",
+                 vip, mark)
+        return True
+    log.error("nft add download mark rule failed for %s: %s", vip, result.stderr)
+    return False
+
+
+def download_mark_rule_present(vip: str, mark: str) -> bool:
+    """Check if the DOWNLOAD MARK rule for this VIP exists in FORWARD mangle."""
+    out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", "forward"])
+    if out.returncode != 0:
+        return False
+    target = f'comment "bw:{vip} (dl)"'
+    return target in out.stdout and _mark_in_nft_output(out.stdout, mark)
+
+
+def get_download_mark_rule_handle(vip: str) -> str | None:
+    """Find the nft handle for this VIP's DOWNLOAD MARK rule in FORWARD."""
+    out = run(["/usr/sbin/nft", "-a", "list", "chain", "ip", "mangle", "forward"])
+    if out.returncode != 0:
+        return None
+    for line in out.stdout.splitlines():
+        if f'comment "bw:{vip} (dl)"' in line:
+            m = re.search(r"handle\s+(\d+)", line)
+            if m:
+                return m.group(1)
+    return None
+
+
+def remove_download_mark_rule(vip: str) -> bool:
+    """Remove DOWNLOAD MARK rule from nft mangle PREROUTING. Idempotent."""
+    handle = get_download_mark_rule_handle(vip)
+    if not handle:
+        log.debug("No DOWNLOAD MARK rule to remove: vip=%s", vip)
+        return True
+    cmd = ["/usr/sbin/nft", "delete", "rule", "ip", "mangle", "prerouting", "handle", handle]
+    result = run(cmd)
+    if result.returncode == 0:
+        log.info("Removed nft DOWNLOAD MARK rule: vip=%s handle=%s", vip, handle)
+        return True
+    log.error("nft delete download mark rule failed for %s: %s", vip, result.stderr)
+    return False
+
+
     for line in out.stdout.splitlines():
         if f'comment "bw:{vip}"' in line:
             m = re.search(r"handle\s+(\d+)", line)
