@@ -135,6 +135,166 @@ M  quota/quota-monitor.py                         (Phase 6 meter + EAP regex)
   paths). Lets you untrack without affecting live processes.
 - **#193**: Verify bind-mount sources before `git checkout` operations
   on tracked files. Files in bind-mounted dirs are the live ones.
+
+### v1.8.0 — 2026-06-27
+
+**Download bandwidth cap working — FORWARD mangle mark + dynamic OUTPUT mark rule (2 commits).**
+
+#### 1. Bug: download cap (40 Mbps) didn't enforce at all
+
+Zun's iPhone iperf3 download test showed 84-93 Mbps through the VPN
+tunnel, even though the cap was supposed to be 40 Mbps. Speedtest
+confirmed the cap was loose, not tight. Investigation found **four
+cascading bugs** in the bandwidth-monitor:
+
+**Bug A — PREROUTING `ip daddr VIP` never matches.**
+At PREROUTING mangle time, conntrack NAT un-NATs the wire dst AFTER
+mangle runs (mangle priority -150, nat priority -100). Wire dst is
+still the VPS public IP 154.65.110.44, never the VIP 10.99.0.1.
+Verified with `nft add rule ip mangle prerouting ip daddr VIP counter`
+— packet counter stayed at 0 across full speedtest runs.
+
+**Bug B — PREROUTING `ct reply daddr VIP` never matches.**
+VIP is the conntrack ORIGINAL src, not the REPLY dst. For an upload
+packet (saddr=VIP → internet), the conntrack REPLY tuple has
+dst=internet, not VIP. Counter verified = 0.
+
+**Bug C — PREROUTING `ip saddr VIP` matches upload but mark lost on xfrm decrypt.**
+Matches outgoing upload packets (saddr=VIP), but xfrm INPUT decrypts
+and creates a NEW SKB that loses the mark. Mark 0x81 counter at
+POSTROUTING = 0 — the mark does not survive the decrypt→re-encrypt
+cycle.
+
+**Bug D — ifb0 ingress redirect was stealing ALL incoming tunnel traffic.**
+The OLD `setup_qdiscs()` added a catch-all u32 filter
+(`match 0/0 → action mirred egress redirect dev ifb0`) on ens3's
+ingress qdisc. This redirected ALL incoming IPsec-decrypted packets
+to ifb0 BEFORE ens3's egress tc could see them. Even with a correct
+mark rule, traffic never reached the egress tc. tcpdump confirmed:
+`ens3 In IP 10.99.0.1 > ...` then `ifb0 Out IP 10.99.0.1 > ...`.
+
+**Bug E — hex comparison bug in `download_mark_rule_present`.**
+Compared string `f"meta mark set 0x81"` against nft's output
+`meta mark set 0x00000081` (nft zero-pads to 8 hex digits).
+Present check always returned False → daemon added a DUPLICATE rule
+every 60s poll. Discovered by grepping journalctl for repeated
+"Added nft" log lines.
+
+#### 2. Fix
+
+| Bug | Fix |
+|---|---|
+| A | Use FORWARD mangle `ip daddr VIP` instead of PREROUTING — matches the **decrypted inner packet** going to the VIP. Mark survives through xfrm re-encrypt → POSTROUTING → ens3 egress → tc class. |
+| D | Removed ifb0 ingress redirect from `setup_qdiscs()` (kept ifb0 setup but disabled redirect). |
+| E | Added `_mark_in_nft_output(stdout, mark)` helper using regex `0x0*` prefix match + decimal form fallback. |
+
+#### 3. Files changed (commit c5820b9)
+
+- `quota/bandwidth-monitor-nft.py` — added `vip_to_download_mark()`,
+  `vip_to_download_classid()`, `add_download_mark_rule()` (FORWARD),
+  `download_mark_rule_present()`, `get_download_mark_rule_handle()`,
+  `remove_download_mark_rule()` (FORWARD), `_mark_in_nft_output()`
+  helper. (+136 lines)
+- `quota/bandwidth-monitor.py` — `apply_bandwidth()` now adds 6 steps
+  (was 5): UPLOAD mark + DOWNLOAD mark + UPLOAD egress class +
+  UPLOAD egress filter + DOWNLOAD egress class + DOWNLOAD egress
+  filter. `remove_bandwidth()` removes both. `setup_qdiscs()` ifb0
+  redirect code now `if INGRESS_SHAPING and False:` (always skipped).
+  `user_bandwidth_rules_present()` checks both UPLOAD mark and
+  DOWNLOAD mark. (+161 lines)
+
+#### 4. Architecture (nft edition, post-fix)
+
+| Direction | Rule | Where | Mark | TC class | Rate |
+|---|---|---|---|---|---|
+| Upload | `ip saddr VIP` | mangle POSTROUTING + FORWARD | 0x01 | 1:2 | up_mbps |
+| Download | `ip daddr VIP` | mangle **FORWARD** | 0x81 (0x80\|octet) | 1:130+ | down_mbps |
+| ifb0 setup | none | (disabled) | — | — | — |
+
+#### 5. Verified live (zunaid operator account, 40/20)
+
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+- UL class 1:2: 316 MB / 381k pkts / **185k overlimits / 10k drops**
+- Speedtest.net (Cape Town server): **35.6 Mbps down / 38.6 Mbps up**
+- iperf3 download (after OUTPUT rule): **36 Mbps** (was 92 before)
+- No duplicates after 60s poll cycle (present-check normalized hex)
+
+---
+
+### v1.7.1 — 2026-06-27
+
+**Download cap also catches locally-generated replies (dynamic OUTPUT mark rule).**
+
+#### 1. Bug: iperf3 download bypassed the cap (OUTPUT path uncovered)
+
+After the v1.8.0 FORWARD-mangle fix, speedtest download was capped
+correctly (35.6 Mbps), but iperf3 download was still uncapped
+(92 Mbps). Root cause: the iperf3 server is a local process on VPS.
+Its TCP replies have src=154.65.110.44:5201, dst=102.182.117.43
+(Zun's home IP), and go through **OUTPUT mangle**, not FORWARD.
+The FORWARD rule catches internet→VPS→tunnel traffic but misses
+locally-generated replies to tunnel clients.
+
+Verified empirically: counter rule
+`nft add rule ip mangle output ip daddr 102.182.117.43 counter`
+grew at ~30 pps during iperf3 download — the traffic IS in OUTPUT.
+
+#### 2. Fix (commit a8caa3c)
+
+Daemon now queries `swanctl --list-sas` for each active SA's remote
+IP and adds a parallel mangle OUTPUT rule:
+
+```
+table ip mangle {
+  chain output {
+    ip daddr REMOTE_IP meta mark set 0x81 comment "bw-dl-output:REMOTE_IP"
+  }
+}
+```
+
+Mark same as download (0x80|octet) → lands in same egress tc class
+1:130+ (rate=down_mbps). Mark survives xfrm encrypt to POSTROUTING.
+
+#### 3. IP rotation safety net
+
+When Zun disconnects with IP A and reconnects with IP B:
+- `run_iteration()` scans the OUTPUT chain for `bw-dl-output:*`
+  rules whose remote_ip is no longer in the active SA set
+- Stale A rule is removed
+- New B rule is added on the next iteration
+- No manual intervention required
+
+Without this safety net, a static `nft add rule ip mangle output ip
+daddr <old-ip>` rule would persist forever and silently break if
+RSAWeb rotated Zun's home IP.
+
+#### 4. Files changed
+
+- `quota/bandwidth-monitor-nft.py` — 4 new helpers:
+  `add_download_output_rule()`,
+  `download_output_rule_present()`,
+  `get_download_output_rule_handle()`,
+  `remove_download_output_rule()`. (+95 lines)
+- `quota/bandwidth-monitor.py` —
+  - New regex `SA_REMOTE_IP_RE` extracts tunnel client public IP
+    from `remote '...' @ IP[4500]` line in `swanctl --list-sas`
+  - `list_active_vips()` now returns `{vip: {username, remote_ip}}`
+    instead of `{vip: username}`
+  - `apply_bandwidth(vip, down, up, iface, remote_ip=None)` —
+    adds OUTPUT rule when remote_ip given
+  - `remove_bandwidth(vip, iface, remote_ip=None)` — removes OUTPUT
+    rule when remote_ip given
+  - `run_iteration()` scans for stale `bw-dl-output:*` rules and
+    removes any whose remote_ip is no longer active. (+30 lines)
+
+#### 5. Verified live
+
+- Daemon log: `Added nft DOWNLOAD OUTPUT MARK rule: remote_ip=102.182.117.43 mark=0x81`
+- OUTPUT chain has 1 rule per active SA, comment `bw-dl-output:REMOTE_IP`
+- Zun iperf3 download retest: **36 Mbps** (was 92 — at cap)
+- No duplicates after 60s poll cycle
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+
 ### v1.2.15 — 2026-06-21
 
 **Edit Customer modal: fix PATCH not firing (Zun reported)** — reported via Telegram that editing customer "saalieg" was a no-op.

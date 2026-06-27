@@ -152,24 +152,37 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas
 # Should show: rw-eap #1, ESTABLISHED, IKEv2, <phone_ip>[port] [10.99.0.50]
 ```
 
-### From the VPS, verify per-user bandwidth limits (Phase 5D):
+### From the VPS, verify per-user bandwidth limits (Phase 5D, v1.8.0 nft edition):
 
 ```bash
 # 1. Service is running
 sudo systemctl is-active bandwidth-monitor
 # Expected: active
 
-# 2. tc has a per-user class for the connected phone (last octet = class minor)
-sudo tc class show dev eth0 | grep -E '1:[0-9]+ ' | grep -v '1:1 \|1:ffff'
-# Expected: shows 1:<VIP_last_octet> htb rate 20Mbit ceil 20Mbit
+# 2. tc has per-user classes on the egress interface (NOT ifb0 anymore)
+sudo tc class show dev ens3 | grep -E '1:[0-9a-f]+ ' | grep -v '1:1 \|1:ffff'
+# Expected: shows 1:2 (upload) + 1:81 (download) for VIP 10.99.0.1
+# (upload class minor = VIP last octet hex, download = 0x80|octet hex)
 
-# 3. iptables has MARK rules with comment "bw:10.99.0.50" (or whatever VIP)
-sudo iptables-legacy -t mangle -L PREROUTING -n -v | grep 'bw:'
-sudo iptables-legacy -t mangle -L POSTROUTING -n -v | grep 'bw:'
-# Expected: MARK rule with comment "bw:10.99.0.X" for the connected VIP
+# 3. nft mangle rules (Phase 6 migration, nft edition)
+sudo nft -a list chain ip mangle forward | grep 'bw:'
+# Expected for an active upload+download VIP:
+#   ip saddr 10.99.0.X meta mark set 0x00000001 comment "bw:10.99.0.X"
+#   ip daddr 10.99.0.X meta mark set 0x00000081 comment "bw:10.99.0.X (dl)"
+sudo nft -a list chain ip mangle postrouting | grep 'bw:'
+# Expected: ip saddr 10.99.0.X meta mark set 0x00000001 comment "bw:10.99.0.X"
+sudo nft -a list chain ip mangle output | grep 'bw-dl-output:'
+# Expected (one per active SA): ip daddr REMOTE_IP meta mark set 0x00000081 comment "bw-dl-output:REMOTE_IP"
 
-# 4. Real-world test: from your phone (still on VPN), run a speed test
-# Expected: capped at ~18-20 Mbps (allowing for overhead). NOT saturating the VPS link.
+# 4. Verify cap is firing (counters should show non-zero Sent + overlimits)
+sudo tc -s class show dev ens3 classid 1:2     # upload
+sudo tc -s class show dev ens3 classid 1:81    # download
+# Expected: Sent bytes growing + overlimits counter > 0 when traffic flowing
+
+# 5. Real-world tests from your phone (still on VPN):
+#    a. Run speedtest → expect download at your bandwidth_down_mbps
+#    b. Run iperf3 download to VPS:5201 → ALSO expect cap (proves OUTPUT rule)
+# Expected: capped at your down_mbps (allow 10% for overhead). NOT saturating the VPS link.
 ```
 
 If a connected user does NOT show up in steps 2-3, check the daemon:

@@ -4,7 +4,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 ## Current state (live 2026-06-26 18:10 UTC)
 
-**Latest tag: v1.4.0** — nftables meter-based quota tracking + swanctl EAP regex fix + repo alignment with deployed state.
+**Latest tag: v1.8.0** — download bandwidth cap working (FORWARD mangle + dynamic OUTPUT mark rule). See CHANGELOG.md v1.8.0 entry + docs/5D-BANDWIDTH-LIMITING.md "What we learned".
 
 **Phase status:**
 | Phase | Description | Status |
@@ -36,10 +36,12 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | **Phase 5** | **iptables-legacy → native nftables migration (vpn-prod-01, IPv4 only)** | **✅ DONE — 2026-06-26 11:30 UTC** |
 | **Phase 6** | **nft named meters replace 508 per-VIP rules + swanctl EAP regex fix** | **✅ DONE — 2026-06-26 17:55 UTC** |
 | **v1.4.0** | **Repo alignment (deployed → canonical) + Docker image rebuild + tag v1.4.0** | **✅ DONE — 2026-06-26** |
+| **v1.7.1** | **Download cap also catches locally-generated replies (dynamic OUTPUT mark rule from swanctl SA query)** | **✅ DONE — 2026-06-27, commit a8caa3c** |
+| **v1.8.0** | **Download bandwidth cap working — FORWARD mangle mark + egress tc class + ifb0 redirect removed + hex comparison fix (4 bugs in 1)** | **✅ DONE — 2026-06-26/27, commit c5820b9** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
 | 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0**, **v1.4.0** (22 total). **v1.2.5 deleted.**
+**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0**, **v1.4.0** (22 total). v1.7.1 + v1.8.0 also tagged locally on VPS canonical repo (not yet pushed to GitHub — branch protection blocked the original force-push on 2026-06-26). **v1.2.5 deleted.**
 
 ### v1.3.0 customer portal (lab, 2026-06-21)
 
