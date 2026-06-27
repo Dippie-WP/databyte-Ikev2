@@ -17,14 +17,15 @@
    ├── netfilter-persistent (loads /etc/iptables/rules.v4)
    ├── strongswan-iptables-watchdog.service (re-applies on container restart only)
    │
-   ├── [iptables-legacy FORWARD chain — 508 per-VIP ACCEPT rules]
-   │     ├── quota:10.99.0.5  ACCEPT out (bytes counter, customer demo-phone)
-   │     ├── quota:10.99.0.5  ACCEPT in  (bytes counter, customer demo-phone)
-   │     ├── quota:10.99.0.50 ACCEPT out (bytes counter, customer zun-iphone)
-   │     ├── ... (254 outbound + 254 inbound rules = 508 total)
+   ├── [nftables source chain — 2 named meters, 508 per-VIP counters auto-created]
+   │     ├── @client_src { ip saddr counter }  (upload bytes per VIP)
+   │     ├── @client_dst { ip daddr counter }  (download bytes per VIP)
+   │     ├── mangle FORWARD: ip saddr VIP meta mark set 0x01 (upload tc class 1:2)
+   │     ├── mangle FORWARD: ip daddr VIP meta mark set 0x81 (download tc class 1:130+)
+   │     ├── mangle OUTPUT: ip daddr REMOTE_IP meta mark set 0x81 (locally-generated replies)
    │     └── *mangle FORWARD: TCPMSS --set-mss 1260 (5A.7 — 5G PMTUD fix)
    │
-   ├── [iptables-legacy *nat POSTROUTING]
+   ├── [nftables nat POSTROUTING (Phase 5, 2026-06-26)]
    │     └── MASQUERADE for 10.99.0.0/24
    │
    ├── [Docker container: strongswan (network_mode: host)]
@@ -109,8 +110,17 @@ The build is ~5 min and the image is tied to a specific strongSwan version. Push
 ### SQLite (NOT Postgres, NOT MySQL)
 The DB is small (~200KB), low-write (just lease updates), no concurrent writers (single charon). SQLite is the right tool. The daily backup is a 200KB copy to RustFS. If we ever need multiple gateway replicas, this changes.
 
-### iptables-legacy (NOT nftables) for quota counters
-We use iptables-legacy with per-VIP ACCEPT rules. **Why not nftables?** nftables has named counters that persist across rule reloads (a 5B.6-style bug couldn't happen with nftables). But nftables doesn't ship with the LXC's firewalld backend yet, and adding nftables-native as a second stack would duplicate complexity. **Tradeoff:** iptables-legacy counters get wiped on every `iptables-restore`. The 5B.6 fix (narrow watchdog case statement) prevents the wipe. For v1.3 we may migrate to nftables for permanent counter persistence.
+### nftables meter for quota counters (Phase 6 — replaces 508 per-VIP rules)
+Since Phase 6 (v1.4.0, 2026-06-26), we use **nftables named meters** in source chain:
+```
+ip saddr 10.99.0.0/24 add @client_src { ip saddr counter } accept
+ip daddr 10.99.0.0/24 add @client_dst { ip daddr counter } accept
+```
+Per-VIP counters are auto-created by the kernel on first packet via `flags dynamic` — 2 hash lookups instead of 508 sequential rule evaluations.
+
+**Why migrated:** 5B.6-style bug (counters wiped on iptables-restore) can never happen with nft named counters (they survive `nft flush ruleset`). Source-of-truth: `host/nftables/nftables.conf.vps-prod` (tracked in repo).
+
+**Historical:** 5B.2 used iptables-legacy with 508 per-VIP ACCEPT rules (254 outbound + 254 inbound). Phase 6 (v1.4.0) replaced this with named meters; 5B.6 watchdog bug fix is now N/A (nft counters persist).
 
 ### Self-signed CA (NOT Let's Encrypt)
 LE is what v1.3 will use. For v1.0/v1.1, the Android strongSwan app handles self-signed CAs fine when the CA is installed as a user CA. iOS is broken either way. The setup is:
@@ -126,7 +136,7 @@ Upstream attr-sql doesn't enforce hard pinning. The pattern we use: pre-insert t
 
 ### How it works (one-liner)
 
-Every 60 seconds, a Python daemon reads the iptables-legacy per-VIP byte counter for every active VPN session, looks up the customer in the DB, increments their `data_used_bytes`. At 80% it logs a warning. At 100% it terminates the IKE_SA, kills the EAP secret in `rw-eap.conf` (replace with `KILLED-<random>`), reloads charon, and marks the customer `over_quota=1`. Re-authentication is blocked because the secret is now dead.
+Every 60 seconds (or 10s in v1.6.7), a Python daemon reads the nftables meter per-VIP byte counter for every active VPN session, looks up the customer in the DB, increments their `data_used_bytes`. At 80% it logs a warning. At 100% it terminates the IKE_SA, kills the EAP secret in `rw-eap.conf` (replace with `KILLED-<random>`), reloads charon, and marks the customer `over_quota=1`. Re-authentication is blocked because the secret is now dead.
 
 ### Data model
 
@@ -152,7 +162,7 @@ Quota layer tables (6 new, additive):
 
 **VIP resolution chain** (at quota-monitor query time):
 ```
-iptables-legacy counter (bytes per VIP, in FORWARD chain)
+nftables meter counter (bytes per VIP, in source chain)
   → leases.address (BLOB) → leases.identity (= users.id)
     → devices.strongswan_user_id (= users.id)
       → devices.customer_id
@@ -167,9 +177,10 @@ iptables-legacy counter (bytes per VIP, in FORWARD chain)
 - Quota is shared across all devices of one customer (combined `data_used_bytes`)
 - Per-purchase model: 100% = hard cut, manual extension by operator after payment
 - No calendar/rolling cycle — `data_limit_bytes` is manual + tier-based
-- **Counter = iptables-legacy byte counters in FORWARD chain, NOT nftables, NOT charon `leases` table**
+- **Counter = nftables named meters in source chain (`@client_src` / `@client_dst`), NOT iptables-legacy, NOT charon `leases` table**
 - **Source of truth for "who's connected" = `swanctl --list-sas`** (not charon `leases` table — stale on re-acquire)
-- **Source of truth for "how much data" = iptables-legacy FORWARD counter** (per-VIP ACCEPT rules)
+- **Source of truth for "how much data" = nft meter counters** (per-VIP elements, auto-created on first packet)
+- **Bandwidth shaping = `quota/bandwidth-monitor.py` (nft mangle MARK + tc HTB classes)** — see `docs/5D-BANDWIDTH-LIMITING.md` for v1.8.0 details (FORWARD mangle placement, OUTPUT rule for locally-generated replies, ifb0 redirect removed).
 - **Kill credentials at 100% via `rw-eap.conf` mutation, NOT DB** (see ADR `5B-credentials-kill.md`)
 
 ### Tiers (seeded in 5B.1, **rewritten 2026-06-22** for 5D pre-commercial lineup)
@@ -188,7 +199,7 @@ iptables-legacy counter (bytes per VIP, in FORWARD chain)
 
 ```
 [LXC 903 host]
-  iptables-legacy FORWARD chain (508 per-VIP ACCEPT rules, byte counters)
+  nftables source chain (2 named meters, 508 per-VIP counters auto-created)
   quota-monitor.py          ← reads counters + DB → alert/cut decisions
   quota-monitor.service     ← systemd unit, 60s poll
   quota-schema.service      ← oneshot at boot, applies schema (idempotent)
@@ -242,7 +253,7 @@ every 60s:
 
 **Session sidecar** at `/var/run/quota-monitor.session` tracks per-customer last counter value for delta computation. Cleared on daemon restart (intentional re-baseline).
 
-### iptables-legacy accounting rules (5B.2)
+### nftables meter accounting rules (Phase 6, v1.4.0)
 
 Per-VIP ACCEPT rules in FORWARD chain. 254 outbound (src=VIP) + 254 inbound (dst=VIP) = 508 total rules. Each rule has a byte counter that monotonically increases (until `iptables-restore` resets it).
 

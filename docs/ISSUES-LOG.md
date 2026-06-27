@@ -284,3 +284,84 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Lesson:**
 - **Don't try to outsmart charon's lifecycle.** Let charon manage loading.
 - The start-scripts option is exactly the right hook.
+## Download bandwidth cap didn't enforce (2026-06-26 → 2026-06-27)
+
+**Symptom:** Zun's iPhone iperf3 download test (5 streams, 10s, 154.65.110.44:5201) showed 84-93 Mbps through the VPN tunnel, even though the cap was supposed to be 40 Mbps download. Speedtest confirmed cap was loose (not tight).
+
+**Root cause: 5 cascading bugs in `quota/bandwidth-monitor.py`:**
+
+### Bug 1 — PREROUTING `ip daddr VIP` never matches
+
+At PREROUTING mangle time, conntrack NAT un-NATs the wire dst AFTER mangle
+runs (mangle priority -150, nat priority -100). Wire dst is still the VPS
+public IP 154.65.110.44, never the VIP 10.99.0.1.
+
+**Diagnostic technique:** Counter rule
+`nft add rule ip mangle prerouting ip daddr VIP counter` — packet counter
+stayed at 0 across full speedtest runs.
+
+### Bug 2 — PREROUTING `ct reply daddr VIP` never matches
+
+VIP is the conntrack ORIGINAL src, not the REPLY dst. For an upload packet
+(saddr=VIP → internet), the conntrack REPLY tuple has dst=internet, not VIP.
+Counter verified = 0.
+
+### Bug 3 — PREROUTING `ip saddr VIP` matches upload but mark lost on xfrm decrypt
+
+Matches outgoing upload packets (saddr=VIP), but xfrm INPUT decrypts and
+creates a NEW SKB that loses the mark. Mark 0x81 counter at POSTROUTING = 0 —
+the mark does not survive the decrypt → re-encrypt cycle.
+
+### Bug 4 — ifb0 ingress redirect was stealing ALL incoming tunnel traffic
+
+The OLD `setup_qdiscs()` added a catch-all u32 filter
+(`match 0/0 → action mirred egress redirect dev ifb0`) on ens3's ingress
+qdisc. This redirected ALL incoming IPsec-decrypted packets to ifb0 BEFORE
+ens3's egress tc could see them. Even with a correct mark rule, traffic
+never reached the egress tc.
+
+**Diagnostic technique:** tcpdump on both ens3 and ifb0 simultaneously:
+`ens3 In IP 10.99.0.1 > ...` then `ifb0 Out IP 10.99.0.1 > ...` — redirect
+was stealing traffic.
+
+### Bug 5 — hex comparison bug in `download_mark_rule_present`
+
+Compared string `f"meta mark set 0x81"` against nft's output
+`meta mark set 0x00000081` (nft zero-pads to 8 hex digits). Present check
+always returned False → daemon added a DUPLICATE rule every 60s poll.
+
+### Bug 6 (post-fix-1) — OUTPUT mangle path bypasses FORWARD rule
+
+After fixing all 5 above, speedtest was capped at 35.6 Mbps but iperf3 was
+still 92 Mbps. Root cause: iperf3 server is a local process. Its TCP replies
+have src=154.65.110.44:5201, dst=Zun's home IP, and go through OUTPUT
+mangle, not FORWARD. The FORWARD rule catches internet → VPS → tunnel traffic
+but misses locally-generated replies to tunnel clients.
+
+**Fixes (commits c5820b9 + a8caa3c):**
+
+| Bug | Fix |
+|---|---|
+| 1, 2, 3 | Use FORWARD mangle `ip daddr VIP` — matches DECRYPTED inner packet, mark survives xfrm re-encrypt to POSTROUTING → ens3 egress → tc class. |
+| 4 | Removed ifb0 redirect from `setup_qdiscs()` (`if INGRESS_SHAPING and False:`). ifb0 qdisc/HTB structure kept but unused. |
+| 5 | Added `_mark_in_nft_output(stdout, mark)` helper using regex `0x0*` prefix match + decimal form fallback. |
+| 6 | Daemon queries `swanctl --list-sas` for each active SA's remote IP, adds parallel mangle OUTPUT rule: `ip daddr REMOTE_IP meta mark set 0x81 comment "bw-dl-output:REMOTE_IP"`. IP rotation safe via `run_iteration()` stale-rule scan. |
+
+**Verified live (zunaid operator account, 40/20 Mbps):**
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+- UL class 1:2: 316 MB / 381k pkts / **185k overlimits / 10k drops**
+- Speedtest.net: **35.6 Mbps down / 38.6 Mbps up** (both at cap)
+- iperf3 download: **36 Mbps** (was 92 before OUTPUT rule fix)
+- No duplicates after 60s poll cycle
+
+**Lessons (logged in MEMORY.md as #211-#219):**
+
+- **#211**: FORWARD mangle is the ONLY correct placement for download-direction mark in `mode=tunnel` VPNs. PREROUTING doesn't work because the decrypted packet isn't there yet (xfrm hasn't consumed the outer packet).
+- **#212**: ifb0 ingress shaping is fundamentally incompatible with netfilter marks because TC ingress runs BEFORE mangle in the packet pipeline. Either shape at egress with a separate mark, or use ifb0 but accept that per-flow shaping needs a different mechanism (e.g. `police` on ingress qdisc).
+- **#213**: nft outputs hex marks with leading zeros (`0x00000081`), but code passed short form (`0x81`). String comparison fails. Always normalize hex representation. Same bug class would affect any per-rule presence check.
+- **#214**: NEVER make changes to a customer record (or any production data) without explicit confirmation. "Fix the cap bug + bump zunaid" requires TWO "yes" responses, not one.
+- **#215**: When fixing a cap, **enumerate all data paths** for the traffic you're capping. Speedtest worked because internet → VPS → tunnel uses the FORWARD path. Locally-responding services (iperf3, future file server, future webapp) use the OUTPUT path. The "fix" needs to cover ALL paths, not just the obvious one.
+- **#216**: When rules depend on user-specific IPs (like Zun's home IP for his tunnel), always note this as a fragility. Hardcoded IPs break silently when ISP rotates the assignment. Query the source of truth (strongSwan SA) dynamically instead.
+- **#217**: When a manual fix works but is brittle, the right move is to make it durable by querying the source of truth at runtime. The daemon already queries `swanctl --list-sas` to find active VIPs — adding remote IP extraction was a 5-line change with no new dependencies.
+- **#218**: Comment format matters for dynamic rules. Used `bw-dl-output:REMOTE_IP` (different prefix from `bw:VIP`) so the OUTPUT cleanup pass can grep by the right pattern and not confuse it with FORWARD/PREROUTING rules.
+- **#219**: When removing stale rules for resources that change identity (like tunnel IPs), always scan the rule list against current state — don't rely on application logic to remember what it added. The grep-based scan in `run_iteration()` handles IP rotation automatically.
