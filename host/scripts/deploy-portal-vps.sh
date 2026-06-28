@@ -235,13 +235,19 @@ echo "=== STEP 7: cache-bust HTML to force Cloudflare re-fetch of static assets 
 # URL, misses cache, and fetches the new file from origin.
 NEW_CACHE_VERSION="${SOURCE_HEAD:0:7}"
 echo "  new cache version: ${NEW_CACHE_VERSION}"
-ssh "${VPS_HOST}" "sudo sed -i -E 's/(\?v=)[0-9.]+/\\1${NEW_CACHE_VERSION}/g' \
+# v1.7.3 — broaden the cache-bust regex to match any ?v=<token> form
+# (hex git SHA, semver N.N.N, placeholder 'BUILD', etc.). The previous
+# `[0-9.]+` matched only digits + dot, which broke on re-deploys when the
+# deployed HTML already had a hex cache-bust from a previous run — only
+# the leading digit was replaced, leaving the rest orphaned (e.g. ?v=3fcc9ca
+# → ?v=096b0a4fcc9ca). `[^"]+` matches any non-quote chars up to the next ".
+ssh "${VPS_HOST}" "sudo sed -i -E 's/(\?v=)[^\"]+/\\1${NEW_CACHE_VERSION}/g' \
     ${VPS_PORTAL_DIR}/www/index.html \
     ${VPS_PORTAL_DIR}/www/portal/index.html"
 echo "  bumped ?v= values in deployed HTML:"
 ssh "${VPS_HOST}" "grep -oE '\\\\?v=[0-9a-f]+' ${VPS_PORTAL_DIR}/www/index.html ${VPS_PORTAL_DIR}/www/portal/index.html" | head -6 | sed 's/^/    /'
 # Re-fetch DEPLOYED_HTML_SHA after the bump (expected to differ from source —
-# by design, since source uses semver ?v=N.N.N but deployed uses ?v=gitsha)
+# by design, since source uses placeholder ?v=BUILD but deployed uses ?v=gitsha)
 DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
 
 echo ""
