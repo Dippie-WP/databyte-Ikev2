@@ -8,6 +8,11 @@
 // Server-side /api/events/stream is live on prod; this restores the consumer
 // that my v1.7.2 deploy had inadvertently overwritten.
 
+// 2026-06-28 notif-reconcile-v1.7.4 — move transient success confirmations
+// (Copied/Saved/Shared/Reset) from showBanner (4.5s top-center) to toast
+// (3s top-right). Errors + security ops (whitelist/unban/deadman) stay on
+// showBanner. Rule documented in function comments.
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
@@ -127,6 +132,8 @@
   const del  = p  => api(p, { method: 'DELETE' });
 
   // v1.2.12 — toast (top-right floating notification)
+  // Use for TRANSIENT SUCCESS confirmations (copies, saves, shares, bulk
+  // actions). 3s auto-dismiss, top-right, unobtrusive.
   function toast(msg, kind) {
     const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok') }, msg);
     document.body.appendChild(t);
@@ -249,7 +256,10 @@
     return e;
   }
 
-  // Banner: fixed top-center error/info message
+  // Banner: fixed top-center persistent message
+  // Use for ERRORS + SECURITY OPERATION RESULTS (whitelist, unban, deadman).
+  // 4.5s auto-dismiss, top-center, demands operator attention.
+  // (Success confirmations for transient actions live in toast() above.)
   let bannerTimer = null;
   function showBanner(msg, kind) {
     // kind: 'err' | 'ok'
@@ -1102,7 +1112,7 @@
                 } else {
                   selectCustomer(customerId);
                 }
-                showBanner('Device metadata saved', 'green');
+                toast('Device metadata saved', 'ok');
               } catch (e) {
                 showBanner('Save failed: ' + (e && e.message || e), 'red');
               }
@@ -1209,7 +1219,7 @@
       if (r.secret_restored) {
         msg += ' · EAP secret restored for ' + (r.secret_devices || []).join(', ');
       }
-      showBanner(msg, 'ok');
+      toast(msg, 'ok');
       await loadCustomers();
       if (S.selectedId === id) S.detail = await get('/api/customers/' + id);
       render();
@@ -2394,7 +2404,7 @@
           title: 'Copy',
           onclick: () => {
             navigator.clipboard.writeText(String(value)).then(() => {
-              showBanner('Copied ' + label, 'ok');
+              toast('Copied ' + label, 'ok');
             }).catch(() => {});
           },
         }, '⧉'));
@@ -2454,7 +2464,7 @@
                   cls: 'vp-btn vp-btn-primary',
                   onclick: () => {
                     navigator.clipboard.writeText(installerData.powershell_cmd).then(() => {
-                      showBanner('Copied PowerShell one-liner', 'ok');
+                      toast('Copied PowerShell one-liner', 'ok');
                     }).catch(() => { showBanner('Copy failed', 'err'); });
                   },
                 }, '⧉ Copy PowerShell one-liner'),
@@ -2611,11 +2621,11 @@
               title: 'databyte VPN \u2014 ' + (ctx.c.display_name || ctx.c.name),
               text,
             });
-            showBanner('Shared', 'ok');
+            toast('Shared', 'ok');
           } catch (e) {
             // User cancelled or share failed \u2014 fall back silently.
             if (e && e.name !== 'AbortError') {
-              try { await navigator.clipboard.writeText(text); showBanner('Share failed \u2014 copied to clipboard', 'ok'); }
+              try { await navigator.clipboard.writeText(text); toast('Share failed \u2014 copied to clipboard', 'ok'); }
               catch (_) { showBanner('Share failed', 'err'); }
             }
           }
@@ -2630,7 +2640,7 @@
       onclick: async () => {
         try {
           await navigator.clipboard.writeText(text);
-          showBanner('Copied full config to clipboard', 'ok');
+          toast('Copied full config to clipboard', 'ok');
         } catch (_) {
           // Last-resort fallback for very old browsers without Clipboard API
           // v1.4.0 — use .vp-offscreen class instead of inline style (strict CSP).
@@ -2638,7 +2648,7 @@
           ta.value = text;
           ta.className = 'vp-offscreen';
           document.body.appendChild(ta); ta.select();
-          try { document.execCommand('copy'); showBanner('Copied full config to clipboard', 'ok'); }
+          try { document.execCommand('copy'); toast('Copied full config to clipboard', 'ok'); }
           catch (_) { showBanner('Copy failed \u2014 select text manually', 'err'); }
           finally { document.body.removeChild(ta); }
         }
