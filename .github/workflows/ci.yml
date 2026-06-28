@@ -202,11 +202,18 @@ jobs:
 
       - name: Run DB integrity check
         run: |
+          # set +e: GitHub Actions uses `set -e` by default, which would
+          # kill the script the moment python exits 1 (drift detected)
+          # and prevent the harness check from running. We need to
+          # capture the exit code BEFORE bash can react to it.
+          set +e
           python3 scripts/check_db_integrity.py --db /tmp/test_integrity.db
-          # Should FAIL on purpose: orphan-user + no-devices-customer. Test harness
-          # must catch failures so the script is proven to detect drift.
-          if [ $? -ne 1 ]; then
-            echo "::error::Integrity check should have failed on seeded drift (exit 1 expected)"
+          rc=$?
+          set -e
+          # Should FAIL on purpose: orphan-user + no-devices-customer.
+          # Test harness must catch this failure to prove the script detects drift.
+          if [ "$rc" -ne 1 ]; then
+            echo "::error::Integrity check should have failed on seeded drift (exit 1 expected, got $rc)"
             exit 1
           fi
           echo "Integrity check correctly detected seeded drift."
@@ -238,9 +245,12 @@ jobs:
             VALUES (3, 2, 3, 'no-devices-laptop', 1, 1700000000, 1700000000);
           SQL
 
+          set +e
           python3 scripts/check_db_integrity.py --db "$TEST_DB"
-          if [ $? -ne 0 ]; then
-            echo "::error::Integrity check should pass after drift fix (exit 0 expected)"
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Integrity check should pass after drift fix (exit 0 expected, got $rc)"
             exit 1
           fi
           echo "Integrity check correctly passes after drift fix."
