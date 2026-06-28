@@ -1,6 +1,10 @@
 /* databyte VPN Portal — clean dark/light CSS
    All classes prefixed vp- to avoid collisions.
-   CSS variables for theme: dark=default, light via body[data-theme=light] */
+   CSS variables for theme: dark=default, light via body[data-theme=light]
+
+   v1.7.1 — 2026-06-28 — portal.css trailing HTML removed (was 53 lines,
+   now 40; MD5 c54fe9e2 → 8dd906bd). 0 visual change; pre-existing browser
+   tolerance of invalid CSS masked the bug. */
 
 /* ─── Tokens ──────────────────────────────────────────── */
 :root {
