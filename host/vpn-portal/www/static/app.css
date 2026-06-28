@@ -915,3 +915,26 @@ tr:last-child td { border-bottom: none; }
   word-break: break-all;
   overflow-x: auto;
 }
+
+/* ─── v1.9.0-sse — SSE connection badge in nav ───────────────── */
+.vp-sse-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: default;
+  user-select: none;
+  transition: background 0.2s;
+}
+.vp-sse-on {
+  background: rgba(46, 160, 67, 0.18);
+  color: var(--green);
+}
+.vp-sse-off {
+  background: var(--vp-s2);
+  color: var(--vp-text3);
+}

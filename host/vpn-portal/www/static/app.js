@@ -4,6 +4,10 @@
 
 // 2026-06-28 modal-lifecycle-v1.7.2 — stack + focus trap + ESC + focus restore
 
+// 2026-06-28 sse-restore-v1.9.0-sse — restore EventSource client + SSE badge in nav.
+// Server-side /api/events/stream is live on prod; this restores the consumer
+// that my v1.7.2 deploy had inadvertently overwritten.
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
@@ -336,6 +340,8 @@
   async function doLogout() {
     try { await post('/api/logout'); } catch {}
     S.user = null;
+    // v1.9.0-sse — close SSE connection on logout.
+    disconnectSSE();
     render();
   }
 
@@ -359,6 +365,13 @@
     }
     const right = el('div', { cls: 'vp-nav-right' });
     right.appendChild(el('span', { cls: 'vp-nav-user' }, S.user || ''));
+    // v1.9.0-sse — SSE connection badge. Green when connected, grey when
+    // disconnected. Reads _sseState inline at render time so the badge is
+    // correct on every render() (which rebuilds the nav from scratch).
+    right.appendChild(el('span', {
+      id: 'vp-sse-badge',
+      cls: 'vp-sse-badge ' + (typeof _sseState !== 'undefined' && _sseState.connected ? 'vp-sse-on' : 'vp-sse-off'),
+    }, (typeof _sseState !== 'undefined' && _sseState.connected ? '●' : '○') + ' SSE'));
     right.appendChild(el('button', { id: 'theme-btn', cls: 'vp-theme-btn', onclick: toggleTheme, title: 'Toggle theme' }, '☀'));
     right.appendChild(el('button', { cls: 'vp-btn vp-btn-ghost vp-btn-sm', onclick: doLogout }, 'Logout'));
     nav.appendChild(right);
@@ -2708,6 +2721,8 @@
       try {
         await loadDashboard();
         S.user = 'admin';
+        // v1.9.0-sse — open SSE stream after login. Replaces setInterval polls.
+        connectSSE();
       } catch {
         S.user = null;
       }
@@ -2722,6 +2737,184 @@
     try {
       showBanner('JS Error: ' + (e.message || 'unknown'), 'err');
     } catch {}
+  });
+
+  // ─── v1.9.0-sse — Server-Sent Events stream ─────────────────────────────
+  // One persistent EventSource connection pushes live leases / customers /
+  // pools every 2s, replacing setInterval polling. Verified live: SSE
+  // connects, snapshots stream, fmtBytes MB shows 2-decimal for visible
+  // movement.
+  //
+  // Why this works:
+  //   - SSE pushes server->client over a single HTTP connection
+  //   - EventSource auto-reconnects on disconnect (built-in retry)
+  //   - Bypasses Chrome's background-tab setInterval throttling
+  //   - Server-side: /api/events/stream (FastAPI StreamingResponse)
+  //   - nginx: proxy_buffering off + X-Accel-Buffering: no for that path
+  //
+  // Fallback: if SSE fails to connect or stays disconnected, the existing
+  // setIntervals (startSessionsAutoRefresh, etc.) still poll as degraded.
+  const SCRIPT_VERSION = 'v1.9.0-sse';
+  console.log('[vpn-portal]', SCRIPT_VERSION, 'loaded at', new Date().toISOString());
+
+  function refreshActivePage() {
+    console.log('[vpn-portal] refreshActivePage fired, page=', S?.page);
+    if (!S || !S.user) return;
+    const p = S.page;
+    try {
+      if (p === 'sessions') {
+        loadSessions().then(render).catch(()=>{});
+      } else if (p === 'dashboard') {
+        loadDashboard().then(render).catch(()=>{});
+      } else if (p === 'customers') {
+        loadCustomers().then(render).catch(()=>{});
+        loadActiveSessions().then(render).catch(()=>{});
+        if (S.selectedId) {
+          get('/api/customers/' + S.selectedId).then(d => {
+            S.detail = d;
+            const card = document.getElementById('vp-customer-detail');
+            if (card) {
+              card.innerHTML = '';
+              card.appendChild(renderCustomerDetail());
+            }
+          }).catch(()=>{});
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshActivePage();
+  });
+  window.addEventListener('focus', refreshActivePage);
+
+  // ─── SSE: live data stream (v1.9.0) ─────────────────────────────────
+  let _sse = null;
+  let _sseReconnectDelay = 1000;
+  let _sseSnapshotCount = 0;
+
+  function connectSSE() {
+    if (_sse) { try { _sse.close(); } catch {} _sse = null; }
+    try {
+      _sse = new EventSource('/api/events/stream', { withCredentials: true });
+    } catch (e) {
+      console.warn('[vpn-portal] EventSource construct failed:', e);
+      scheduleSSEReconnect();
+      return;
+    }
+    _sse.onopen = () => {
+      console.log('[vpn-portal] SSE connected, version=', SCRIPT_VERSION);
+      _sseReconnectDelay = 1000;
+      _sseState.connected = true;
+      _sseState.lastChange = Date.now();
+      updateSSEIndicator();
+    };
+    _sse.onmessage = (e) => {
+      try { applySnapshot(JSON.parse(e.data)); } catch (err) {
+        console.warn('[vpn-portal] SSE onmessage parse failed:', err);
+      }
+    };
+    _sse.addEventListener('snapshot', (e) => {
+      try { applySnapshot(JSON.parse(e.data)); } catch (err) {
+        console.warn('[vpn-portal] SSE snapshot parse failed:', err);
+      }
+    });
+    _sse.onerror = () => {
+      _sseState.connected = false;
+      _sseState.lastChange = Date.now();
+      updateSSEIndicator();
+      if (_sse && _sse.readyState === EventSource.CLOSED) {
+        scheduleSSEReconnect();
+      }
+    };
+  }
+
+  function scheduleSSEReconnect() {
+    setTimeout(() => { if (S.user) connectSSE(); }, _sseReconnectDelay);
+    _sseReconnectDelay = Math.min(_sseReconnectDelay * 2, 30000);
+  }
+
+  function disconnectSSE() {
+    if (_sse) { try { _sse.close(); } catch {} _sse = null; }
+    _sseState.connected = false;
+    _sseState.lastChange = Date.now();
+    updateSSEIndicator();
+  }
+
+  // Apply a snapshot to S and re-render only the pages that show SSE data.
+  function applySnapshot(d) {
+    _sseSnapshotCount++;
+    if (!d || typeof d !== 'object') return;
+    // Update customers (quota fields) — merge by id
+    if (Array.isArray(d.customers)) {
+      const byId = new Map((S.customers || []).map(c => [c.id, c]));
+      for (const c of d.customers) {
+        const existing = byId.get(c.id);
+        if (existing) {
+          existing.data_used_bytes = c.used_bytes != null ? c.used_bytes : c.data_used_bytes;
+          existing.data_limit_bytes = c.quota_bytes != null ? c.quota_bytes : c.data_limit_bytes;
+          existing.over_quota = c.over_quota;
+          existing.pct = c.pct;
+          existing.used_bytes = c.used_bytes;
+          existing.quota_bytes = c.quota_bytes;
+        } else {
+          byId.set(c.id, c);
+        }
+      }
+      S.customers = Array.from(byId.values());
+    }
+    // Update active-session counts from leases
+    if (Array.isArray(d.leases)) {
+      const counts = {};
+      for (const l of d.leases) {
+        if (l.online && l.customer_id) {
+          counts[l.customer_id] = (counts[l.customer_id] || 0) + 1;
+        }
+      }
+      S.activeSessions = counts;
+    }
+    // Customer detail (if open) — update quota fields
+    if (S.detail && Array.isArray(d.customers)) {
+      const live = d.customers.find(c => c.id === S.detail.id);
+      if (live) {
+        S.detail.data_used_bytes = live.used_bytes;
+        S.detail.used_bytes = live.used_bytes;
+        S.detail.pct = live.pct;
+        S.detail.over_quota = live.over_quota;
+      }
+    }
+    _sseState.connected = true;
+    _sseState.lastChange = Date.now();
+    updateSSEIndicator();
+    if (S.page === 'sessions' || S.page === 'customers' || S.page === 'dashboard') {
+      render();
+    }
+  }
+
+  const _sseState = { connected: false, lastChange: 0 };
+  function updateSSEIndicator() {
+    const badge = document.getElementById('vp-sse-badge');
+    if (!badge) return;
+    if (_sseState.connected) {
+      badge.textContent = '● SSE';
+      badge.className = 'vp-sse-badge vp-sse-on';
+      badge.title = 'Live SSE stream connected (' + _sseSnapshotCount + ' snapshots received)';
+    } else {
+      badge.textContent = '○ SSE';
+      badge.className = 'vp-sse-badge vp-sse-off';
+      badge.title = 'SSE disconnected — falling back to polling';
+    }
+  }
+
+  // v1.8.3 — pageshow fires when page is restored from bfcache. Re-arm SSE.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+      try {
+        if (typeof startDashboardAutoRefresh === 'function' && S?.page === 'dashboard') startDashboardAutoRefresh();
+        if (typeof startActiveSessAutoRefresh === 'function' && S?.page === 'customers') startActiveSessAutoRefresh();
+        if (typeof startSessionsAutoRefresh === 'function' && S?.page === 'sessions') startSessionsAutoRefresh();
+      } catch {}
+      refreshActivePage();
+    }
   });
 
   init();
