@@ -23,6 +23,12 @@
 #
 # Zun hard rule (2026-06-25): NEVER deploy to LXC 903 from this script.
 # Production = VPS ONLY. LXC 903 is OFF LIMITS.
+#
+# v1.7.5 (2026-06-28): Step 6 SHA verification now uses `sudo -n sha256sum`
+# so the check works regardless of deploy-target file mode. Previously a
+# `sudo cp` of a root-owned backup could leave files at 0640, causing
+# sha256sum to silently return the literal string "sha256sum:" (its error
+# message prefix) as the SHA, triggering a bogus MISMATCH failure.
 
 set -euo pipefail
 
@@ -122,7 +128,8 @@ if [[ $DRY_RUN -eq 1 ]]; then
     # Sample diff for the 4 key files
     for f in app.py www/static/app.js www/static/app.css www/index.html; do
         src_sha="$(sha256sum "${SOURCE_DIR}/${f}" | awk '{print $1}')"
-        dep_sha="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/${f}" 2>/dev/null | awk '{print $1}')"
+        # v1.7.5 — sudo -n sha256sum for same reason as Step 6 (file may be 0640)
+        dep_sha="$(ssh "${VPS_HOST}" "sudo -n sha256sum ${VPS_PORTAL_DIR}/${f}" 2>/dev/null | awk '{print $1}')"
         if [[ "$src_sha" == "$dep_sha" ]]; then
             echo "    ✓ ${f}: would be SKIPPED (sha256 match)"
         else
@@ -194,10 +201,19 @@ fi
 echo ""
 echo "=== STEP 6: verify deployed SHAs match source ==="
 MISMATCH=0
-DEPLOYED_PY_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/app.py" | awk '{print $1}')"
-DEPLOYED_JS_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/static/app.js" | awk '{print $1}')"
-DEPLOYED_CSS_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/static/app.css" | awk '{print $1}')"
-DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
+# v1.7.5 — use sudo -n sha256sum so the check works regardless of file mode.
+# Symptom of the bug: when an earlier deploy (`sudo cp` of a root-owned
+# backup) leaves deploy-target files at mode 0640 (`-rw-r-----`), the SSH
+# user (debian) can't read them. sha256sum prints "Permission denied" to
+# stderr and "sha256sum: " to stdout — awk then captures the literal string
+# "sha256sum:" as the SHA, and the comparison below triggers a bogus MISMATCH.
+# Verified live on 2026-06-28 by `chmod 640 /opt/vpn-portal/app.py` and
+# re-running this command — produced `DEPLOYED_PY_SHA=sha256sum:`.
+# Adding `sudo -n` matches the pattern already used by Steps 3, 4, 7, 9.
+DEPLOYED_PY_SHA="$(ssh "${VPS_HOST}" "sudo -n sha256sum ${VPS_PORTAL_DIR}/app.py" | awk '{print $1}')"
+DEPLOYED_JS_SHA="$(ssh "${VPS_HOST}" "sudo -n sha256sum ${VPS_PORTAL_DIR}/www/static/app.js" | awk '{print $1}')"
+DEPLOYED_CSS_SHA="$(ssh "${VPS_HOST}" "sudo -n sha256sum ${VPS_PORTAL_DIR}/www/static/app.css" | awk '{print $1}')"
+DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sudo -n sha256sum ${VPS_PORTAL_DIR}/www/index.html" | awk '{print $1}')"
 echo "  deployed app.py:      ${DEPLOYED_PY_SHA}"
 echo "  deployed app.js:      ${DEPLOYED_JS_SHA}"
 echo "  deployed app.css:     ${DEPLOYED_CSS_SHA}"
