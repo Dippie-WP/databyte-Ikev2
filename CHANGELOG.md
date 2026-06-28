@@ -704,6 +704,187 @@ design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
   the v1.2.6 migration handles the column change (DEFAULT 2 → DEFAULT 1)
   and the data cleanup. Safe to run on top of a 5C.5-already-applied DB.
 
+---
+
+### v1.3.1 — 2026-06-21
+
+**Operator session cookie hardening + customer-portal rate-limit tighten.**
+
+- `portal_auth.py`: operator sessions now use a 1-hour sliding-window TTL (`PORTAL_TTL=3600s`) instead of 30-day fixed. Bug #1 from friend-test session.
+- Customer portal login: lockout after 5 fails / IP / minute (was 5 / IP / 5 min). Brute-force hardening for `/api/portal/login`.
+
+### v1.3.2 — 2026-06-21
+
+**In-portal EAP credential rotation (Bug #4).**
+
+- `POST /api/portal/rotate` — customer can rotate their own EAP secret from `/portal/` settings. Argon2-style password validation, `swanctl --load-creds` via VICI URI, audit-logged.
+- Old secret remains valid for 60s grace window (for in-flight connections), then charon reloads creds.
+- Smoke test added (operator + customer). Bug #4 from friend-test session.
+
+### v1.4.0 — 2026-06-22
+
+**Production portal live at `myvpn.databyte.co.za`. Audit-driven hardening (CP1-CP5).**
+
+1. **Cloudflare Origin Cert + nginx + gunicorn** in front of FastAPI on the Xneelo VPS (`vpn-prod-01`, 154.65.110.44). No public TLS termination on the VPS — CF edge terminates, Origin Cert authenticates.
+2. **Strict-CSP refactor** — removed all `unsafe-inline` style/script. Uses CSSOM `setProperty('--pct', ...)` for progress bars. 0 CSP violations on operator + customer portals.
+3. **No-cache HTML** on `/` and `/portal/` — prevents stale-after-deploy cache chain (CP6).
+4. **Bug #2** — explicit `customers.user_id` FK to `users.id` (was ambiguous join via `device_name`). Commit `a70e866`. Fixes the customer-modal save bug.
+5. **7 audit fixes shipped:** firewall INPUT TCP 80/443, customers schema (billing_id+email columns), SSH known_hosts drop-in for `ProtectSystem=strict`, dashboard `active_bans: -1` sentinel, hardcoded `.98` removal, Security tab hidden on VPS, cache-bust on app.js.
+6. **Homelab/VPS separation:** app.js + templates now reference `myvpn.databyte.co.za` (not hardcoded LAN IP). Lab portal (LXC 903) stays on `192.168.10.98`; prod portal (VPS) on `myvpn.databyte.co.za`. INTENTIONALLY SEPARATE — no sync.
+
+### v1.4.5 — 2026-06-23
+
+**STEP 8.5 customer-facing audit tool + structural anti-lie fix.**
+
+- `tools/customer-facing-audit.js` (commit `b9dd9b0`) — headless-browser run that creates a customer, generates an installer link, validates it, deletes the customer, and verifies the deletion. Anti-lie: catches drift between admin UI and what a real customer would see.
+- STEP 1.5 in `tools/deploy-portal-vps.sh` — `node --check` on `app.js` and `portal.js` BEFORE deploy (catches syntax errors that would crash the production portal).
+- Tracker entry added: "never claim shipped without actual end-to-end test" (lesson #166).
+
+### v1.4.6 — 2026-06-23
+
+**Live pool-lease source + EAP-aware SA parser.**
+
+- Sessions tab now reads `swanctl --list-pools --leases` (live) instead of stale DB `devices.last_seen_vip`. Drift-proof.
+- SA parser now joins via `users.name` (EAP identity) instead of `device_name`. Was breaking for Windows clients where IKE identity and device_name diverge.
+- Operator dashboard shows real-time VIP per active SA.
+
+### v1.5.0 — 2026-06-23
+
+**`speed_plan` at customer creation (per-customer, NOT tier-driven).**
+
+- New `SPEED_PLANS` constant in `app.py`: `standard` (20/20 Mbps) and `asymmetric_40_20` (40 down / 20 up). Per-customer at creation time.
+- Create-customer modal adds speed_plan dropdown.
+- Tiers drive **data quota only** — NOT bandwidth. Per-tier bandwidth mapping was nuked (Zun, 2026-06-25 05:33 UTC).
+- Precedence: explicit `bandwidth_down_mbps/up_mbps` > `speed_plan` preset > default `standard`.
+- `tests/test_customer_lifecycle.py` — 10 new tests covering speed_plan handling.
+
+### v1.5.1 — 2026-06-23
+
+**`--vp-s1` CSS variable fix (modal background bug).**
+
+- `www/static/app.css` was missing `--vp-s1` variable. Modal backgrounds were transparent.
+- Found via 5-question gate when friend reported "modal looks weird."
+
+### v1.5.2 — 2026-06-23
+
+**Deploy script upgrade: tar+ssh fallback, --dry-run, STEP 8 app.css check.**
+
+- `tools/deploy-portal-vps.sh` — tar+ssh fallback when rsync unavailable.
+- `--dry-run` mode shows file diff before deploy.
+- STEP 8 now also greps `app.css` for CSS-only fixes (track CSS SHA in `.last_deployed`).
+- `tools/check-portal-deployed.sh` — anti-lie verifier: compares deployed file SHAs to git SHAs.
+
+### v1.6.0 — 2026-06-24
+
+**Windows PowerShell auto-installer (HARDLOCK canonical 3-line block).**
+
+- Customer create modal → "Generate Installer Link" button → base64-packed URL with slug + token → customer pastes 3 lines into PowerShell.
+- Installer connects to `https://myvpn.databyte.co.za/`, validates token, downloads canonical `setup-databyte-vpn.ps1`, runs it. CA cert imported to `LocalMachine\Root`. EAP-MSCHAPv2 pre-configured in profile XML — no dialog.
+- Bug #2 (missing `customers` DB migration on deploy) fixed — schema scripts now in `host/vpn-portal/portal_customers_extensions.sql` + idempotent `apply_portal_schema.sh`.
+- Canonical `setup-databyte-vpn.ps1` v2.0.0 (commit `72e9bef`). All deprecated versions (`setup-windows-vpn.ps1`, `connect-databyte-vpn.ps1`) archived.
+- Lesson #169: HARDLOCK on canonical installer scripts — no `-zun`/`-v2`/`-fix` suffixes.
+
+### v1.6.1 — 2026-06-24
+
+**Installer: ship the canonical 3-line block instead of iex (irm URL).**
+
+- Was using `iex (irm https://...)` which leaked the install URL. Now ships the 3-line block: `[Net.ServicePointManager]::SecurityProtocol=...; Invoke-WebRequest ...; powershell -ExecutionPolicy Bypass -File ...`.
+- All Windows client scripts use `vpn-portal.databyte.co.za` for installer download (v2.4.0+).
+
+### v1.6.2 — 2026-06-24
+
+**Online-only lease filter on Sessions tab.**
+
+- Was showing all `devices.last_seen_vip` rows including offline ones. Now joins via live `swanctl --list-pools --leases`. Operator sees actual active SAs only.
+
+### v1.6.3 — 2026-06-25
+
+**Dashboard auto-refresh every 30s.**
+
+- Was manual-refresh-only. Now polls `/api/health` + `/api/customers` every 30s, re-renders counts and quota bars without page reload. Bug found when operator missed a quota cut because they were looking at stale data.
+
+### v1.6.4 — 2026-06-25
+
+**Show allocated bandwidth in customer detail modal.**
+
+- Modal now shows `bandwidth_down_mbps` / `bandwidth_up_mbps` from the customer row, not just the speed_plan name. Closes the "what did the operator actually set?" gap.
+
+### v1.6.5 — 2026-06-25
+
+**`None`-string bug fix in `db_query` + modal defense.**
+
+- SQLite returned `'None'` (Python str) instead of NULL when a column was NULL. Caused "show bandwidth as 'None Mbit/s'" bug on customer modal. `db_query` now coerces str `'None'` → None → proper rendering.
+
+### v1.6.6 — 2026-06-25
+
+**Move Customers page Refresh button to top.**
+
+- Was at bottom of the page — operator kept missing it. Now top-right next to search box.
+
+### v1.6.7 — 2026-06-25
+
+**`reset_quota` now restores KILLED secret after hard cut.**
+
+- Bug: when a customer hit 100% cut, the EAP secret in `rw-eap.conf` was replaced with `KILLED-<random>`. Operator reset DB quota, but KILLED secret remained — customer couldn't reconnect.
+- Fix: `reset_quota` now reads the customer's `eap_identity` from the DB (via JOIN devices → users), looks up the matching `eap-<id>` block in `rw-eap.conf`, and restores the secret from pre-cut backup before reload.
+- 3 regression tests in `tests/test_reset_quota_secret_restore.py`. Bug-catching test FAILS without fix, PASSES with.
+
+### v1.7.0 — 2026-06-26
+
+**`speed_plan` in PATCH + Edit modal dropdown (per Zun #22367).**
+
+- `PATCH /api/customers/{id}` now accepts `speed_plan` and re-derives `bandwidth_down_mbps`/`bandwidth_up_mbps` from the plan (unless explicit values provided).
+- Edit modal adds speed_plan dropdown — operator can change plan without re-creating customer.
+- Deployed to `vpn-prod-01` 2026-06-26.
+
+### v1.7.0-recovered — 2026-06-26
+
+**Recovery baseline after 2026-06-27 main-branch corruption incident.**
+
+- See `docs/INCIDENT-2026-06-27.md`. `main` branch was force-pushed from `main-zun-v1.4.0` (broken historical state) back to working state at `01a475f`. Tag `v1.7.0-recovered` cut at the working commit.
+- Security review summary at `docs/SECURITY-REVIEW-SUMMARY.md`: 3 CRITICAL findings all fixed.
+
+### v1.8.0 — 2026-06-27
+
+**Quota-monitor pool-LEASE attribution + offline-lease UI + regenerate-password button.**
+
+1. **Pool-LEASE attribution:** quota-monitor now reads `swanctl --list-pools --leases` for live VIP→identity mapping. Was reading stale `devices.last_seen_vip`. Drift-proof.
+2. **Offline lease UI:** Customers page now shows customers with stale VIPs in a separate "offline" section with last-seen timestamp.
+3. **Regenerate password button:** Operator can regenerate customer EAP password from Edit modal. Argon2-style validation, charon reload, audit log.
+
+### v1.8.1 — 2026-06-27
+
+**Customer-detail auto-refresh now re-renders Usage card + progress bar.**
+
+- Was refreshing the table but not the detail modal. Operator opened detail, data went stale.
+
+### v1.8.2 — 2026-06-27
+
+**Force refresh on tab focus via Page Visibility API.**
+
+- When operator tabs back to the portal, data is re-fetched. Avoids stale views after long absence.
+
+### v1.8.3 — 2026-06-27
+
+**Shorter polling intervals + bfcache pageshow + dev console markers.**
+
+- Polling reduced from 30s → 15s on dashboard, 60s → 30s on customers list.
+- `pageshow` event from bfcache also triggers refresh (Safari/iOS).
+- Dev console markers (`[v1.8.3]`) for quick version verification in browser console.
+
+### v1.9.0-sse — 2026-06-27
+
+**Server-Sent Events replace `setInterval` polling for live data.**
+
+- Single SSE connection from browser → portal. Server pushes events for: active SA changes, quota updates, customer count, charon health.
+- Eliminates N concurrent `setInterval` polls (was wasteful — 30s × 5 tabs × 3 endpoints).
+- Live bandwidth meter now updates in <1s of actual change (was up to 30s lag).
+- Fallback to `setInterval(60s)` if SSE fails.
+
+---
+
+**Note on stale v2.x tags:** `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` exist on origin but pre-date the 2026-06-26 recovery baseline (they point to commits 2026-06-24/25, before `v1.7.0-recovered` was cut 2026-06-26). They are **orphaned** — do not build from them. Future cleanup: delete these tags.
+
 ## [Released]
 
 ### v1.2.4 — 2026-06-20

@@ -1,15 +1,15 @@
 # strongswan-vpn-gateway
 
-Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite, server-cert + EAP-MSCHAPv2 with PSK fallback. v1.2 lock-in, both gates green.
+Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite, server-cert + EAP-MSCHAPv2 with PSK fallback. Latest code tag `v1.9.0-sse`, latest release `v1.7.0-recovered`. 5A / 5B / 5C green; pre-launch commercial stack live on VPS.
 
 [![CI](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/Dippie-WP/databyte-Ikev2)](https://github.com/Dippie-WP/databyte-Ikev2/releases)
 
 ## What this is
 
-A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices connect from anywhere over 5G/WiFi. Phase 5B added a hard-cut data cap layer and customer/operator portals in pre-launch form. Commercial customer onboarding is gated on 5D (currently in pre-launch prep).
+A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices + commercial customers connect from anywhere over 5G/WiFi. Phases 5A (foundation), 5B (quota layer), and 5C (portal surface) are GREEN. 5D billing/payment work remains SHELVED, but the pre-launch commercial stack (per-customer bandwidth caps, customer portal, Windows installer, billing IDs) is **LIVE** on the Xneelo Johannesburg VPS at `https://myvpn.databyte.co.za/` — see [docs/VPS-XNEELO-DEPLOY.md](docs/VPS-XNEELO-DEPLOY.md).
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
-- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — tagged `v1.2.15` (2026-06-22, 5C portal + 5B quota layer)
+- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — latest code tag `v1.9.0-sse` (2026-06-27, SSE live-data), latest release `v1.7.0-recovered` (2026-06-26, recovery baseline). See `CHANGELOG.md` for v1.3.0 → v1.9.0-sse history.
 - **StrongSwan version:** 6.0.7 (CVE-2026-47895 patched)
 - **Auth:** Server-cert (RSA-2048 + RSASSA-PSS) + EAP-MSCHAPv2 (primary) and PSK (fallback)
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via attr-sql + SQLite
@@ -268,11 +268,15 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 
 | Phase | Description | Gate |
 |---|---|---|
-| **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, reconnect, MSS clamp, server cert RSASSA-PSS, monitoring, backup | ✅ **GREEN (signed off 2026-06-19)** |
+| **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, reconnect, MSS clamp, server cert, monitoring, backup | ✅ **GREEN (signed off 2026-06-18)** |
 | **5B** | Quota layer (iptables-legacy per-VIP byte counters + 60s monitor daemon + 80% warn + 100% hard cut) | ✅ **GREEN (signed off 2026-06-19, v1.1.0 tagged)** |
-| **5C** | Surface (status FastAPI + Grafana vpn-quota dashboard + backup verify) | ⏳ Gated on 5B green |
-| **5D** | Commercial (pricing, payment-triggered reset) | 🔒 Shelved (single-operator only) |
-| **5H** | HA + LB (2x v1.1 + keepalived VRRP, shared DB) | ⏳ Queued for after 5B sign-off |
+| **5C.1+5C.2** | Self-service portal (FastAPI + vanilla JS) — customer + operator | ✅ **GREEN (v1.2, then v1.3.0 customer portal at `/portal/`)** |
+| **5C.3** | Grafana `strongswan-quota` dashboard | ✅ **GREEN (v1.2.2)** |
+| **5C.4** | ~~RustFS daily backup verify~~ | ⛔ **CANCELLED (2026-06-20)** — replaced by PBS full-LXC backup |
+| **5C.5/5C.6** | ~~Self-service / multi-device~~ | ⛔ **REVERTED / SHELVED (v1.2.6)** — strongSwan 1-identity-1-VIP blocks per-device under EAP-MSCHAPv2 |
+| **5D (billing)** | Commercial billing / payment-triggered reset | 🔒 **SHELVED** (single-operator scope locked 5A.14, 2026-06-19) |
+| **5D (pre-launch)** | Per-customer bandwidth, customer portal, Windows installer, billing IDs | ✅ **LIVE on VPS** (rolled up under v1.4.0 → v1.7.0-recovered, deployed 2026-06-22 → 2026-06-26) |
+| **5H** | HA + LB (2x v1.9 + keepalived VRRP + shared DB) | ⏳ **NOT STARTED** — plan at `docs/PLAN-5H-HA-LB.md` |
 
 ## CI
 
@@ -281,10 +285,20 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 
 ## Versions
 
-- **v1.0 (2026-06-19):** EAP + attr-sql + sticky VIPs, public-path tested on 5G, monitoring via Prometheus, backup to RustFS
+- **v1.0 (2026-06-18):** EAP + attr-sql + sticky VIPs, public-path tested on 5G, monitoring via Prometheus, backup to RustFS
 - **v1.1.0 (2026-06-19):** Quota layer (5B) — iptables-legacy per-VIP byte counters, 60s monitor daemon, 80% warn, 100% hard cut. **Proven with 3 end-to-end runs using real iOS app traffic, all cut correctly**
-- **v1.2** (image tag `6.0.7-mschapv2-attrsql`): same code as v1.1
+- **v1.2** (image tag `6.0.7-mschapv2-attrsql`): same code as v1.1, locked image
 - **v1.1** (image tag `6.0.7-mschapv2`, still in registry): PSK + EAP, no VIP pinning — **not a valid fallback**, needs static pool in `strongswan.conf` to work at all
+- **v1.2.x (2026-06-20 → 2026-06-21):** device-info UI, VICI parser hardening, reboot fixes, self-service portal polish. See `CHANGELOG.md`.
+- **v1.3.0 (2026-06-21):** Customer portal at `/portal/` (lab), operator dashboard polish v1.2.11-v1.2.14 rolled up. 10-isolation-guarantee cookie separation.
+- **v1.4.0 → v1.4.6 (2026-06-22 → 2026-06-23):** Bug #2 explicit `customers.user_id` FK, homelab/VPS separation, audit fixes (CP4-CP6), strict-CSP refactor, security headers, production portal live at `myvpn.databyte.co.za`.
+- **v1.5.0 → v1.5.2 (2026-06-23 → 2026-06-24):** `speed_plan` at customer creation (per-customer, not tier-driven), vp-s1 CSS variable fix, deploy-script upgrades.
+- **v1.6.0 → v1.6.7 (2026-06-24 → 2026-06-25):** Windows PowerShell auto-installer (HARDLOCK canonical 3-line block), online-only lease filter, dashboard auto-refresh, customer-detail bandwidth display, `None`-string bug fix, Refresh-button move, KILLED-secret restore on reset.
+- **v1.7.0 (2026-06-26):** `speed_plan` in PATCH + Edit modal dropdown (per Zun #22367). Deployed to `vpn-prod-01`. **Release tag:** `v1.7.0-recovered` (baseline after 2026-06-27 recovery).
+- **v1.8.0 → v1.8.3 (2026-06-27):** quota-monitor pool-LEASE attribution, offline-lease UI, regenerate-password button, focus-refresh via Page Visibility API, customer-detail auto-refresh.
+- **v1.9.0-sse (2026-06-27):** Server-Sent Events replace `setInterval` polling for live data.
+
+**Note:** v2.3.0 / v2.6.0 / v2.7.0-v2.7.2 tags exist on origin but pre-date the 2026-06-26 recovery baseline (point to older commits). Treat as orphaned — do not build from them.
 
 ## Release notes
 
@@ -319,10 +333,10 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 - 2 simultaneous connections per customer, shared quota pool
 - Per-purchase cycle, hard cut at 100%, manual extension (no calendar)
 - No "unlimited" tier in catalog — Zun's account has operator bypass instead
-- Telegram DM at 80% + 100% (5C.3, not yet built)
+- Notifications: customer portal at `/portal/` (no Telegram bot — customers see live quota bar)
 - Tier storage = DB-only
 
-**5C work gated on 5B green:** customer web page, admin web page, Telegram bot, Grafana `vpn-quota` dashboard, backup verify.
+**5C work (customer web page, admin web page, Grafana `vpn-quota` dashboard) — all DONE (v1.2 → v1.3.0).** Backup verify (5C.4) CANCELLED 2026-06-20 — replaced by PBS full-LXC backup. Telegram bot (5C.3-notification) SHELVED — customers are notified via the customer portal itself.
 
 ### v1.0 (2026-06-19) — "5A lock-in"
 
