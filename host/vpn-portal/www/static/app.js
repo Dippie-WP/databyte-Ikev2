@@ -2,6 +2,8 @@
 
 // 2026-06-25 live-pool-leases-integration v1.4.6
 
+// 2026-06-28 modal-lifecycle-v1.7.2 — stack + focus trap + ESC + focus restore
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
@@ -65,6 +67,9 @@
     refreshing: { sessions: false },
     // Auto-refresh timer for Sessions page (only active when there's a live lease)
     _sessionsTimer: null,
+    // v1.7.2 — modal stack. Pushed by openModal, popped by closeModal.
+    // Each entry: { modalEl, previouslyFocused } — restore focus on close.
+    _modalStack: [],
   };
 
   // ─── Skeleton + empty helpers ──────────────────────────
@@ -1093,7 +1098,7 @@
         ),
       ),
     );
-    document.body.appendChild(modal);
+    openModal(modal);
   }
 
   function closeModal() {
@@ -1514,8 +1519,11 @@
   }
 
   function showInstallerLinkModal(c, data) {
-    // Remove any existing modal
-    document.querySelectorAll('.vp-modal-bg').forEach(m => m.remove());
+    // v1.7.2 — Defensive cleanup: drain any stale modal stack before opening
+    // the installer modal. Replaces the prior `querySelectorAll('.vp-modal-bg')
+    // .forEach(m => m.remove())` which removed DOM nodes but left the stack
+    // (and its keydown listener) out of sync.
+    closeAllModals();
 
     const psCmd = data.powershell_cmd;
     const url = data.installer_url;
@@ -1572,7 +1580,7 @@
         ),
       ),
     );
-    document.body.appendChild(modal);
+    openModal(modal);
     // Auto-select the textarea content for easy keyboard copy
     const ta = modal.querySelector('#vp-installer-cmd');
     if (ta) { ta.focus(); ta.select(); }
@@ -1968,28 +1976,116 @@
         el('div', { id: 'vp-new-client-body' }, 'Loading…'),
       ),
     );
-    document.body.appendChild(modal);
-    // Focus trap & ESC
-    document.addEventListener('keydown', _modalEscListener);
+    openModal(modal);
     renderNewClientForm();
   }
 
-  function _modalEscListener(e) {
-    if (e.key === 'Escape') closeModal();
+  // ─── v1.7.2 — Modal lifecycle: stack + focus trap + ESC + focus restore ───
+  // Replaces the v1.3.0.1 single-modal openModal/closeModal pair. The earlier
+  // version only handled one modal at a time (always removed the first
+  // .vp-modal-bg and the first ESC listener) and did not trap Tab focus.
+  //
+  // Lifecycle:
+  //   openModal(el) — push {el, prevFocus} onto stack, set role/aria-modal,
+  //                   append to body, register keydown listener (once),
+  //                   focus first focusable inside modal.
+  //   closeModal() — pop topmost, remove from DOM, deregister listener if
+  //                  stack empty, restore focus to prevFocus element.
+  //   closeAllModals() — drain stack (used by sites that need defensive cleanup,
+  //                      e.g. showInstallerLinkModal which previously did
+  //                      `document.querySelectorAll('.vp-modal-bg').forEach(remove)`).
+  //   _modalKeyListener — single global keydown handler; handles ESC (close top)
+  //                       and Tab (trap focus inside topmost modal).
+  function _vpFocusable(root) {
+    // HTML-spec focusable selectors. Disabled / hidden / type=hidden excluded.
+    const sel = [
+      'a[href]',
+      'button:not([disabled])',
+      'textarea:not([disabled])',
+      'input:not([disabled]):not([type="hidden"])',
+      'select:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+    return Array.from(root.querySelectorAll(sel)).filter(el => {
+      // Skip display:none / visibility:hidden (offsetParent is null for those)
+      // UNLESS the element is currently focused (some browsers keep focused
+      // elements with offsetParent === null in edge cases).
+      return el.offsetParent !== null || el === document.activeElement;
+    });
   }
 
-  // v1.3.0.1 — openModal helper (paired with closeModal). Was called by the Edit
-  // customer modal but never defined. Same shape as the inline code in
-  // openNewClientModal: append to body, register ESC listener.
   function openModal(modalEl) {
+    const previouslyFocused = document.activeElement;
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    S._modalStack.push({ modalEl, previouslyFocused });
     document.body.appendChild(modalEl);
-    document.addEventListener('keydown', _modalEscListener);
+    // Register keydown listener only once — listener reads top of stack at
+    // event time so it works correctly for nested modals.
+    if (S._modalStack.length === 1) {
+      document.addEventListener('keydown', _modalKeyListener);
+    }
+    // Focus the first focusable element inside the modal so keyboard users
+    // land in a useful spot (typically the title × or first input).
+    const focusables = _vpFocusable(modalEl);
+    if (focusables.length > 0 && focusables[0].focus) {
+      focusables[0].focus();
+    } else if (modalEl.tabIndex !== -1) {
+      modalEl.tabIndex = -1;
+      modalEl.focus();
+    }
   }
 
   function closeModal() {
-    document.removeEventListener('keydown', _modalEscListener);
-    const m = document.querySelector('.vp-modal-bg');
-    if (m) m.remove();
+    const top = S._modalStack.pop();
+    if (!top) return;
+    if (top.modalEl && top.modalEl.parentNode) top.modalEl.remove();
+    if (S._modalStack.length === 0) {
+      document.removeEventListener('keydown', _modalKeyListener);
+    }
+    // Restore focus to whatever was focused when this modal opened, if it
+    // is still in the document. Guards against the trigger button being
+    // removed by a re-render between open and close.
+    if (top.previouslyFocused
+        && typeof top.previouslyFocused.focus === 'function'
+        && document.contains(top.previouslyFocused)) {
+      top.previouslyFocused.focus();
+    }
+  }
+
+  function closeAllModals() {
+    while (S._modalStack.length > 0) {
+      const top = S._modalStack.pop();
+      if (top && top.modalEl && top.modalEl.parentNode) top.modalEl.remove();
+    }
+    document.removeEventListener('keydown', _modalKeyListener);
+  }
+
+  function _modalKeyListener(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeModal();
+      return;
+    }
+    if (e.key !== 'Tab' || S._modalStack.length === 0) return;
+    const top = S._modalStack[S._modalStack.length - 1];
+    const focusables = _vpFocusable(top.modalEl);
+    if (focusables.length === 0) {
+      // No focusable children — swallow Tab to keep focus inside modal area.
+      e.preventDefault();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    const inModal = top.modalEl.contains(active);
+    if (e.shiftKey && (!inModal || active === first)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (!inModal || active === last)) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 
   async function renderNewClientForm() {
