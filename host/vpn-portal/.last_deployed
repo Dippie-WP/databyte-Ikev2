@@ -1,26 +1,26 @@
 # Last successful deploy of vpn-portal to vpn-prod-01
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
-deployed_at_utc=2026-06-28T15:27:00Z
+deployed_at_utc=2026-06-28T15:32:00Z
 deployed_by=root
-git_head=edd1b9b
-git_head_short=edd1b9b
-feature_marker=meta-tags-v1.0.0
-cache_bust_version=edd1b9b
+git_head=6224170
+git_head_short=6224170
+feature_marker=responsive-v1.5.0
+cache_bust_version=6224170
 
 source_sha256:
   app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
   app.js=62fe75ec2d9dd69f83978ea71c6fa652
   app.css=9c449baccb273ccceee2e295b3944f32
   index.html=c85907e3908f1ee8caaf6bb8219e9234
-  portal.css=8dd906bd3975ad38c26174625d837f8a
+  portal.css=c8db46083037977ab16511eeebe69ec3
 
 deployed_sha256:
   app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
   app.js=62fe75ec2d9dd69f83978ea71c6fa652
   app.css=9c449baccb273ccceee2e295b3944f32
   index.html=39f3817cfb60fd8ee22030b91003db69
-  portal.css=8dd906bd3975ad38c26174625d837f8a
+  portal.css=c8db46083037977ab16511eeebe69ec3
 
 health_url=https://vpn-portal.databyte.co.za/api/health
 public_url=https://vpn-portal.databyte.co.za/
