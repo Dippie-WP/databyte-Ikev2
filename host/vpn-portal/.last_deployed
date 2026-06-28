@@ -1,23 +1,23 @@
 # Last successful deploy of vpn-portal to vpn-prod-01
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
-deployed_at_utc=2026-06-28T15:38:00Z
+deployed_at_utc=2026-06-28T15:45:00Z
 deployed_by=root
-git_head=00da0c2
-git_head_short=00da0c2
-feature_marker=notif-reconcile-v1.7.4
-cache_bust_version=00da0c2
+git_head=6ab6595
+git_head_short=6ab6595
+feature_marker=aria-sweep-v1.8.0
+cache_bust_version=6ab6595
 
 source_sha256:
   app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
-  app.js=67acede7f79c8a370eac5dd1b9b7161f
+  app.js=f5031e3cce402c511128dcf679c8e939
   app.css=9c449baccb273ccceee2e295b3944f32
   index.html=c85907e3908f1ee8caaf6bb8219e9234
   portal.css=c8db46083037977ab16511eeebe69ec3
 
 deployed_sha256:
   app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
-  app.js=67acede7f79c8a370eac5dd1b9b7161f
+  app.js=f5031e3cce402c511128dcf679c8e939
   app.css=9c449baccb273ccceee2e295b3944f32
   index.html=39f3817cfb60fd8ee22030b91003db69
   portal.css=c8db46083037977ab16511eeebe69ec3
