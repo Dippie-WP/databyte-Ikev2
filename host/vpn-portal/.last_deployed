@@ -1,23 +1,23 @@
 # Last successful deploy of vpn-portal to vpn-prod-01
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
-deployed_at_utc=2026-06-28T14:00:00Z
+deployed_at_utc=2026-06-28T15:00:00Z
 deployed_by=root
-git_head=5d384917b94980d06bb2c98c64d63d00a8d3fa70
-git_head_short=5d38491
-feature_marker=cache-bust standardisation v1.7.3
-cache_bust_version=5d38491
+git_head=23983c9e0e95c97a1ff45e21c5c6c0e7fc4a5d35
+git_head_short=23983c9
+feature_marker=sse-restore-v1.9.0-sse
+cache_bust_version=23983c9
 
 source_sha256:
-  app.py=175e7daeecca734c92651d5e0413b40c219dcabeff0cf0b19509ce1b5c37c159
-  app.js=399de5ed3713a7aa192865740ef5ea7f
-  app.css=e79a831d58d83fac2ecbd8e4eb82bc048bf798e6e9a4a2aca021a34a34f2a564
+  app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
+  app.js=62fe75ec2d9dd69f83978ea71c6fa652
+  app.css=9c449baccb273ccceee2e295b3944f32
   index.html=f1d7508a049b002231c92465e0dbae0e5bd3d5eb6223410e3e11e185250fe4f2
 
 deployed_sha256:
-  app.py=175e7daeecca734c92651d5e0413b40c219dcabeff0cf0b19509ce1b5c37c159
-  app.js=399de5ed3713a7aa192865740ef5ea7f
-  app.css=e79a831d58d83fac2ecbd8e4eb82bc048bf798e6e9a4a2aca021a34a34f2a564
+  app.py=175e7daeecca734c92651d5e0413b40c219dcabeff9cf0b19509ce1b5c37c159
+  app.js=62fe75ec2d9dd69f83978ea71c6fa652
+  app.css=9c449baccb273ccceee2e295b3944f32
   index.html=PENDING_BY_DESIGN
 
 health_url=https://vpn-portal.databyte.co.za/api/health
