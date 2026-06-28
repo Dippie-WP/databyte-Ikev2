@@ -2,6 +2,12 @@
    Extracted from inline <style> in /portal/index.html to comply with
    strict CSP `style-src 'self'` (no inline <style> elements allowed).
    Reference via <link rel="stylesheet" href="/static/portal.css?v=1.4.0">.
+
+   v1.5.0 — 2026-06-28 — responsive @media pass. Breakpoints mirror
+   app.css (900 / 600 / 480 / 360) for consistency. Before: 0 @media
+   rules; card was hard-locked to 480px max-width which left huge empty
+   margins on tablets / large phones and cramped content on small phones.
+   Pattern source: app.css lines 428-485 (operator portal @media tree).
 */
 
 body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -38,3 +44,28 @@ body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-syste
 .vp-portal .vp-logout:hover { background: #161b22; }
 .vp-portal .vp-meta { font-size: 0.75rem; color: #6e7681; text-align: center; margin-top: 24px; }
 .vp-portal .vp-hidden { display: none !important; }
+
+/* ─── v1.5.0 — responsive @media pass ──────────────────────────── */
+/* Breakpoints mirror app.css (900 / 600 / 480 / 360) for consistency.
+   The customer portal is a single-column centered card; the only thing
+   that changes across breakpoints is card width and outer padding. */
+@media (min-width: 481px) {
+  .vp-portal { max-width: 560px; }
+}
+@media (min-width: 768px) {
+  .vp-portal { max-width: 640px; }
+}
+@media (max-width: 480px) {
+  .vp-portal { padding: 16px 12px; }
+  .vp-portal h1 { font-size: 1.35rem; }
+  .vp-portal .vp-card { padding: 16px; }
+}
+@media (max-width: 360px) {
+  /* Galaxy Fold cover / very small phones */
+  .vp-portal { padding: 12px 10px; }
+  .vp-portal .vp-card { padding: 14px; }
+  .vp-portal input[type=text], .vp-portal input[type=password] {
+    padding: 9px 10px; font-size: 0.95rem;
+  }
+  .vp-portal button { padding: 11px; font-size: 0.95rem; }
+}
