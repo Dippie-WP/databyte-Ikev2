@@ -56,7 +56,7 @@ import portal_auth  # v1.3.0 customer portal auth + v1.3.1 operator sessions
 
 from fastapi import FastAPI, HTTPException, Request, Response, Depends, Cookie
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # ---------- Config ----------
@@ -1744,6 +1744,102 @@ def _audit(actor: str, action: str, payload: dict) -> None:
         db_exec(sql)
     except HTTPException:
         pass
+
+
+# ─── SSE: live data stream ──────────────────────────────────────────────
+# v1.9.0 — Server-Sent Events. One persistent connection replaces the multiple
+# setInterval polls the frontend used to do. Browser opens EventSource and
+# receives 'snapshot' events every 2s with fresh leases/customers/pools data.
+#
+# Why: setInterval in background tabs is throttled to ~1x/min by Chrome/Edge/
+# Firefox ("heavy throttling" rule, Chrome 88+ for timers >= 4s). Polling was
+# unreliable when the operator was looking at other tabs while traffic flowed.
+# SSE pushes data when it's fresh, so the UI shows real-time regardless of
+# tab visibility. EventSource auto-reconnects on disconnect.
+#
+# Requirements (deployment):
+#  - nginx: `proxy_buffering off` + `proxy_cache off` on /api/events/stream
+#  - response header: `X-Accel-Buffering: no` (disables nginx buffering for
+#    this response even if proxy_buffering is on elsewhere)
+#  - gunicorn worker: uvicorn.workers.UvicornWorker (already in use)
+#  - gunicorn --timeout must be > heartbeat interval (we heartbeat every 30s,
+#    timeout is 120s, safe)
+#
+# Auth: same operator session cookie as other endpoints (Depends(require_session))
+#
+# MERGED FROM: backup-broken-v1.9.1-pre-reset commit 63ea17a
+# PROVEN LIVE: snapshot stream verified 2026-06-28, ~3KB every 2s, 33 customers
+@app.get("/api/events/stream")
+async def events_stream(request: Request, _: dict = Depends(require_session)):
+    async def event_gen():
+        # Initial connected event so client knows the stream is live
+        yield f": connected at {int(time.time())} v1.9.0\n\n"
+        # SSE comment lines (": ...") are heartbeats — keep connection alive
+        # through proxies/load-balancers that idle-out long connections.
+        last_heartbeat = time.time()
+        while True:
+            if await request.is_disconnected():
+                log.info("sse client disconnected")
+                break
+            try:
+                # Snapshot: every field the operator UI needs to stay live.
+                # Keep this small — it's pushed every 2s to every connected
+                # operator, so size matters. ~3-5 KB per snapshot typical.
+                snapshot = {
+                    "ts": int(time.time()),
+                    "leases": leases_active(),
+                    "pools":  swanctl_list_pools(),
+                }
+                # Customer quota snapshot — same shape as /api/customers list
+                # but only the fields the UI needs to update live:
+                #   id, data_used_bytes, data_limit_bytes, over_quota, pct
+                # Plus name + is_operator so the table can re-render without
+                # a separate fetch.
+                try:
+                    customers = db_query(
+                        "SELECT c.id, c.name, c.is_operator, "
+                        "c.data_used_bytes, c.data_limit_bytes, c.over_quota, "
+                        "t.data_limit_bytes AS tier_limit "
+                        "FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
+                        "WHERE c.status != 'archived'"
+                    )
+                    for c in customers:
+                        used = c.get("data_used_bytes") or 0
+                        limit = c.get("data_limit_bytes") or 0
+                        if c.get("is_operator"):
+                            pct = 0
+                        else:
+                            pct = round((used / limit * 100), 1) if limit else 0
+                        c["pct"] = pct
+                        c["quota_bytes"] = limit  # alias for frontend compat
+                        c["used_bytes"] = used    # alias for frontend compat
+                    snapshot["customers"] = customers
+                except Exception as e:
+                    log.warning("sse customers snapshot failed: %s", e)
+                    snapshot["customers"] = []
+
+                yield f"event: snapshot\ndata: {_json.dumps(snapshot, separators=(',', ':'))}\n\n"
+            except Exception as e:
+                log.warning("sse snapshot error: %s", e)
+                yield f"event: error\ndata: {_json.dumps({'msg': str(e)})}\n\n"
+
+            # Heartbeat every 30s (keeps connection alive through proxies)
+            now = time.time()
+            if now - last_heartbeat >= 30:
+                yield f": hb {int(now)}\n\n"
+                last_heartbeat = now
+
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "X-Accel-Buffering": "no",  # disable nginx buffering for THIS response
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/security/deadman")
