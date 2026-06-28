@@ -13,6 +13,12 @@
 // (3s top-right). Errors + security ops (whitelist/unban/deadman) stay on
 // showBanner. Rule documented in function comments.
 
+// 2026-06-28 aria-sweep-v1.8.0 — ARIA labels for icon-only buttons (✎ ↺ ⧉ × ☀)
+// + role=alert/aria-live=assertive for banner (errors) and login error,
+// role=status/aria-live=polite for toast (success). Per WAI-ARIA APG live
+// region patterns. Screen reader users now hear notification messages and
+// icon button purposes.
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
@@ -135,7 +141,9 @@
   // Use for TRANSIENT SUCCESS confirmations (copies, saves, shares, bulk
   // actions). 3s auto-dismiss, top-right, unobtrusive.
   function toast(msg, kind) {
-    const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok') }, msg);
+    // v1.8.0 — role=status + aria-live=polite for screen reader announcement.
+    // polite = don't interrupt, wait for user pause.
+    const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok'), role: 'status', 'aria-live': 'polite' }, msg);
     document.body.appendChild(t);
     requestAnimationFrame(() => t.classList.add('vp-toast-show'));
     setTimeout(() => {
@@ -265,7 +273,9 @@
     // kind: 'err' | 'ok'
     let b = document.getElementById('vp-banner');
     if (!b) {
-      b = el('div', { id: 'vp-banner' });
+      // v1.8.0 — role=alert + aria-live=assertive for screen reader announcement.
+      // Errors + security ops deserve immediate attention (assertive).
+      b = el('div', { id: 'vp-banner', role: 'alert', 'aria-live': 'assertive' });
       document.body.appendChild(b);
     }
     b.className = 'vp-banner vp-banner-' + kind;
@@ -312,7 +322,8 @@
     const card = el('div', { cls: 'vp-login-card' });
     card.appendChild(el('div', { cls: 'vp-login-logo' }, 'databyte'));
     card.appendChild(el('div', { cls: 'vp-login-sub' }, 'VPN Portal · admin'));
-    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err vp-hidden' });
+    // v1.8.0 — role=alert + aria-live=assertive for login error announcements.
+    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err vp-hidden', role: 'alert', 'aria-live': 'assertive' });
     card.appendChild(errEl);
     const form = el('form', { onsubmit: onLoginSubmit });
     form.appendChild(el('div', { cls: 'vp-field' }, [
@@ -382,7 +393,7 @@
       id: 'vp-sse-badge',
       cls: 'vp-sse-badge ' + (typeof _sseState !== 'undefined' && _sseState.connected ? 'vp-sse-on' : 'vp-sse-off'),
     }, (typeof _sseState !== 'undefined' && _sseState.connected ? '●' : '○') + ' SSE'));
-    right.appendChild(el('button', { id: 'theme-btn', cls: 'vp-theme-btn', onclick: toggleTheme, title: 'Toggle theme' }, '☀'));
+    right.appendChild(el('button', { id: 'theme-btn', cls: 'vp-theme-btn', onclick: toggleTheme, title: 'Toggle theme', 'aria-label': 'Toggle dark/light theme' }, '☀'));
     right.appendChild(el('button', { cls: 'vp-btn vp-btn-ghost vp-btn-sm', onclick: doLogout }, 'Logout'));
     nav.appendChild(right);
     wrap.appendChild(nav);
@@ -892,6 +903,7 @@
                               el('button', {
                                 cls: 'vp-btn-icon vp-btn-warn',
                                 title: 'Reset usage + restore KILLED secrets + zero iptables',
+                                'aria-label': 'Reset usage + restore KILLED secrets + zero iptables',
                                 onclick: (ev) => { ev.stopPropagation(); doReset(c.id, c.display_name || c.name); },
                               }, '↺'),
                             ),
@@ -1018,6 +1030,7 @@
                   el('button', {
                     cls: 'vp-btn-icon',
                     title: 'Edit device metadata',
+                    'aria-label': 'Edit device metadata',
                     onclick: () => openDeviceEditor(c.id, d),
                   }, '✎'),
                 ),
@@ -1994,7 +2007,7 @@
       el('div', { cls: 'vp-modal vp-modal-lg' },
         el('div', { cls: 'vp-modal-title' },
           el('span', {}, '+ New client'),
-          el('button', { cls: 'vp-modal-x', onclick: closeModal, title: 'Close' }, '×'),
+          el('button', { cls: 'vp-modal-x', onclick: closeModal, title: 'Close', 'aria-label': 'Close dialog' }, '×'),
         ),
         el('div', { id: 'vp-new-client-body' }, 'Loading…'),
       ),
@@ -2402,6 +2415,7 @@
           type: 'button',
           cls: 'vp-btn-icon',
           title: 'Copy',
+          'aria-label': 'Copy ' + (label || 'value'),
           onclick: () => {
             navigator.clipboard.writeText(String(value)).then(() => {
               toast('Copied ' + label, 'ok');
