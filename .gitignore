@@ -40,6 +40,8 @@ strongswan-*/
 *.new
 *.r1
 *.pre-*
+# ...except the actual pre-commit framework config file
+!.pre-commit-config.yaml
 
 # Editor + OS
 *~

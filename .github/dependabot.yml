@@ -1,0 +1,78 @@
+# Dependabot — automated dependency update PRs
+# https://docs.github.com/en/code-security/dependabot
+
+version: 2
+
+updates:
+  # ---------- Python deps for vpn-portal ----------
+  - package-ecosystem: "pip"
+    directory: "/host/vpn-portal"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Johannesburg"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    # Limit open PRs to keep noise down
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    # Group minor + patch updates to reduce PR churn
+    groups:
+      python-minor:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+    # Auto-assign reviewers if repo gets them later; for now no reviewers
+    reviewers: []
+    # Ignore major version bumps for fastapi/pydantic (breaking changes)
+    ignore:
+      - dependency-name: "fastapi"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "pydantic"
+        update-types: ["version-update:semver-major"]
+    # Allow up to 20 PRs total across history
+    # (depends on GitHub's settings — default 5 is fine for personal repo)
+
+  # ---------- GitHub Actions ----------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Johannesburg"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "ci"
+    open-pull-requests-limit: 3
+    groups:
+      actions-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+
+  # ---------- Docker base images ----------
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Africa/Johannesburg"
+    commit-message:
+      prefix: "chore(deps)"
+    labels:
+      - "dependencies"
+      - "docker"
+    open-pull-requests-limit: 3
