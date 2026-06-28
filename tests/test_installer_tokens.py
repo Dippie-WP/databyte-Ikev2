@@ -36,8 +36,23 @@ class TestInstallerTokenCreate:
         assert r.status_code == 200, r.text
         body = r.json()
         assert "powershell_cmd" in body
-        assert body["powershell_cmd"].startswith("iex (irm '")
-        assert "setup-databyte-vpn.ps1?slug=token-co&token=" in body["powershell_cmd"]
+        # v2.5.2 (2026-06-25) — Zun caught me: iex (irm 'URL') hits PS 5.1
+        # ParserError on `&` and unreliable MyInvocation. Canonical block:
+        #   curl.exe -o $env:TEMP\setup.ps1 'URL'
+        #   & $env:TEMP\setup.ps1 -t BASE64PACKED
+        #   rasdial DatabyteVPN
+        ps_cmd = body["powershell_cmd"]
+        lines = ps_cmd.split("\n")
+        assert len(lines) == 3, f"expected 3 lines, got {len(lines)}: {ps_cmd!r}"
+        assert lines[0].startswith("curl.exe -o $env:TEMP\\setup.ps1 '"), lines[0]
+        assert "setup-databyte-vpn.ps1" in lines[0], lines[0]
+        assert lines[1].startswith("& $env:TEMP\\setup.ps1 -t "), lines[1]
+        # base64-packed token: customer_name:raw_token, urlsafe, no padding
+        packed = lines[1].split("-t ", 1)[1]
+        import base64
+        decoded = base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4)).decode()
+        assert ":" in decoded, f"decoded should be name:raw_token: {decoded!r}"
+        assert lines[2] == "rasdial DatabyteVPN", lines[2]
         assert len(body["token_prefix"]) == 9  # 8 chars + ellipsis
         assert body["expires_in_days"] == 7
 
@@ -136,9 +151,15 @@ class TestInstallerTokenConsume:
             cookies={"session": operator_login},
         )
         body = r.json()
-        # Extract token from powershell_cmd
-        # Format: iex (irm 'https://...?slug=X&token=YZ...')
-        token = body["powershell_cmd"].split("token=")[1].rstrip("')")
+        # Extract packed token from powershell_cmd.
+        # v2.5.2 format (3-line block): & $env:TEMP\setup.ps1 -t BASE64PACKED
+        # where BASE64PACKED = base64("name:raw_token"), urlsafe, no padding.
+        ps_cmd = body["powershell_cmd"]
+        packed = ps_cmd.split("\n")[1].split("-t ", 1)[1].strip()
+        import base64
+        decoded = base64.urlsafe_b64decode(packed + "=" * (-len(packed) % 4)).decode()
+        # Format is "customer_name:raw_token" — we want the raw_token part.
+        token = decoded.split(":", 1)[1]
         return token, cid
 
     def test_consume_returns_credentials_first_time(self, client, operator_login):
