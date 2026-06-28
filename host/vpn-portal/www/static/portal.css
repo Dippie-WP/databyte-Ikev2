@@ -38,16 +38,3 @@ body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-syste
 .vp-portal .vp-logout:hover { background: #161b22; }
 .vp-portal .vp-meta { font-size: 0.75rem; color: #6e7681; text-align: center; margin-top: 24px; }
 .vp-portal .vp-hidden { display: none !important; }
-</style>
-</head>
-<body>
-<div class="vp-portal">
-<div id="vp-login-view">
-  <h1>databyte</h1>
-  <div class="vp-subtitle">Customer Portal</div>
-  <div class="vp-card">
-    <div id="vp-login-error" class="vp-error vp-hidden"></div>
-    <form id="vp-login-form" autocomplete="on">
-      <label for="vp-identity">EAP Identity</label>
-      <input type="text" id="vp-identity" name="identity" autocomplete="username"
-             autocapitalize="off" autocorrect="off" spellcheck="false"
