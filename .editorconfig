@@ -1,0 +1,57 @@
+# EditorConfig — consistent formatting across editors
+# https://editorconfig.org
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Python — PEP 8 (4 spaces)
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# JavaScript / TypeScript / HTML / CSS — 4 spaces (project style)
+[*.{js,ts,html,css,scss}]
+indent_size = 4
+
+# JSON / YAML — 2 spaces (idiomatic)
+[*.{json,yaml,yml}]
+indent_size = 2
+
+# Markdown — keep trailing double-space for line breaks
+[*.md]
+trim_trailing_whitespace = false
+
+# Shell scripts — 4 spaces
+[*.sh]
+indent_size = 4
+
+# SQL — 4 spaces
+[*.sql]
+indent_size = 4
+
+# PowerShell — 4 spaces
+[*.ps1]
+indent_size = 4
+
+# Makefile requires tabs
+[Makefile]
+indent_style = tab
+
+# Go uses tabs
+[*.go]
+indent_style = tab
+
+# Windows-only scripts: keep CRLF for cross-platform compatibility
+[*.bat]
+end_of_line = crlf
+
+# Generated/lock files — don't touch
+[{package-lock.json,yarn.lock,*.min.js}]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

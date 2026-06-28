@@ -1,0 +1,119 @@
+# Git attributes — line-ending normalization + GitHub linguist overrides
+# https://git-scm.com/docs/gitattributes
+
+# ---------- Line endings ----------
+
+# Auto-detect text files, normalize line endings to LF
+* text=auto eol=lf
+
+# Shell scripts must have LF (Windows CRLF breaks shebangs)
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Python source
+*.py text eol=lf
+
+# Dockerfiles
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# JavaScript / TypeScript / JSON / YAML / TOML
+*.js text eol=lf
+*.ts text eol=lf
+*.jsx text eol=lf
+*.tsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+
+# SQL
+*.sql text eol=lf
+
+# Go
+*.go text eol=lf
+
+# Rust
+*.rs text eol=lf
+
+# PowerShell scripts — LF is fine for git; runtime handles both
+*.ps1 text eol=lf
+
+# Windows-only scripts — preserve CRLF for native Windows tools
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.psm1 text eol=crlf
+
+# SystemVerilog / Verilog (in case any test fixtures appear)
+*.sv text eol=lf
+*.v text eol=lf
+
+# ---------- Binary (no normalization) ----------
+
+# Images / screenshots
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.svg binary
+
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+*.bz2 binary
+*.xz binary
+*.7z binary
+
+# Documents
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+
+# Executables / libraries
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.a binary
+
+# Compiled Python
+*.pyc binary
+*.pyo binary
+
+# Virtualenvs
+.venv/** binary
+venv/** binary
+
+# Secrets / keys (defense in depth — also in .gitignore)
+*.pem binary
+*.key binary
+*.pfx binary
+*.p12 binary
+
+# ---------- GitHub Linguist overrides ----------
+
+# Force linguist to count the project's actual languages
+docker/swanctl/conf.d/*.conf linguist-language=INI
+scripts/*.sh linguist-language=Shell
+host/iptables/* linguist-language=Shell
+host/nftables/* linguist-language=Shell
+
+# Exclude vendored / generated paths from language stats
+docs/ vendor=true
+screenshots/** linguist-generated
+tracker/.bak/** linguist-generated
+**/*.bak linguist-generated
+**/*.bak-* linguist-generated
+
+# Exclude vendored Python deps
+host/vpn-portal/.venv/** linguist-vendored
+host/vpn-portal/static/** linguist-vendored

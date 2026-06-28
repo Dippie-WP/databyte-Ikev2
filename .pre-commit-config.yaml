@@ -1,0 +1,78 @@
+# Pre-commit hooks — run on `git commit` to catch issues locally before push.
+#
+# Install (one-time):
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually against all files:
+#   pre-commit run --all-files
+#
+# Why this exists: today's CI failure (2026-06-28, 5 test assertions stale
+# against v2.5.2 powershell_cmd format) would have been caught locally if
+# pytest ran as a pre-commit hook. Adding this prevents the next instance.
+#
+# Hook tiers:
+#   - Standard hygiene (trailing-whitespace, EOF newline, YAML/JSON parse,
+#     private-key detection) — fast (<1s), always run
+#   - Ruff (lint + format) — fast (~1s), Python quality gate
+#   - pytest L1 (portal API integration tests) — slow (~30s), full integration
+#
+# To skip a specific hook for one commit: `git commit --no-verify`
+# To skip for a specific file: add `# noqa` (ruff) or use skip patterns.
+
+repos:
+  # ---------- Standard hygiene hooks ----------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Markdown uses trailing double-space for line breaks — don't strip
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+        # GitHub Actions workflow files have a YAML 1.2 quirk; allow
+        exclude: '\.github/workflows/.*\.yml$'
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+      - id: check-merge-conflict
+      - id: detect-private-key
+        # .pem, .key, RSA/DSA/EC/OpenSSH/PGP keys
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+        # Force LF line endings; .gitattributes handles CRLF exceptions
+        exclude: '\.(bat|ps1)$'
+
+  # ---------- Python lint + format ----------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: ['--fix', '--exit-non-zero-on-fix', '--target-version=py313']
+        # E,F,W (pycodestyle/pyflakes/pycodestyle-warnings)
+        # I (isort), B (bugbear), UP (pyupgrade)
+        # Skip D (docstring), N (pep8-naming) — too noisy for personal repo
+      - id: ruff-format
+
+  # ---------- Project-specific checks ----------
+  - repo: local
+    hooks:
+      - id: pytest-portal-tests
+        name: pytest (L1 portal API integration tests — 147 tests)
+        entry: python3 -m pytest tests/ --tb=short -q -p no:cacheprovider
+        language: system
+        pass_filenames: false
+        always_run: true
+        # Slow (~30s). If this annoys you, switch `stages: [pre-commit]`
+        # to `stages: [manual]` and run `pre-commit run pytest-portal-tests`
+        # on demand before push.
+        stages: [pre-commit]
+
+      - id: hadolint-dockerfile
+        name: hadolint docker/Dockerfile
+        entry: bash -c 'command -v hadolint >/dev/null 2>&1 && hadolint --config .hadolint.yaml docker/Dockerfile || echo "hadolint not installed, skipping (CI runs this)"'
+        language: system
+        pass_filenames: false
+        files: '^docker/Dockerfile$'
+        stages: [pre-commit]
