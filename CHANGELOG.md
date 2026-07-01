@@ -885,6 +885,112 @@ design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
 
 **Note on stale v2.x tags:** `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` exist on origin but pre-date the 2026-06-26 recovery baseline (they point to commits 2026-06-24/25, before `v1.7.0-recovered` was cut 2026-06-26). They are **orphaned** — do not build from them. Future cleanup: delete these tags.
 
+---
+
+### v1.9.0 (SSE merge onto `main`) — 2026-06-28
+
+Replayed v1.9.0-sse SSE backend onto the recovery baseline branch (`c6b29b1`).
+Production deployment captured at this SHA. The `v1.9.0-sse` tag remains
+attached to the original preservation branch.
+
+### v1.8.0 (ARIA sweep) — 2026-06-28
+
+**Caveat:** the tag `v1.8.0` on origin points at the preservation branch
+(quota-monitor pool-LEASE attribution + offline-lease UI + regenerate-password
+button — `7a55d15`). The same logical work was merged onto `main` as part of
+the `v1.7.0-recovered` recovery line. The tag is ORPHANED but the feature is
+live.
+
+### v1.7.5 (deploy SHA robustness) — 2026-06-28
+
+`deploy-portal-vps.sh` Step 6 SHA verification now uses `sudo -n sha256sum`
+because `vpn-portal` source files may install with mode 0640 (cannot be read
+by the `vpn-portal` user that previously ran the SHA check).
+
+### v1.7.4 (notification reconcile) — 2026-06-27
+
+Portal no longer double-notifies. `showBanner` and the toast notification
+system are now reconciled into a single source of truth so the operator
+sees each event exactly once.
+
+### v1.7.3 (cache-bust standardisation) — 2026-06-27
+
+`deploy-portal-vps.sh` Step 7 cache-bust now uses a single source of truth
+on `cache_bust_version` so `index.html` and static assets always agree.
+
+### v1.7.2 (modal lifecycle) — 2026-06-26
+
+Modal stacking, focus trap, ESC close, focus restore. Replaces broken
+v1.7.0 modal build that got lost in a dashboard deploy.
+
+### v1.7.1 (portal.css trailing HTML) — 2026-06-26
+
+`portal.css` had trailing HTML after the closing `</style>` — removed.
+
+### v1.6.7 (KILLED-secret restore on hard cut) — 2026-06-26
+
+`reset_quota` now restores the customer secret to a non-KILLED state if the
+hard cut left it KILLED — so the customer can reconnect immediately
+instead of needing operator intervention.
+
+### v1.6.6 (Refresh button position) — 2026-06-25
+
+Customers page Refresh button moved to top of the list so operators see it
+before scrolling.
+
+### v1.6.5 (sqlite3 'None' string bug) — 2026-06-25
+
+`db_query` previously passed `None` (Python) to `sqlite3`, which silently
+stored the literal string `"None"`. Fixed: SQLite NULLs now stored
+correctly; modal defends against the legacy `"None"` string for existing
+rows.
+
+### v1.6.4 (allocated bandwidth in detail modal) — 2026-06-25
+
+The customer detail modal now shows allocated bandwidth alongside quota.
+
+### v1.6.3 (dashboard auto-refresh) — 2026-06-25
+
+Operator dashboard auto-refreshes every 30s. Live counters no longer stale
+on operator view.
+
+### v1.6.2 (Sessions tab online-only) — 2026-06-24
+
+Sessions tab filtered to online-only leases. KILLED / OFFLINE entries no
+longer clutter the operator view.
+
+### v1.6.0 / v1.5.0 (live cutover to VPS) — 2026-06-22 / 2026-06-25
+
+Portal cut from LXC 903 lab to VPS (`vpn-prod-01`, 154.65.110.44) on
+2026-06-22. Customer docs (SOP/TOS/PP v1.0.3) filled-in-portal-URL version
+deployed 2026-06-24. Speed-plan tiers (standard + asymmetric_40_20) baked
+into the customer creation form on 2026-06-25.
+
+### v1.4.6 (live pool-leases + EAP-aware SA parser) — 2026-06-26
+
+The portal now reads live `pool-leases` from charon and parses SAs with
+EAP identity (not `device_name`). First time the operator UI has shown
+real connection identities (not just device strings).
+
+### v1.4.5 (per-VIP ACCEPT iptables/iptables-nft) — 2026-06-26
+
+Per-VIP ACCEPT rules consolidated from 508 rules → 508 entries in the
+single `quota:` chain under `iptables-nft` (no breaking change).
+
+### v1.4.x (nft METER quota + swanctl EAP regex fix) — 2026-06-26 (replay)
+
+Zun's `f4ea70c` v1.4.0 work was replayed onto `main` as `e4a4673` for
+fast-forward cleanliness. Then a destructive-replay bug wiped 117 files,
+which were restored. The replay commit was preserved on a separate branch
+to keep history accessible (`backup-broken-v1.9.1-pre-reset`). The actual
+`main` tree at the equivalent state is downstream of `21a8ae7` and
+forward.
+
+### v1.3.0 (operator dashboard polish) — 2026-06-21
+
+Rolled-up v1.2.11 → v1.2.14 changes (modals, filters, banner placements)
+under v1.3.0 per Zun's "stop micro-tagging" rule.
+
 ## [Released]
 
 ### v1.2.4 — 2026-06-20

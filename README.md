@@ -1,6 +1,6 @@
 # strongswan-vpn-gateway
 
-Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite, server-cert + EAP-MSCHAPv2 with PSK fallback. Latest code tag `v1.9.0-sse`, latest release `v1.7.0-recovered`. 5A / 5B / 5C green; pre-launch commercial stack live on VPS.
+Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite, server-cert + EAP-MSCHAPv2 with PSK fallback. Latest release tag `v1.7.0-recovered` (2026-06-26 baseline). Active development on `main` (post-v1.9.0 SSE merge). 5A / 5B / 5C green; pre-launch commercial stack live on VPS.
 
 [![CI](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/Dippie-WP/databyte-Ikev2)](https://github.com/Dippie-WP/databyte-Ikev2/releases)
 
@@ -9,7 +9,7 @@ Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite
 A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices + commercial customers connect from anywhere over 5G/WiFi. Phases 5A (foundation), 5B (quota layer), and 5C (portal surface) are GREEN. 5D billing/payment work remains SHELVED, but the pre-launch commercial stack (per-customer bandwidth caps, customer portal, Windows installer, billing IDs) is **LIVE** on the Xneelo Johannesburg VPS at `https://myvpn.databyte.co.za/` — see [docs/VPS-XNEELO-DEPLOY.md](docs/VPS-XNEELO-DEPLOY.md).
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
-- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — latest code tag `v1.9.0-sse` (2026-06-27, SSE live-data), latest release `v1.7.0-recovered` (2026-06-26, recovery baseline). See `CHANGELOG.md` for v1.3.0 → v1.9.0-sse history.
+- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — `main` branch is canonical (currently at v1.7.5 SHA-robustness + v1.9.0 SSE merge deployed to VPS). Note: tags `v1.8.0` and `v1.9.0-sse` are PRESERVED but ORPHANED (point at the destructive-replay branch, not `main`). See `CHANGELOG.md` for v1.3.0 → v1.9.0 SSE history.
 - **StrongSwan version:** 6.0.7 (CVE-2026-47895 patched)
 - **Auth:** Server-cert (RSA-2048 + RSASSA-PSS) + EAP-MSCHAPv2 (primary) and PSK (fallback)
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via attr-sql + SQLite

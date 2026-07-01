@@ -1,5 +1,7 @@
 # ARCHITECTURE
 
+> **⚠ Live deployment context (added 2026-07-01):** Production runs on the Xneelo VPS (`vpn-prod-01`, 154.65.110.44, `myvpn.databyte.co.za`). The detailed architecture below describes the LAB environment on LXC 903 (192.168.10.98) — kept here because that's where most of the engineering history happened, and because the VPS runbook mirrors this design closely (with `nftables.service` + Docker MASQ instead of `iptables-legacy`). See `docs/VPS-XNEELO-DEPLOY.md` for the production system and `docs/INCIDENT-2026-06-27.md` for the destructive-replay recovery context. The lab and prod are intentionally separate — no sync between them.
+
 ## Network topology
 
 ```
