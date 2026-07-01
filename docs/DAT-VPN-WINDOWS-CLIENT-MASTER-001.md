@@ -40,7 +40,7 @@ rasdial DatabyteVPN
 
 **Rules (do not deviate, ever):**
 - ONE filename: `setup-databyte-vpn.ps1`
-- TWO URLs serve the SAME file (md5 must match: `2ba69a109facad6dd53f1c13ab39654a`)
+- TWO URLs serve the SAME file (md5 must match: `fc6a83d18b195bf3cbba1558f87f912a`)
 - NO `-zun`, NO `-windows`, NO `-test`, NO `-v1.5.0`, NO `-v2.3.0` suffixes
 - NO archived script in /tmp or workspace
 - NO personal copies
@@ -49,12 +49,12 @@ rasdial DatabyteVPN
 | Property | Value |
 |---|---|
 | Canonical filename | `setup-databyte-vpn.ps1` |
-| Version | **2.6.0** (HARDLOCKED — no more versions) |
-| MD5 | `2ba69a109facad6dd53f1c13ab39654a` |
-| Size | 20630 bytes |
+| Version | **2.6.5** (HARDLOCKED filename/URL/method; v2.6.x patch revisions applied post-2026-06-24 baseline — see CHANGELOG inside the script) |
+| MD5 | `fc6a83d18b195bf3cbba1558f87f912a` |
+| Size | 23609 bytes |
 | Primary URL | `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` |
 | Fallback URL | `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (needs `-k`) |
-| Git tag | `v2.6.0` at commit `2732215` |
+| Git ref | `main` @ `1eae9ae` (HEAD = current version). The `v2.6.0` tag at commit `2732215` is the HARDLOCK baseline; v2.6.5 = v2.6.0 + 5 patches (`c27742d`, `95b401d`, `e565666`, `41859eb`, `bf4e4b1`). All listed in the script header CHANGELOG. |
 | Connection name | `DatabyteVPN` |
 | Server | `myvpn.databyte.co.za` → 154.65.110.44 |
 
@@ -395,12 +395,12 @@ networks:
 
 ### 3.2 The Script — Complete Annotated Source
 
-**File:** `setup-databyte-vpn.ps1` v2.6.0 (HARDLOCKED)
+**File:** `setup-databyte-vpn.ps1` v2.6.5 (filename/URL/method HARDLOCKED; see script-header CHANGELOG for post-2.6.0 patch revisions)
 **Location (primary):** `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` (CF-proxied, LE cert, WAF-protected, no `-k` needed)
 **Location (fallback):** `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (grey-cloud, Cloudflare Origin Cert, needs `-k`)
-**Git:** `github.com/Dippie-WP/databyte-Ikev2` tag `v2.6.0` (commit `2732215`)
-**MD5:** `2ba69a109facad6dd53f1c13ab39654a`
-**Lines:** 436
+**Git:** `github.com/Dippie-WP/databyte-Ikev2` `main` @ `1eae9ae` (HEAD; v2.6.5). HARDLOCK baseline: tag `v2.6.0` at commit `2732215`. Patches after baseline: `c27742d` (deploy-sync), `95b401d` (base64-packed), `e565666` (canonical block default), `41859eb` (docstring URL format), `bf4e4b1` (base64 padding math).
+**MD5:** `fc6a83d18b195bf3cbba1558f87f912a`
+**Size:** 23609 bytes
 
 ```powershell
 <#
@@ -412,6 +412,13 @@ networks:
     Server: myvpn.databyte.co.za
 
     CHANGE LOG:
+    v2.6.5 (2026-07-01): post-HARDLOCK patch revisions consolidated
+      * v2.6.5 bf4e4b1 — base64 padding math (2026-06-26)
+      * v2.6.4 41859eb — docstring URL format cleanup (2026-06-26)
+      * v2.6.3 e565666 — canonical 3-line block shipped as default (2026-06-25)
+      * v2.6.2 95b401d — slug+token packed as base64 (2026-06-25)
+      * v2.6.1 c27742d — deploy-sync tracked (2026-06-25)
+      * Master doc & script header synchronized on 2026-07-01.
     v2.6.0 (2026-06-24): HARDLOCK
       The rot: 12+ script variants floating around (setup-windows-vpn,
       connect-databyte-vpn, test-win-5g-setup, setup-databyte-vpn-zun,
