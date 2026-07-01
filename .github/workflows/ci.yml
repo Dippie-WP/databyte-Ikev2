@@ -100,6 +100,24 @@ jobs:
           config: .hadolint.yaml
           failure-threshold: error
 
+  # ---------- Layer 0.5: Lab-leakage guard ----------
+  # Catches production code paths that reference the LXC 903 lab
+  # (192.168.10.98 / vpn.homelab.local / 102.182.117.43 / "LXC 903").
+  # Per TODO.md Bug #5: lab and prod are intentionally separate. If you
+  # find yourself committing a lab IP into host/ or docker/, this will
+  # fail and you'll fix it before merge.
+  # Added: 2026-07-01 (audit follow-up — check_stale_refs.sh existed in
+  # scripts/ but was NOT wired into CI; rot went undetected).
+  lab-leakage-guard:
+    name: Lab-leakage guard (check_stale_refs.sh)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run check_stale_refs.sh --strict
+        run: bash scripts/check_stale_refs.sh --strict
+
   # ---------- Layer 1: Portal API integration tests (pytest) ----------
   # Catch portal regressions (e.g. Lesson #193: lookup_user_and_customer SQL bug
   # existed for 3 days before being caught). Runs offline against a tmp SQLite
