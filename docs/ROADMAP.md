@@ -2,9 +2,9 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
-## Current state (live 2026-06-21 17:50 UTC)
+## Current state (live 2026-07-01)
 
-**Latest tag: v1.3.0** — customer portal at `/portal/` (lab build, LAN-only) + operator dashboard polish (v1.2.11-14 rolled up under v1.3.0).
+**Latest tag on `main` lineage: v1.7.5 (2026-06-28)** — sha256sum robustness fix in deploy script. Production deployment at `c6b29b1` (v1.9.0 SSE merge, 2026-06-28); 2 commits un-deployed (`.last_deployed` chore + the sha256sum robustness fix itself). Tags `v1.8.0` and `v1.9.0-sse` are ORPHANED — preserved as historical markers but point at the destructive-replay branch (`backup-broken-v1.9.1-pre-reset`), NOT at `main`. See `CHANGELOG.md` for the full entry sequence.
 
 **Phase status:**
 | Phase | Description | Status |

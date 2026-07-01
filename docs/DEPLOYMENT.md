@@ -1,6 +1,6 @@
 # DEPLOYMENT — step by step on a new host
 
-This walks through deploying the strongSwan gateway on a fresh LXC. The live deployment is on LXC 902 (192.168.10.212, pve2) — that one is the reference. Use this guide for a new LXC, new host, or recovery.
+This walks through deploying the strongSwan gateway on a fresh LXC. **The live production deployment is on the Xneelo VPS (`vpn-prod-01`, 154.65.110.44, `myvpn.databyte.co.za`) — NOT on any LXC.** LXC 903 (192.168.10.98, `vpn-gateway`) is the local LAN lab; LXC 902 (192.168.10.212, `myservices`) hosts the monitoring stack only (Grafana / Prometheus / Paperless / Dockhand). Use this guide for a new LXC, new host, or recovery.
 
 > **For the Xneelo VPS production deployment ( Johannesburg, myvpn.databyte.co.za):**
 > Use **[VPS-XNEELO-DEPLOY.md](./VPS-XNEELO-DEPLOY.md)** instead — it has the one-shot `bootstrap-xneelo.sh` script that does everything in 15-25 min, plus Cloudflare DNS setup.

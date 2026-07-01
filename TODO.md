@@ -98,7 +98,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 
 ## 📚 Reference
 
-- Master manual: `docs/DAT-VPN-WINDOWS-CLIENT-MASTER-001.md` (3 copies, MD5 `0555d5eaf123edb4f9557eef7bd3c71d`)
+- Master manual: `docs/DAT-VPN-WINDOWS-CLIENT-MASTER-001.md` (canonical file, 1 copy, MD5 `fc6a83d18b195bf3cbba1558f87f912a`)
 - Runbook: `reports/DAT-VPN-WINDOWS-CLIENT-001.md`
 - Customer docs: `reports/DAT-VPN-{SOP,TOS,PP}-v1.0.3.docx` (Paperless 68/69/70)
 - Memory: `/root/.openclaw/workspace/memory/2026-06-24.md` (full session history)
