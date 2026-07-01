@@ -24,14 +24,31 @@
 
 .NOTES
     File:           setup-databyte-vpn.ps1
-    Version:        2.6.0
-    Status:         HARDLOCKED - this is the canonical script
+    Version:        2.6.5
+    Status:         HARDLOCKED - canonical filename & shape. Patch revisions
+                    recorded in CHANGELOG below. Master doc tracks MD5.
     Replaces:       ALL prior setup-*.ps1, connect-databyte-vpn.ps1,
                     test-win-5g-setup*.ps1, setup-databyte-vpn-zun.ps1
     Author:         Misha (AI Agent) for Zun
-    Date:           2026-06-24
+    Last touched:   2026-07-01 (under v2.6.x HARDLOCK; patch revisions
+                    after 2026-06-24 baseline).
 
     CHANGE LOG:
+    v2.6.5 (2026-06-26) - base64-padding fix (bf4e4b1)
+      * Base64 padding math was wrong for tokens whose packed length was
+        already a multiple of 4. Tokens now always decode cleanly.
+    v2.6.4 (2026-06-26) - docstring URL format cleanup (41859eb)
+      * Removed leftover `?slug=X&token=Y` reference from docstring;
+        canonical command uses BASE64PACKED, not query string.
+    v2.6.3 (2026-06-25) - canonical 3-line block shipped as default (e565666)
+      * Script now ships the canonical 3-line block instead of an
+        `iex (irm URL)` remote-execution idiom.
+    v2.6.2 (2026-06-25) - slug+token packed as base64 (95b401d)
+      * Replaces `&`-separated query string with base64-packed payload
+        so special characters in tokens cannot break the URL.
+    v2.6.1 (2026-06-25) - deploy-sync tracked (c27742d)
+      * Both copies of this file (scripts/ and static/) are now in the
+        deploy sync. They MUST stay byte-identical; sync enforces it.
     v2.6.0 (2026-06-24) - HARDLOCK
       * Removed duplicate STEP 6 (RasSetCredentials + WMI merge rot)
       * ONE filename (setup-databyte-vpn.ps1) - served at BOTH URLs
