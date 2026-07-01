@@ -80,7 +80,7 @@ for c, h in enumerate(hdr):
 roadmap = [
     ("1D", "VPS production cutover",  "vpn-prod-01 on Xneelo (154.65.110.44), strongSwan 6.0.7, portal v1.4.x, bandwidth-monitor, certbot LE", "✅ Done 2026-06-22", "—"),
     ("1E", "Customer docs v1.0.3",    "DAT-VPN-SOP/TOS/PP v1.0.3 with portal URL filled in (Paperless 68/69/70, RustFS synced)",                              "✅ Done 2026-06-24", "—"),
-    ("1F", "CP7 hardening",           "6 items: fail2ban portal jail, AIDE, backups, cert expiry monitor, INPUT rule tighten, iptables-nft consolidation", "🟡 In progress",   "2026-07"),
+    ("1F", "CP7 hardening",           "6 items: fail2ban portal jail, AIDE, backups, cert expiry monitor, INPUT rule tighten, iptables-nft consolidation — ALL DONE (2026-06-23 to 2026-06-25). See To-Fix sheet rows for details.", "✅ Done 2026-06-25",   "—"),
     ("1G", "L1-L4 testing plan",      "pytest (L1) + DB integrity (L2) + static analysis grep (L3) + E2E smoke cron (L4) — started 2026-06-24",            "✅ Done 2026-06-25",       "—"),
     ("v1.5", "Speed plan (per-customer)", "Two presets at customer creation: standard (20/20) + asymmetric_40_20 (40/20). Tiers drive quota only, NOT bandwidth. (Per-tier bandwidth mapping NUKED per Zun 2026-06-25 05:33.)", "✅ Done 2026-06-25", "—"),
     ("5C.6", "Multi-device (EAP-TLS)", "Customer → many devices. Path blocked under EAP-MSCHAPv2 (1-identity-1-VIP). Only clean path: per-device certs/EAP-TLS.", "🔒 Shelved 2026-06-20", "Revisit when needed"),
@@ -118,6 +118,12 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 changes = [
+    ("2026-06-30 18:00", "Tracker Roadmap sync — 1F CP7 hardening flipped to ✅ Done 2026-06-25",
+     "Roadmap sheet still showed '🟡 In progress' while To-Fix sheet had all 6 CP7 items ✅ Done. Cross-check trap: Zun almost had me re-do completed work. Updated generate_tracker.py + regenerated xlsx + pushed to RustFS.",
+     "tracker/generate_tracker.py (1F row), tracker/databyte-vpn-tracker.xlsx (regen)", "🟢 Low", "Regenerated; pushed to rustfs:open-claw-push/vpn/databyte-vpn-tracker.xlsx; MD5 verified post-push", "✅"),
+    ("2026-06-30 17:48", "Compaction config — keepRecentTokens 24576 → 49152 (write-through discipline)",
+     "Zun: 'every time you compact you get information wrong'. Compaction is lossy; root fix is operational not config. Raised keepRecentTokens to keep more raw recent tail + added ⛔ WRITE-THROUGH DISCIPLINE rule to MEMORY.md (write significant facts to disk as decided, cross-check post-compaction). Timestamp convention locked: every memory entry gets date + time + both UTC and SAST. Communicated in AGENTS.md (Session Startup step 5 + Memory section) + SOUL.md footer.",
+     "openclaw.json (keepRecentTokens), workspace/MEMORY.md (new section), workspace/AGENTS.md (step 5 + timestamp subsection), workspace/SOUL.md (footer)", "🟠 High", "JSON valid; gateway restarted cleanly (pid 440341, active, probe ok); 3 surfaces carry the convention so a fresh session can't miss it", "✅"),
     ("2026-06-26 04:33", "Portal v1.7.0 — speed_plan in PATCH + Edit modal dropdown (per Zun #22367)",
      "Edit customer modal had no speed-plan dropdown — operators had to type raw Mbps. PATCH silently rejected speed_plan in body ('no fields to update'). Zun flagged: 'ensure it's 100% working'.",
      "host/vpn-portal/{app.py,www/static/app.js} (commit 3fcc9ca) + 9 L1 tests + new GET /api/speed_plans endpoint",
