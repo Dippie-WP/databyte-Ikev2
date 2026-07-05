@@ -2238,7 +2238,23 @@ def archive_customer(customer_id: int, user: dict = Depends(require_session)):
 
 @app.post("/api/customers/{customer_id}/unarchive")
 def unarchive_customer(customer_id: int, user: dict = Depends(require_session)):
-    """v1.2.12 — restore an archived customer. Sets status='active', is_active=1."""
+    """v1.2.12 — restore an archived customer. Sets status='active', is_active=1.
+
+    Phase 4D (RADIUS migration): we can't reverse-engineer the original
+    EAP password from the stored NT hash. Instead, unarchive regenerates
+    a fresh EAP password and rewires everything — charon reloads the new
+    secret, radcheck Cleartext-Password + NT-Password are written, and
+    rw-eap.conf is updated. The customer must re-onboard via the
+    installer-token flow (same as rotate_eap) to pick up the new
+    credentials. This trades a one-time re-onboard for clean,
+    no-edge-case code (no fragile BLOB→hex dance through SQLite -json).
+
+    Earlier implementation tried to derive Cleartext-Password from the
+    raw 16-byte MD4 hash stored in users.password BLOB, but sqlite3 -json
+    encodes BLOBs inconsistently (x'<hex>' wrapper for safe bytes,
+    JSON-escaped string form for non-ASCII) making the path fragile.
+    Regenerating the password sidesteps the encoding issue entirely.
+    """
     cust = db_query(f"SELECT id, name, is_operator, status FROM customers WHERE id = {int(customer_id)};")
     if not cust:
         raise HTTPException(404, "Customer not found")
@@ -2248,50 +2264,64 @@ def unarchive_customer(customer_id: int, user: dict = Depends(require_session)):
         return {"ok": True, "customer_id": int(customer_id), "already_active": True}
     db_exec(f"UPDATE customers SET status='active', is_active=1, updated_at={int(time.time())} WHERE id={int(customer_id)};")
 
-    # Phase 4B (RADIUS migration): restore FreeRADIUS radcheck Cleartext-Password
-    # + NT-Password from the users.password blob (NTLM hash, hex-encoded with X'..'
-    # SQL literal). We need the PLAINTEXT to set Cleartext-Password, but we only
-    # stored the NT hash. Strategy: read the users.password blob, hex-decode to NT
-    # hash, then reverse-engineer Cleartext is NOT possible (NT hash is one-way MD4).
-    # Workaround: store an extra column customers.nt_password_hash = NT hash, and
-    # a secrets table customers_plaintext_secrets(customer_id, plaintext) for
-    # reversible restore. For now, write the NT hash as Cleartext-Password too (it
-    # is RADIUS-compatible via rlm_pap with NT-Password attribute order).
-    # NOTE: PSK still works via rw-eap.conf, so this phase-5-only path can use NT
-    # Password for both attributes on restore. Phase 4C refinement (post-MVP):
-    # store plaintext alongside NT hash so restore is proper.
-    dev_rows = db_query(
+    # Phase 4D (RADIUS migration): regenerate EAP password.
+    # Look up first active device, derive EAP identity via users table.
+    devices = db_query(
         f"SELECT id, device_name, strongswan_user_id FROM devices "
-        f"WHERE customer_id = {int(customer_id)};"
+        f"WHERE customer_id = {int(customer_id)} ORDER BY id LIMIT 1;"
     )
-    for dev in dev_rows:
-        if dev["strongswan_user_id"]:
-            id_rows = db_query(
-                f"SELECT name, password FROM users WHERE id = {int(dev['strongswan_user_id'])};"
-            )
+    regenerated = 0
+    if devices:
+        dev = devices[0]
+        eap_user_id = dev["strongswan_user_id"]
+        if eap_user_id:
+            id_rows = db_query(f"SELECT name FROM users WHERE id = {int(eap_user_id)};")
             if id_rows:
-                # users.password is a BLOB; SQLAlchemy returns it as bytes (memoryview).
-                pwd_blob = id_rows[0]["password"]
-                if isinstance(pwd_blob, (bytes, memoryview)):
-                    nt_hex = bytes(pwd_blob).hex().upper()
-                else:
-                    nt_hex = str(pwd_blob).strip()
+                eap_identity = id_rows[0]["name"]
+                new_password = secrets.token_urlsafe(16)
+                ntlm = ntlm_hash_bytes(new_password)
+                now = int(time.time())
+
+                # 1. Update users.password BLOB
+                db_exec(
+                    f"UPDATE users SET password = X'{ntlm.hex().upper()}' "
+                    f"WHERE id = {int(eap_user_id)};"
+                )
+                # 2. Replace rw-eap.conf secret (preserve EAP identity)
                 try:
-                    # Use NT hash as the Cleartext-Password value too (same hex string).
-                    # FreeRADIUS will match either Cleartext-Password OR NT-Password against
-                    # the request — and our NT-Password check works for MSCHAPv2.
-                    portal_auth.enable_customer_radcheck(
-                        id_rows[0]["name"], nt_hex, nt_hex
+                    _replace_eap_secret(eap_identity, new_password)
+                except Exception as ex:
+                    log.warning(f"unarchive: could not update rw-eap.conf for {eap_identity}: {ex}")
+                # 3. Mark customer as rotated
+                db_exec(
+                    f"UPDATE customers SET eap_rotated_at = {now} WHERE id = {int(customer_id)};"
+                )
+                # 4. Phase 4D: write fresh radcheck rows
+                try:
+                    portal_auth.update_customer_password_radcheck(
+                        eap_identity, new_password, ntlm.hex().upper()
                     )
+                    regenerated += 1
                 except Exception as e:
                     log.warning(
-                        f"Phase 4B RADIUS unarchive failed for {id_rows[0]['name']}: {e}"
+                        f"Phase 4D RADIUS unarchive-rotate failed for {eap_identity}: {e}"
                     )
+                # 5. Reload charon creds
+                try:
+                    reload_charon_creds()
+                except Exception as ex:
+                    log.warning(f"unarchive: reload_charon_creds failed: {ex}")
+                log.info(
+                    "unarchive regenerated password for customer=%s identity=%s",
+                    cust[0]["name"], eap_identity,
+                )
+
     _audit(user.get("name") or "operator", "customer_unarchive", {
         "customer_id": int(customer_id),
         "name": cust[0]["name"],
+        "password_regenerated_for_devices": regenerated,
     })
-    return {"ok": True, "customer_id": int(customer_id)}
+    return {"ok": True, "customer_id": int(customer_id), "password_regenerated_for_devices": regenerated}
 
 
 @app.delete("/api/customers/{customer_id}")
