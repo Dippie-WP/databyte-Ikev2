@@ -84,7 +84,7 @@ roadmap = [
     ("1G", "L1-L4 testing plan",      "pytest (L1) + DB integrity (L2) + static analysis grep (L3) + E2E smoke cron (L4) — started 2026-06-24",            "✅ Done 2026-06-25",       "—"),
     ("v1.5", "Speed plan (per-customer)", "Two presets at customer creation: standard (20/20) + asymmetric_40_20 (40/20). Tiers drive quota only, NOT bandwidth. (Per-tier bandwidth mapping NUKED per Zun 2026-06-25 05:33.)", "✅ Done 2026-06-25", "—"),
     ("5C.6", "Multi-device (EAP-TLS)", "Customer → many devices. Path blocked under EAP-MSCHAPv2 (1-identity-1-VIP). Only clean path: per-device certs/EAP-TLS.", "🔒 Shelved 2026-06-20", "Revisit when needed"),
-    ("5D",  "Commercial SaaS",        "Multi-tenant billing, customer signup, Stripe/Paystack. Zun solo operator — out of scope.",                                "🔒 Shelved 2026-06-19", "No timeline"),
+    ("5D",  "RADIUS migration",      "FreeRADIUS + daloRADIUS, single MariaDB, portal keeps management. Direct-to-prod, nuke + start fresh (per Zun #23766 + #23783).", "🟡 In progress 2026-07-05", "Phases 1-7 in install-radius-daloradius.md"),
     ("5H",  "HA + Load Balancer",     "2x strongSwan nodes + keepalived VRRP active/passive + shared DB on NFS, ~5s failover. Last-last phase.",                  "⏳ Not started", "After 5D (if ever)"),
     ("5C.5", "Self-service devices", "Reverted v1.2.6. Model lock: 1 customer = 1 device. charon uniqueids=yes enforces.",                                       "⛔ Reverted 2026-06-20", "—"),
     ("—", "Tracker",                "This file. xlsx in RustFS. Re-generate from script.",                                                                 "🟢 In use 2026-06-24", "Ongoing"),
@@ -299,6 +299,14 @@ tofix = [
     ("nftables migration — CLOSED",                                                                                        "🔒 Closed", "2-3h","deferred",                          "Superseded by R11 (consolidation, not full nft syntax). 5B.6 watchdog fix covers bug nft would have prevented."),
     # Future
     ("5G CGNAT stability for iPhone (fragment_size 1100, ikesa_max_halfopen 10)",                    "🔵 Future", "1d", "5C backlog",                        "iOS SAs die in 4-30 min on cellular"),
+    # 2026-07-05 RADIUS migration ticket — multi-phase
+    ("RADIUS migration — Phase 1 backup current state (portal.db, ipsec.db, rw-eap.conf)",                  "⏳ Pending", "15m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.1. rclone to rustfs:open-claw-push/vpn-pre-radius-20260705/. MD5 each backup. Must complete before Phase 2."),
+    ("RADIUS migration — Phase 2 install MariaDB + FreeRADIUS on prod VPS",                                "⏳ Pending", "1.5h", "5D RADIUS migration", "Per install-radius-daloradius.md §2.2. apt install, freeradius-rest, freeradius-utils. radtest to localhost must produce Access-Accept before Phase 3. Ports 1812/1813 must bind."),
+    ("RADIUS migration — Phase 3 install daloRADIUS + Apache vhost",                                       "⏳ Pending", "1h",  "5D RADIUS migration", "Per install-radius-daloradius.md §2.3. nginx reverse-proxy on /admin/. Default operator password changed. daloRADIUS UI must show test user from Phase 2."),
+    ("RADIUS migration — Phase 4 portal SQLite → MariaDB + radcheck writes",                              "⏳ Pending", "1-2d", "5D RADIUS migration", "Per install-radius-daloradius.md §2.4. ~50 lines FastAPI changes. NT hash written at customer create. Lifecycle ops all atomically update radcheck. portal still uses local secrets path during this phase."),
+    ("RADIUS migration — Phase 5 strongSwan switchover charon local → eap-radius",                        "⏳ Pending", "30m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.5. YOU present for live test. Option 5.5.b my pick (you re-register via portal). End-to-end cut path test (radtest path)."),
+    ("RADIUS migration — Phase 6 migration: rebuild customer base via portal self-service",              "⏳ Pending", "ongoing", "5D RADIUS migration", "Per install-radius-daloradius.md §2.6. Single comms message sent. As each customer re-registers, portal creates them in MariaDB with proper NT hash. Tech-side risk zero."),
+    ("RADIUS migration — Phase 7 cleanup + docs (DAT-VPN-FREERADIUS-CANONICAL-001, MEMORY, TOOLS)",       "⏳ Pending", "1-2h", "5D RADIUS migration", "Per install-radius-daloradius.md §2.7. Remove secrets{} block from rw-eap.conf. Update deploy-portal-vps.sh. Update MEMORY.md + TOOLS.md. Mark 5D DONE in tracker."),
 ]
 for r, row in enumerate(tofix, start=1):
     for c, v in enumerate(row):
