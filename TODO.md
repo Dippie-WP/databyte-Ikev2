@@ -63,7 +63,7 @@ Goal: prevent "we keep finding bugs in production" pattern. Portal_auth login bu
 - [ ] 5G CGNAT for iPhone clients
 - [ ] HA failover (PLAN-5H-HA-LB.md)
 - [ ] Let's Encrypt DNS-01 (DONE 2026-06-24, just renewal automation)
-- [ ] **Tracker** (spreadsheet / markdown / CSV) — Zun hasn't picked A/B/C yet. Pending format decision.
+- [x] **Tracker** — ✅ DONE 2026-06-24. Excel `.xlsx` lives in `tracker/databyte-vpn-tracker.xlsx` (regenerated from `tracker/generate_tracker.py`). Mirrored to `rustfs:open-claw-push/vpn/databyte-vpn-tracker.xlsx`. Format picked: Excel (per Zun). Current state captured in each Phase 5 row.
 - [ ] **Known limitation: Netflix (and other anti-VPN streaming services) won't work through tunnel.** Xneelo IP range (AS37153, 154.65.110.44) returns non-ZA CDN IPs (Dublin/Virginia/Oregon) from Netflix GeoDNS instead of af-south-1 Cape Town. Streaming will buffer, fail, or show "unblocker/proxy" error. Workaround: friend turns off VPN for streaming only. Add to DAT-VPN-SOP-001 v1.0.4 customer doc when next revised. Surfaced 2026-06-24 by Lagos/Starlink friend.
 
 ## ⚪ Other Active Projects (NOT VPN, deferred)
