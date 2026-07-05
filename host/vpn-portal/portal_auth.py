@@ -29,9 +29,9 @@ import hashlib
 import hmac
 import os
 import secrets
-import sqlite3
 import subprocess
 import time
+from contextlib import contextmanager
 from typing import Optional
 
 from argon2 import PasswordHasher, Type
@@ -39,6 +39,8 @@ from argon2.exceptions import VerifyMismatchError, InvalidHashError
 
 import logging
 from fastapi import Cookie, HTTPException, Request, Response
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 
 log = logging.getLogger("vpn-portal.portal_auth")
 
@@ -189,19 +191,145 @@ def verify_password(stored_hash: str, submitted: str) -> bool:
     return hmac.compare_digest(candidate, target)
 
 
-# ---------- DB helpers (direct sqlite3, not via ssh_903) ----------
+# ---------- DB helpers (SQLAlchemy + MariaDB, Phase 4) ----------
 
-# We need a sqlite3 connection that R/W-s to the same DB charon writes to.
-# WAL mode + busy_timeout makes this safe alongside charon.
-DB_PATH = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
+# Phase 4 (RADIUS migration): all portal data lives in MariaDB `radius` DB.
+# Connection via SQLAlchemy 2.0 + PyMySQL. Loopback-only — nginx reverse-proxies
+# the public-facing portal, the portal talks to MariaDB on 127.0.0.1:3306.
+#
+# DB_URL format: mysql+pymysql://portal:<pw>@127.0.0.1:3306/radius
+# password is read from /etc/vpn-portal.env (DB_URL key) at portal start.
+
+DB_URL = os.environ.get("DB_URL", "mysql+pymysql://portal:portal@127.0.0.1:3306/radius")
 
 
+def _engine() -> Engine:
+    """Return a process-wide SQLAlchemy engine. Lazy-initialized."""
+    global _ENGINE
+    if "_ENGINE" not in globals():
+        globals()["_ENGINE"] = create_engine(
+            DB_URL,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            pool_size=5,
+            max_overflow=10,
+            future=True,
+        )
+    return globals()["_ENGINE"]
+
+
+def _qmark_to_named(sql: str, params):
+    """Convert qmark (?) placeholders to SQLAlchemy named (:p1, :p2, ...) style.
+
+    Lets us keep the existing SQLite-style ?-param SQL strings intact while
+    executing via SQLAlchemy text() which uses named params by default.
+    """
+    if params is None:
+        return sql, {}
+    if not isinstance(params, (list, tuple)):
+        return sql, params
+    parts = sql.split("?")
+    if len(parts) - 1 != len(params):
+        raise ValueError(
+            f"Placeholder count mismatch: {len(parts) - 1} ? vs {len(params)} params"
+        )
+    new_sql = "".join(
+        f"{parts[i]}:p{i + 1}" if i < len(params) else parts[i]
+        for i in range(len(parts))
+    )
+    named = {f"p{i + 1}": v for i, v in enumerate(params)}
+    return new_sql, named
+
+
+class _DictRow:
+    """dict-like row wrapper. Lets existing `row["col"]` code work unchanged.
+
+    Wraps SQLAlchemy Row._mapping (a Mapping). Supports __getitem__ with str
+    keys, and .keys() / .values() / __iter__ for completeness.
+    """
+
+    __slots__ = ("_m",)
+
+    def __init__(self, mapping):
+        self._m = mapping
+
+    def __getitem__(self, k):
+        return self._m[k]
+
+    def __contains__(self, k):
+        return k in self._m
+
+    def __iter__(self):
+        return iter(self._m)
+
+    def keys(self):
+        return self._m.keys()
+
+    def values(self):
+        return self._m.values()
+
+    def __repr__(self):
+        return f"_DictRow({dict(self._m)!r})"
+
+
+class _Result:
+    """Wraps a SQLAlchemy Result so .fetchone()/.fetchall() return _DictRow.
+
+    Each Row is converted via ._mapping (a Mapping) into _DictRow, which
+    behaves like sqlite3.Row: row["col"] works.
+    """
+
+    def __init__(self, result):
+        self._r = result
+        self.rowcount = getattr(result, "rowcount", -1)
+        self.lastrowid = getattr(result, "lastrowid", None)
+
+    def _wrap(self, row):
+        if row is None:
+            return None
+        return _DictRow(row._mapping)
+
+    def fetchone(self):
+        return self._wrap(self._r.fetchone())
+
+    def fetchall(self):
+        return [self._wrap(r) for r in self._r.fetchall()]
+
+    def fetchmany(self, size=None):
+        if size is None:
+            return [self._wrap(r) for r in self._r.fetchmany()]
+        return [self._wrap(r) for r in self._r.fetchmany(size)]
+
+
+class _Conn:
+    """SQLAlchemy Connection wrapper that accepts ?-style params + dict-like rows.
+
+    Lets every existing conn.execute("...", (param,)) call work unchanged.
+    Internally converts ? → :p1/:p2/... and runs via text().
+    Result rows are wrapped in _DictRow so `row["col_name"]` works (sqlite3 compat).
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=None):
+        _sql, _params = _qmark_to_named(sql, params)
+        return _Result(self._conn.execute(text(_sql), _params))
+
+    def commit(self):
+        self._conn.commit()
+
+
+@contextmanager
 def _db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout=5000;")
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Context manager yielding a _Conn wrapper around a SQLAlchemy Connection.
+
+    Replaces the sqlite3 connection context manager. Use:
+        with _db() as conn:
+            row = conn.execute("SELECT ... WHERE id = ?", (id,)).fetchone()
+    """
+    with _engine().connect() as raw:
+        yield _Conn(raw)
 
 
 def lookup_user_and_customer(identity: str) -> Optional[dict]:
