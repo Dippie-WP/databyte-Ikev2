@@ -95,6 +95,57 @@ for js in "${JS_FILES[@]}"; do
 done
 
 echo ""
+echo "=== STEP 1.6: Python syntax check + portal env-var completeness (added 2026-07-05) ==="
+# Python ast.parse catches SyntaxError that importers only fail at runtime.
+# Bug that motivated this: Phase 4A + 4B commits contained a db_exec call
+# with a trailing comma in the SQL string, only surfaced by gunicorn worker
+# boot. ast.parse is sub-second for the whole file.
+PY_FILES=(
+    "${SOURCE_DIR}/app.py"
+    "${SOURCE_DIR}/portal_auth.py"
+)
+for py in "${PY_FILES[@]}"; do
+    if [[ -f "$py" ]]; then
+        if ! python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$py" 2>/dev/null; then
+            echo "FAIL: Python syntax error in $py"
+            python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$py"
+            exit 3
+        fi
+        echo "  $(basename "$py") ast.parse OK ✓"
+    fi
+done
+
+# portal env-var completeness check. app.py imports from these at top —
+# if any is missing on the VPS, the portal service will crash on first
+# request. EnvironmentFile=/etc/vpn-portal.env is loaded by systemd, so
+# the missing keys only fail in quirky settings (env-not-reloaded, etc).
+# Check via /proc/<PID>/environ so we read what systemd actually loaded.
+ENV_FILE="/etc/vpn-portal.env"
+REQUIRED_ENV_KEYS=("ADMIN_PASS_HASH" "DB_URL" "SSH_KEY" "RW_EAP_CONF")
+ENV_VARS_PRESENT=()
+ENV_VARS_MISSING=()
+MAIN_PID="$(ssh "${VPS_HOST}" 'sudo -n systemctl show vpn-portal --property=MainPID --value' 2>/dev/null || true)"
+if [[ -z "$MAIN_PID" || "$MAIN_PID" == "0" ]]; then
+    echo "  SKIP: vpn-portal.service not running on ${VPS_HOST}; cannot inspect runtime env"
+else
+    for key in "${REQUIRED_ENV_KEYS[@]}"; do
+        present="$(ssh "${VPS_HOST}" "sudo -n grep -c \"^${key}=\" /proc/${MAIN_PID}/environ" 2>/dev/null | head -1 | tr -dc '0-9' || echo 0)"
+        if [[ "${present:-0}" -ge 1 ]]; then
+            ENV_VARS_PRESENT+=("$key")
+        else
+            ENV_VARS_MISSING+=("$key")
+        fi
+    done
+    echo "  env vars present: ${#ENV_VARS_PRESENT[@]}/${#REQUIRED_ENV_KEYS[@]} (${ENV_VARS_PRESENT[*]:-none})"
+    if [[ ${#ENV_VARS_MISSING[@]} -gt 0 ]]; then
+        echo "  ⚠ env vars MISSING on VPS runtime: ${ENV_VARS_MISSING[*]}"
+        echo "    /etc/vpn-portal.env has been edited but systemd was not reloaded."
+        echo "    Run: ssh ${VPS_HOST} 'sudo systemctl daemon-reload && sudo systemctl restart vpn-portal.service'"
+        echo "    Continuing deploy anyway (the var will be loaded on next restart)."
+    fi
+fi
+
+echo ""
 echo "=== STEP 2: capture source SHAs ==="
 SOURCE_HEAD="$(git rev-parse HEAD)"
 SOURCE_PY_SHA="$(sha256sum "${SOURCE_DIR}/app.py" | awk '{print $1}')"
