@@ -144,6 +144,8 @@ tracert 8.8.8.8
 | Decision | Rationale | Source |
 |---|---|---|
 | EAP-MSCHAPv2 (not certificate-based) | Windows native support, no PKI required on client | strongSwan docs |
+| **FreeRADIUS backend** (added 2026-07-05 Phase 4 done, Phase 5 pending) | Charon switches from local EAP secrets (rw-eap.conf) to `eap-radius` plugin talking to FreeRADIUS 3.2.7 on `127.0.0.1:1812`. FreeRADIUS reads NT hash + Cleartext-Password from MariaDB `radcheck` table, populated by portal on customer lifecycle events (create/rotate/archive/unarchive/delete). | install-radius-daloradius.md |
+| **daloRADIUS admin UI** at `https://adminer.databyte.co.za/operators/login.php` | Operator can view/edit customer RADIUS creds via web UI (Phase 3 done) | install-radius-daloradius.md §Phase 3 |
 | Let's Encrypt certificate on VPS | Trusted by all platforms, no CA cert install needed on client | strongSwan ios.html |
 | AES-CBC + GCM ESP proposals | Windows negotiates CBC on init, GCM on rekey. Both required | Lesson #146 |
 | `RasSetCredentials` for credential binding | Canonical Windows API (rasapi32.dll), not WMI or cmdkey | Lesson #161-#162 |
