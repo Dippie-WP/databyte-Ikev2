@@ -34,7 +34,7 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | v1.2.14 | Column sort + active sessions (rolled up under v1.3.0) | ✅ DONE — 2026-06-21 12:28 UTC |
 | **v1.3.0** | **Customer portal at `/portal/` (lab) + diagnosis protocol + charon defaults audit** | **✅ DONE — 2026-06-21 17:50 UTC** |
 | **5H** | HA + LB (2x v1.2.x + keepalived VRRP + shared DB on NFS from TrueNAS, ~5s failover) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20) |
-| 5D | Commercial (multi-tenant SaaS, billing, customer signup) | 🔒 SHELVED — single-operator only (Zun, 2026-06-19) |
+| 5D | RADIUS migration (FreeRADIUS + daloRADIUS on prod VPS, single MariaDB, portal keeps management; nuke + start fresh, direct-to-prod per Zun #23766 + #23783) | 🟡 In progress 2026-07-05 (repurposed from SHELVED SaaS billing 2026-06-19). Plan: `install-radius-daloradius.md` (7 phases); tracker row 5D. |
 
 **Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, **v1.3.0** (21 total). **v1.2.5 deleted.**
 
@@ -209,11 +209,13 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 **Current manual operation (the gap):** 3-step bash + SQL sequence — (1) insert EAP block in `rw-eap.conf`, (2) insert `users` row with NTLM hash, (3) insert `devices` row, (4) `swanctl --load-creds`. ~2 min per device. Last performed live for `friend-phone` (id=20) and `friend-laptop` (id=21) on 2026-06-20 14:09 + 14:59 UTC respectively.
 
-## 5D — Commercial — 🔒 Shelved (out of scope, customer-facing bits moved to 5C)
+## 5D — RADIUS migration — 🟡 In progress (2026-07-05; repurposed from SHELVED SaaS billing)
 
-**Status:** Zun confirmed 2026-06-19 12:30 UTC: "I'm the only one hosting the server." Single-operator only — no multi-tenant SaaS, no automated billing, no customer self-signup. The "buy more → DM to Zun → payment link" flow is manual by design.
+> **Repurposing note (added 2026-07-05):** Originally 5D was defined as multi-tenant SaaS billing (subtasks 5D.1–5D.5 below) and SHELVED 2026-06-19 because Zun is the sole operator. On 2026-07-05 the phase was repurposed to the **FreeRADIUS + daloRADIUS** migration per Zun msgs #23766 + #23783 — the underlying business need ("automate auth, leave portal in control") is the same, but the implementation is shifted away from "multi-tenant SaaS" to "single-operator + RADIUS-backed EAP". The SaaS subtasks 5D.1–5D.5 are kept below as historical context only; the live plan lives in `install-radius-daloradius.md` and in tracker rows 5D + 7 To-Fix rows.
 
-**Original goal (if scope ever changes):** Multi-tenant billing, payment-triggered reset, customer-facing messages.
+**Origin status (Zun 2026-06-19 12:30 UTC):** "I'm the only one hosting the server." Single-operator only — no multi-tenant SaaS, no automated billing, no customer self-signup. The "buy more → DM to Zun → payment link" flow is manual by design.
+
+**Original goal (now superseded by RADIUS migration):** Multi-tenant billing, payment-triggered reset, customer-facing messages.
 
 | Step | What |
 |---|---|

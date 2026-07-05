@@ -6,10 +6,10 @@ Personal strongSwan EAP VPN gateway. For per-user VIP pinning, attr-sql + SQLite
 
 ## What this is
 
-A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices + commercial customers connect from anywhere over 5G/WiFi. Phases 5A (foundation), 5B (quota layer), and 5C (portal surface) are GREEN. 5D billing/payment work remains SHELVED, but the pre-launch commercial stack (per-customer bandwidth caps, customer portal, Windows installer, billing IDs) is **LIVE** on the Xneelo Johannesburg VPS at `https://myvpn.databyte.co.za/` — see [docs/VPS-XNEELO-DEPLOY.md](docs/VPS-XNEELO-DEPLOY.md).
+A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **Pre-commercial testing** (Databyte Global Solutions, Zun). Personal + test devices + commercial customers connect from anywhere over 5G/WiFi. Phases 5A (foundation), 5B (quota layer), and 5C (portal surface) are GREEN. **5D has been repurposed (2026-07-05)** as the RADIUS migration (FreeRADIUS + daloRADIUS on prod VPS, single MariaDB, portal keeps management) — 🟡 In progress; full plan in `install-radius-daloradius.md` and tracker row 5D. The pre-launch commercial stack (per-customer bandwidth caps, customer portal, Windows installer, billing IDs) is **LIVE** on the Xneelo Johannesburg VPS at `https://myvpn.databyte.co.za/` — see [docs/VPS-XNEELO-DEPLOY.md](docs/VPS-XNEELO-DEPLOY.md).
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build)
-- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — `main` branch is canonical (currently at v1.7.5 SHA-robustness + v1.9.0 SSE merge deployed to VPS). Note: tags `v1.8.0` and `v1.9.0-sse` are PRESERVED but ORPHANED (point at the destructive-replay branch, not `main`). See `CHANGELOG.md` for v1.3.0 → v1.9.0 SSE history.
+- **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — `main` branch is canonical (currently at v1.7.5 SHA-robustness + v1.9.0 SSE merge deployed to VPS). Note: tags `archive-v1.8.0-removed-2026-07-01` and `archive-v1.9.0-sse-removed-2026-07-01` are ORPHANED historical markers (point at the destructive-replay branch, not `main`). See `CHANGELOG.md` for v1.3.0 → v1.9.0 SSE history.
 - **StrongSwan version:** 6.0.7 (CVE-2026-47895 patched)
 - **Auth:** Server-cert (RSA-2048 + RSASSA-PSS) + EAP-MSCHAPv2 (primary) and PSK (fallback)
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via attr-sql + SQLite
@@ -274,7 +274,7 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 | **5C.3** | Grafana `strongswan-quota` dashboard | ✅ **GREEN (v1.2.2)** |
 | **5C.4** | ~~RustFS daily backup verify~~ | ⛔ **CANCELLED (2026-06-20)** — replaced by PBS full-LXC backup |
 | **5C.5/5C.6** | ~~Self-service / multi-device~~ | ⛔ **REVERTED / SHELVED (v1.2.6)** — strongSwan 1-identity-1-VIP blocks per-device under EAP-MSCHAPv2 |
-| **5D (billing)** | Commercial billing / payment-triggered reset | 🔒 **SHELVED** (single-operator scope locked 5A.14, 2026-06-19) |
+| **5D (RADIUS migration)** | FreeRADIUS + daloRADIUS on prod VPS, single MariaDB, portal keeps management. Direct-to-prod, nuke + start fresh (per Zun #23766 + #23783). | 🟡 **IN PROGRESS 2026-07-05** (was SHELVED SaaS billing since 2026-06-19 — repurposed). Plan: `install-radius-daloradius.md` (7 phases); see tracker row 5D. |
 | **5D (pre-launch)** | Per-customer bandwidth, customer portal, Windows installer, billing IDs | ✅ **LIVE on VPS** (rolled up under v1.4.0 → v1.7.0-recovered, deployed 2026-06-22 → 2026-06-26) |
 | **5H** | HA + LB (2x v1.9 + keepalived VRRP + shared DB) | ⏳ **NOT STARTED** — plan at `docs/PLAN-5H-HA-LB.md` |
 

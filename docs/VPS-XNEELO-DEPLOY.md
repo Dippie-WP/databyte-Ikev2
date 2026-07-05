@@ -42,7 +42,7 @@ Zun does this in the Xneelo panel before handing you SSH access:
 | **Firewall** | iptables-legacy with MSS clamp (5G fix) + VPN FORWARD rules |
 | **Subnet** | `10.99.0.0/24` (VPN clients get IPs from this range) |
 | **Backup** | Nightly cron → RustFS on homelab |
-| **Portal** | Not deployed yet (Phase 5D, separate task) |
+| **Portal** | Deployed as `vpn-portal.service` since 2026-06-22 (under 5D pre-launch scope). Portal version on VPS: v1.9.0. See [`host/scripts/deploy-portal-vps.sh`](../host/scripts/deploy-portal-vps.sh) for the deploy mechanism. |
 
 ---
 
@@ -254,32 +254,33 @@ For catastrophic failure: Xneelo panel → Server → Snapshot → Restore a cle
 
 ## Security Notes for Production
 
-This deployment is the **VPN server only**. The customer portal (`/portal/`) is a separate deployment (Phase 5D). Until then:
+This deployment is **just the VPN server**; the customer + operator portal (`myvpn.databyte.co.za` / `vpn-portal.databyte.co.za`) lives in a separate process and is covered by the portal deploy runbook.
 
-- **No public web interface** on port 80/443 (these are open on the VPS firewall but nothing is listening yet)
-- **IKEv2 only** — UDP 500 + UDP 4500, no HTTP
+Current state at the VPN tier (post 5D pre-launch, 2026-06-22 → 2026-06-26):
+
+- **IKEv2 only** — UDP 500 + UDP 4500, no HTTP on this host directly
+- **Public web** — portal is fronted by `myvpn.databyte.co.za` via Cloudflare proxy + nginx; portal TLS via Let's Encrypt on the portal host (certbot)
 - **SSH key only** — no password authentication
 - **fail2ban** blocks SSH brute force after 3 failed attempts
-- **No customer data** — this is still in DRAFT testing phase
-- **No Let's Encrypt** — self-signed cert for now. Client installs CA manually.
+- **Customer data** — 40 active customers, daily backup to `rustfs:open-claw-push/strongswan-db/daily/`
 - **NSA vulnerability CVE-2026-47895** is patched in strongSwan 6.0.7 (our image)
 
-For Phase 5D (commercial launch), these will be added:
-- Let's Encrypt cert for `myvpn.databyte.co.za` (DNS-01 challenge via Cloudflare API)
-- Customer portal at `/portal/` with HTTPS via Cloudflare proxy
-- Proper log management (centralised logging)
-- Uptime monitoring (BetterStack or UptimeRobot)
-- Geoblocking on firewall
+For Phase 5D — RADIUS migration (in progress 2026-07-05, replaces the SaaS billing scope):
+- FreeRADIUS + daloRADIUS on prod VPS (single MariaDB, portal keeps management)
+- Full plan in `../install-radius-daloradius.md` (7 phases)
+- Operator-only ACL — full daloRADIUS billing engine only when second operator joins (deferred per Zun)
+- Cert rotation automation, log management, uptime monitoring — ongoing (already partly in place)
 - CA hierarchy: separate production CA from lab CA
 
 ---
 
 ## Next Steps After This Deploy
 
-1. **Smoke test complete** → Mark 5H Phase 1 complete in PLAN-5H-HA-LB.md
-2. **iPhone test** (your daily driver on LTE) → Verify MOBIKE works
-3. **Portal deployment** (Phase 5D) → Separate runbook
-4. **Second VPS for HA** (Phase 5H) → Keepalived + floating IP → `PLAN-5H-HA-LB.md`
+1. **Smoke test complete** → archived
+2. **iPhone test** (your daily driver on LTE) → Verify MOBIKE works (CONFIRMED 2026-06-22 + 2026-07-04)
+3. **Portal deployment** → ✅ Live since 2026-06-22 (`vpn-portal.service` on this VPS, port 8080 + nginx reverse proxy via `myvpn.databyte.co.za`); see `host/scripts/deploy-portal-vps.sh`
+4. **Phase 5D — RADIUS migration** → 🟡 In progress 2026-07-05; full plan in `../install-radius-daloradius.md` (7 phases)
+5. **Second VPS for HA** (Phase 5H, after 5D completes) → Keepalived + floating IP → `PLAN-5H-HA-LB.md`
 
 ---
 
