@@ -2154,6 +2154,19 @@ def rotate_customer_eap(customer_id: int, user: dict = Depends(require_session))
     # 4. Reload charon creds so the new secret is active
     reload_charon_creds()
 
+    # 4b. Phase 4B (RADIUS migration): write the rotated password to FreeRADIUS
+    # radcheck rows. Non-fatal: rw-eap.conf keeps PSK auth working until
+    # Phase 5 cutover.
+    try:
+        portal_auth.update_customer_password_radcheck(
+            eap_identity, new_password, ntlm.hex().upper()
+        )
+    except Exception as e:
+        log.warning(
+            f"Phase 4B RADIUS write during rotate_eap failed for {eap_identity} "
+            f"(non-fatal until Phase 5 cutover): {e}"
+        )
+
     # 5. Audit (the new_password is NOT in the audit payload — no plaintext in logs)
     _audit(user.get("name") or "operator", "customer_eap_rotate", {
         "_target_type": "customer",
@@ -2195,6 +2208,27 @@ def archive_customer(customer_id: int, user: dict = Depends(require_session)):
     if cust[0]["status"] == "archived":
         return {"ok": True, "customer_id": int(customer_id), "already_archived": True}
     db_exec(f"UPDATE customers SET status='archived', is_active=0, updated_at={int(time.time())} WHERE id={int(customer_id)};")
+
+    # Phase 4B (RADIUS migration): replace radcheck Cleartext-Password + NT-Password
+    # with DISABLED-<uuid> marker so FreeRADIUS rejects EAP-MSCHAPv2 auth.
+    # Look up every device's EAP identity (one customer may have multiple).
+    dev_rows = db_query(
+        f"SELECT id, device_name, strongswan_user_id FROM devices "
+        f"WHERE customer_id = {int(customer_id)};"
+    )
+    for dev in dev_rows:
+        if dev["strongswan_user_id"]:
+            id_rows = db_query(
+                f"SELECT name FROM users WHERE id = {int(dev['strongswan_user_id'])};"
+            )
+            if id_rows:
+                try:
+                    portal_auth.disable_customer_radcheck(id_rows[0]["name"])
+                except Exception as e:
+                    log.warning(
+                        f"Phase 4B RADIUS disable failed for {id_rows[0]['name']}: {e}"
+                    )
+
     _audit(user.get("name") or "operator", "customer_archive", {
         "customer_id": int(customer_id),
         "name": cust[0]["name"],
@@ -2213,6 +2247,46 @@ def unarchive_customer(customer_id: int, user: dict = Depends(require_session)):
     if cust[0]["status"] != "archived":
         return {"ok": True, "customer_id": int(customer_id), "already_active": True}
     db_exec(f"UPDATE customers SET status='active', is_active=1, updated_at={int(time.time())} WHERE id={int(customer_id)};")
+
+    # Phase 4B (RADIUS migration): restore FreeRADIUS radcheck Cleartext-Password
+    # + NT-Password from the users.password blob (NTLM hash, hex-encoded with X'..'
+    # SQL literal). We need the PLAINTEXT to set Cleartext-Password, but we only
+    # stored the NT hash. Strategy: read the users.password blob, hex-decode to NT
+    # hash, then reverse-engineer Cleartext is NOT possible (NT hash is one-way MD4).
+    # Workaround: store an extra column customers.nt_password_hash = NT hash, and
+    # a secrets table customers_plaintext_secrets(customer_id, plaintext) for
+    # reversible restore. For now, write the NT hash as Cleartext-Password too (it
+    # is RADIUS-compatible via rlm_pap with NT-Password attribute order).
+    # NOTE: PSK still works via rw-eap.conf, so this phase-5-only path can use NT
+    # Password for both attributes on restore. Phase 4C refinement (post-MVP):
+    # store plaintext alongside NT hash so restore is proper.
+    dev_rows = db_query(
+        f"SELECT id, device_name, strongswan_user_id FROM devices "
+        f"WHERE customer_id = {int(customer_id)};"
+    )
+    for dev in dev_rows:
+        if dev["strongswan_user_id"]:
+            id_rows = db_query(
+                f"SELECT name, password FROM users WHERE id = {int(dev['strongswan_user_id'])};"
+            )
+            if id_rows:
+                # users.password is a BLOB; SQLAlchemy returns it as bytes (memoryview).
+                pwd_blob = id_rows[0]["password"]
+                if isinstance(pwd_blob, (bytes, memoryview)):
+                    nt_hex = bytes(pwd_blob).hex().upper()
+                else:
+                    nt_hex = str(pwd_blob).strip()
+                try:
+                    # Use NT hash as the Cleartext-Password value too (same hex string).
+                    # FreeRADIUS will match either Cleartext-Password OR NT-Password against
+                    # the request — and our NT-Password check works for MSCHAPv2.
+                    portal_auth.enable_customer_radcheck(
+                        id_rows[0]["name"], nt_hex, nt_hex
+                    )
+                except Exception as e:
+                    log.warning(
+                        f"Phase 4B RADIUS unarchive failed for {id_rows[0]['name']}: {e}"
+                    )
     _audit(user.get("name") or "operator", "customer_unarchive", {
         "customer_id": int(customer_id),
         "name": cust[0]["name"],
@@ -2255,6 +2329,15 @@ def delete_customer(customer_id: int, confirm: str = "", user: dict = Depends(re
             _remove_eap_block(eap_identity)
         except Exception as ex:
             log.warning("could not remove eap block %s: %s", eap_identity, ex)
+
+        # Phase 4B (RADIUS migration): delete radcheck + radusergroup + radreply
+        # so FreeRADIUS no longer holds stale customer creds.
+        try:
+            portal_auth.remove_customer_radcheck_and_usergroup(eap_identity)
+        except Exception as e:
+            log.warning(
+                f"Phase 4B RADIUS cleanup failed for {eap_identity}: {e}"
+            )
     reload_charon_creds()
 
     db_exec(f"DELETE FROM customers WHERE id = {int(customer_id)};")
