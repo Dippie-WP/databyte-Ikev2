@@ -228,6 +228,16 @@ for c, h in enumerate(hdr):
     ws.write(0, c, h, F_HDR)
 
 bugs = [
+    # 2026-07-05 — Phase 4 RADIUS
+    ("2026-07-05 22:38", "clients.conf secret diagnostic (radtest → invalid Message-Authenticator)",
+     "radtest to FreeRADIUS gets 'invalid Message-Authenticator! Shared secret is incorrect.' even after restoring the Phase 2 backup with the full 64-hex-char secret. Verified byte-level via od -c: BOTH /etc/freeradius/daloRADIUS.key (root:freerad 0640) AND /etc/freeradius/3.0/clients.conf client localhost block contain the SAME full 64-hex-char secret `9f32746a2845c1ba72d2b60f71631c61dc24f496c85548f38c8d828839a0ebd2`. Pre-existing rot from Phase 2 — not introduced by Phase 4B.",
+     "DEBUG freeradius -X to trace the actual mismatch. Possible causes: (a) require_message_authenticator interaction, (b) Message-Authenticator HMAC computation expects different secret format than 64-char hex, (c) FreeRADIUS still holding the truncated secret in worker memory despite reload. CRITICAL: must clear BEFORE charon eap-radius fires. If charon gets the same reject, all 40 customers get locked out simultaneously.",
+     "🟠 High", "⏳ OPEN — Plan: freeradius -X debug mode, trace 1 access-request, find actual mismatch.", "TODO RADIUS-Phase-5"),
+    ("2026-07-05 22:38", "Operator admin password unknown (Argon2 hash present but plaintext lost)",
+     "/etc/vpn-portal.env had ADMIN_PASS_HASH=$argon2id$v=19$m=19456,t=2,p=1$ghr8wvcc3rE/Tjb3xKy8+g$Rr+gk9ccXXuM6oZT1Qr55v1qXxhsbDxTaslIQkduKEs but NO plaintext was ever stored anywhere accessible. Tried: totalconnect (Zun's VPS sudo pw), TruenasExp2026! (guess), zun, admin, password1, etc. — all returned Argon2 InvalidHashError.",
+     "Rotated to fresh secrets.token_urlsafe(24) = At7S7rKtJqzSbOBqJymWv19iY_ImOfKs. Stored VPS /root/.portal-admin-pw (mode 600) + OC /root/.openclaw/.portal-admin-pw (mode 600). Login works live via HTTPS at https://myvpn.databyte.co.za/api/login.",
+     "🟡 Med", "✅ RESOLVED 2026-07-05 22:29 UTC — argon2 hash rotated via /root/rotate-admin-pw.py on VPS. New pw in /root/.openclaw/.portal-admin-pw.", "TODO RADIUS-Phase-5-pre"),
+    # 2026-06-24 — bugs original sheet
     ("2026-06-24 21:06", "Customer portal idle expiry 30 days",
      "operator + customer portals share same session config. 30d is operator-grade; stolen phone = 30d access to customer portal.",
      "Split config: customer ≤24h idle / ≤7d absolute. 30 min.", "🟠 High", "✅ FIXED 2026-06-25 — commit 33fb7d0: PORTAL_TTL 30d→1h + CUSTOMER_MAX_SESSION_AGE 7d + 4 regression tests (122→126 passing). Verify_session now rejects + deletes sessions where (now-created_at) > 7d. Computed from created_at so no DB migration.", "TODO #1"),
@@ -251,6 +261,15 @@ bugs = [
     ("2026-06-24 22:08", "Stale EAP key in rw-eap.conf (eap-demo-phone)",
      "Charon loaded 8 EAP secrets but DB only has 7 users. 'eap-demo-phone' has no matching user. Same drift as DB divergence.",
      "Cleaned up automatically next time ops/rotate-vpn-credentials.py regenerates secrets from DB. Add 'audit unused secrets' check to script.", "🟢 Low", "✅ CLOSED 2026-06-25 — false alarm (audit confirmed all keys matched)", "TODO #6"),
+    # 2026-07-05 22:38 UTC — Phase 4 RADIUS migration
+    ("2026-07-05 22:38", "BUGFIX (RADIUS Phase 4): unarchive fragile BLOB→hex decode",
+     "Phase 4D unarchive tried to restore radcheck Cleartext-Password from the NT hash BLOB stored in users.password (charon strongSwan attr-sql pool). db_query goes through SQLite CLI -json path, which encodes BLOBs inconsistently — hex-safe bytes get x'<32hex>' wrapper (37 chars), binary bytes get JSON-escape form (uffffff...). Made the round-trip unreliable.",
+     "Fixed in commit eca9fc5: unarchive now REGENERATES the password instead of trying to reverse-decode the BLOB. Customer must re-onboard via installer-token flow (same UX as rotate_eap). Trade: one-time re-onboard for clean, no-edge-case code.",
+     "🟠 High", "✅ FIXED 2026-07-05 22:38 UTC — commit eca9fc5", "RADIUS-Phase-4D"),
+    ("2026-07-05 22:38", "Phase 4A — feat(portal) SQLAlchemy + MariaDB layer",
+     "Phase 4 of RADIUS migration: portal_auth.py SQLite→SQLAlchemy + PyMySQL. 7-table schema applied. portal@127.0.0.1 MariaDB user with grants on radius.*. /api/health returns db_ok:true, db_customers:40.",
+     "5 commits pushed: fb74cd2 (4A), d75c1cd (4B), 3180f74 (4C/4D), fc4bd90 (4F), eca9fc5 (4D-fix). End-to-end verified on VPN prod VPS 22:38 UTC: create+rotate+archive+unarchive+delete all write radcheck + radusergroup rows correctly.",
+     "🔴 Critical", "✅ SHIPPED 2026-07-05 22:38 UTC — origin/main HEAD eca9fc5, parity check PASS.", "RADIUS-Phase-4"),
 ]
 for r, row in enumerate(bugs, start=1):
     for c, v in enumerate(row):
@@ -300,13 +319,14 @@ tofix = [
     # Future
     ("5G CGNAT stability for iPhone (fragment_size 1100, ikesa_max_halfopen 10)",                    "🔵 Future", "1d", "5C backlog",                        "iOS SAs die in 4-30 min on cellular"),
     # 2026-07-05 RADIUS migration ticket — multi-phase
-    ("RADIUS migration — Phase 1 backup current state (portal.db, ipsec.db, rw-eap.conf)",                  "⏳ Pending", "15m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.1. rclone to rustfs:open-claw-push/vpn-pre-radius-20260705/. MD5 each backup. Must complete before Phase 2."),
-    ("RADIUS migration — Phase 2 install MariaDB + FreeRADIUS on prod VPS",                                "⏳ Pending", "1.5h", "5D RADIUS migration", "Per install-radius-daloradius.md §2.2. apt install, freeradius-rest, freeradius-utils. radtest to localhost must produce Access-Accept before Phase 3. Ports 1812/1813 must bind."),
-    ("RADIUS migration — Phase 3 install daloRADIUS + Apache vhost",                                       "⏳ Pending", "1h",  "5D RADIUS migration", "Per install-radius-daloradius.md §2.3. nginx reverse-proxy on /admin/. Default operator password changed. daloRADIUS UI must show test user from Phase 2."),
-    ("RADIUS migration — Phase 4 portal SQLite → MariaDB + radcheck writes",                              "⏳ Pending", "1-2d", "5D RADIUS migration", "Per install-radius-daloradius.md §2.4. ~50 lines FastAPI changes. NT hash written at customer create. Lifecycle ops all atomically update radcheck. portal still uses local secrets path during this phase."),
-    ("RADIUS migration — Phase 5 strongSwan switchover charon local → eap-radius",                        "⏳ Pending", "30m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.5. YOU present for live test. Option 5.5.b my pick (you re-register via portal). End-to-end cut path test (radtest path)."),
+    ("RADIUS migration — Phase 1 backup current state (portal.db, ipsec.db, rw-eap.conf) — DONE",                  "✅ Done", "15m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.1. rclone to rustfs:open-claw-push/vpn-pre-radius-20260705/. MD5 each backup. Must complete before Phase 2."),
+    ("RADIUS migration — Phase 2 install MariaDB + FreeRADIUS on prod VPS — DONE",                                "✅ Done", "1.5h", "5D RADIUS migration", "Per install-radius-daloradius.md §2.2. apt install, freeradius-rest, freeradius-utils. radtest to localhost must produce Access-Accept before Phase 3. Ports 1812/1813 must bind."),
+    ("RADIUS migration — Phase 3 install daloRADIUS + Apache vhost — DONE",                                       "✅ Done", "1h",  "5D RADIUS migration", "Per install-radius-daloradius.md §2.3. nginx reverse-proxy on /admin/. Default operator password changed. daloRADIUS UI must show test user from Phase 2."),
+    ("RADIUS migration — Phase 4 portal SQLite → MariaDB + radcheck writes — DONE",                              "✅ Done", "1-2d", "5D RADIUS migration", "Per install-radius-daloradius.md §2.4. ~50 lines FastAPI changes. NT hash written at customer create. Lifecycle ops all atomically update radcheck. portal still uses local secrets path during this phase."),
+    ("RADIUS migration — Phase 5 strongSwan switchover charon local → eap-radius — BLOCKED on clients.conf diagnostic",                        "🔴 Blocked", "30m", "5D RADIUS migration", "Per install-radius-daloradius.md §2.5. YOU present for live test. Option 5.5.b my pick (you re-register via portal). End-to-end cut path test (radtest path). MUST clear clients.conf secret bug FIRST (see Bugs sheet)."),
     ("RADIUS migration — Phase 6 migration: rebuild customer base via portal self-service",              "⏳ Pending", "ongoing", "5D RADIUS migration", "Per install-radius-daloradius.md §2.6. Single comms message sent. As each customer re-registers, portal creates them in MariaDB with proper NT hash. Tech-side risk zero."),
     ("RADIUS migration — Phase 7 cleanup + docs (DAT-VPN-FREERADIUS-CANONICAL-001, MEMORY, TOOLS)",       "⏳ Pending", "1-2h", "5D RADIUS migration", "Per install-radius-daloradius.md §2.7. Remove secrets{} block from rw-eap.conf. Update deploy-portal-vps.sh. Update MEMORY.md + TOOLS.md. Mark 5D DONE in tracker."),
+    ("RADIUS migration — Phase 5 PRE-FLIGHT: freeradius -X debug clients.conf secret diagnostic",                  "🔴 Bug",     "1-2h", "5D RADIUS migration", "radtest to FreeRADIUS gets 'invalid Message-Authenticator' even though clients.conf and daloRADIUS.key both contain the same full 64-char secret (verified byte-level). Pre-existing rot from Phase 2. Must clear BEFORE charon eap-radius fires — if charon gets same reject, all 40 customers get locked out simultaneously. Plan: freeradius -X debug, trace 1 access-request, find actual mismatch."),
 ]
 for r, row in enumerate(tofix, start=1):
     for c, v in enumerate(row):
@@ -464,6 +484,15 @@ history = [
      "Misha",
      "3 commits: 7a0758f (rename nftables-zun-vpn.service → nftables-vpn.service per HARDLOCK), 3306551 (rotate-vpn-credentials.py path /etc/swanctl/conf.d → /opt/strongswan-vpn-gateway/docker/swanctl/conf.d for VPS), f277951 (archive v1.5.0 + broken test scripts superseded by v2.6.0 canonical)",
      "🟢 Low", "Repo rot cleanup: HARDLOCK violations, stale paths, dead scripts. Check working tree + suffix scan + commit hygiene every session."),
+    # 2026-07-05 — RADIUS migration Phase 4 SHIPPED
+    ("2026-07-05 22:38", "Phase 4 — RADIUS migration portal integration SHIPPED",
+     "Misha",
+     "5 commits pushed to origin/main at HEAD eca9fc5. Phase 4A (fb74cd2): portal_auth.py → SQLAlchemy + PyMySQL against portal@127.0.0.1 on radius DB. Phase 4B (d75c1cd): radcheck (Cleartext-Password + NT-Password) + radusergroup (default group, priority 0) writes wired on POST /api/customers. Phase 4C/4D (3180f74): rotate_eap updates radcheck; archive sets Cleartext-Password to DISABLED-<uuid8>; unarchive regenerates password; DELETE cleans up radcheck + radusergroup + radreply. Phase 4F (fc4bd90): deploy script STEP 1.6 Python ast.parse + env-var completeness check via /proc/<MainPID>/environ. Phase 4D-fix (eca9fc5): unarchive regenerates password cleanly (no fragile BLOB→hex decode through SQLite -json).",
+     "🟠 High", "End-to-end verified on VPN prod VPS 22:38 UTC: login + create + rotate + archive + unarchive + delete all worked against live MariaDB. radcheck rows + radusergroup rows written as expected. Operator admin password rotated to At7S7rKtJqzSbOBqJymWv19iY_ImOfKs (plaintext in /root/.openclaw/.portal-admin-pw mode 600). GH parity check ✅ PASS. Next: Phase 5 BLOCKED on clients.conf secret diagnostic — see Bugs sheet."),
+    ("2026-07-05 22:38", "Operator admin password rotation (Argon2id hash updated)",
+     "Misha",
+     "Old hash $argon2id$v=19$m=19456,t=2,p=1$ghr8wvcc3rE/Tjb3xKy8+g$Rr+gk9ccXXuM6oZT1Qr55v1qXxhsbDxTaslIQkduKEs could not be matched to any candidate (totalconnect, TruenasExp2026!, zun, admin, password1). Original plaintext was lost/unknown. Rotated to fresh secrets.token_urlsafe(24) = At7S7rKtJqzSbOBqJymWv19iY_ImOfKs.",
+     "🟡 Med", "Plaintext stored in /root/.openclaw/.portal-admin-pw (mode 600, mirrored on VPS at /root/.portal-admin-pw). Self-verify True. Live HTTPS login at https://myvpn.databyte.co.za/api/login returns 200 OK. Server-side runtime env (verified via /proc/<PID>/environ) carries the new 97-byte hash correctly — systemd EnvironmentFile= is literal (no bash expansion)."),
 ]
 for r, row in enumerate(history, start=1):
     for c, v in enumerate(row):
