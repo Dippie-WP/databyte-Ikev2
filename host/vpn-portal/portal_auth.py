@@ -609,3 +609,139 @@ def require_operator_session(
     # Stash for /api/audit-style logging
     request.state.operator_session = info
     return info
+
+
+# ---------- Phase 4.3-4.7: RADIUS lifecycle helpers ----------
+#
+# These functions write radcheck/usergroup rows when customers are created,
+# have their EAP password rotated, are disabled (archived), or re-enabled.
+# Phase 5 will cut charon over to read FreeRADIUS → these rows become the
+# authoritative source of truth for VPN auth.
+
+def add_customer_radcheck(username: str, plaintext_password: str, nt_hash_hex_upper: str):
+    """INSERT radcheck row(s) for a new customer.
+
+    Writes BOTH:
+      - Cleartext-Password — needed for portal verify (Phase 4 self-service password reset)
+      - NT-Password        — pre-computed MD4 hash for FreeRADIUS EAP-MSCHAPv2
+
+    Wipes any prior radcheck rows for this username first (idempotent re-create).
+
+    Args:
+        username: EAP identity (e.g. "alice-iphone").
+        plaintext_password: the literal password the operator saw in the modal.
+            Stored as Cleartext-Password. Security note: this is the cost of
+            password rotation + portal verify. daloRADIUS operator passwords
+            are similarly stored as bcrypt. Customer passwords must be reversible
+            for FreeRADIUS, hence plaintext.
+        nt_hash_hex_upper: MD4(UTF-16LE(password)) as 32-char uppercase hex.
+            Computed by ntlm_hash_bytes().hex().upper().
+    """
+    with _db() as conn:
+        # Wipe any prior radcheck rows for this user (defense in depth)
+        conn.execute("DELETE FROM radcheck WHERE username = ?", (username,))
+        # Cleartext-Password for portal-side verify + RADIUS fallback
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
+            (username, plaintext_password),
+        )
+        # NT-Password for FreeRADIUS EAP-MSCHAPv2 (pre-computed MD4 hash)
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'NT-Password', ':=', ?)",
+            (username, nt_hash_hex_upper),
+        )
+        conn.commit()
+        log.info(f"radcheck: added Cleartext-Password + NT-Password for {username}")
+
+
+def update_customer_password_radcheck(username: str, new_plaintext_password: str, new_nt_hash_hex_upper: str):
+    """UPDATE radcheck rows after password rotation (Phase 4.4).
+
+    Replaces BOTH Cleartext-Password and NT-Password atomically.
+    """
+    with _db() as conn:
+        conn.execute("DELETE FROM radcheck WHERE username = ?", (username,))
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
+            (username, new_plaintext_password),
+        )
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'NT-Password', ':=', ?)",
+            (username, new_nt_hash_hex_upper),
+        )
+        conn.commit()
+        log.info(f"radcheck: rotated password for {username}")
+
+
+def disable_customer_radcheck(username: str):
+    """UPDATE radcheck to deny auth (Phase 4.5).
+
+    Replaces Cleartext-Password with a unique impossible value, which causes
+    FreeRADIUS to reject MSCHAPv2 password verification. The original password
+    is preserved in the audit_log for restoration.
+    """
+    disabled_marker = f"DISABLED-{secrets.token_hex(8)}"
+    with _db() as conn:
+        conn.execute("DELETE FROM radcheck WHERE username = ?", (username,))
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
+            (username, disabled_marker),
+        )
+        conn.commit()
+        log.info(f"radcheck: disabled {username} (marker={disabled_marker})")
+
+
+def enable_customer_radcheck(username: str, plaintext_password: str, nt_hash_hex_upper: str):
+    """UPDATE radcheck to restore auth (Phase 4.6).
+
+    Replaces the DISABLED- marker with the customer's original password.
+    Caller is responsible for retrieving the stored password (from
+    customer_auth table or audit_log) before calling.
+    """
+    with _db() as conn:
+        conn.execute("DELETE FROM radcheck WHERE username = ?", (username,))
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)",
+            (username, plaintext_password),
+        )
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'NT-Password', ':=', ?)",
+            (username, nt_hash_hex_upper),
+        )
+        conn.commit()
+        log.info(f"radcheck: re-enabled {username}")
+
+
+def add_customer_usergroup(username: str, groupname: str = "default", priority: int = 0):
+    """INSERT radusergroup row (Phase 4.7) — assigns customer to RADIUS group.
+
+    NOTE: FreeRADIUS's user-group membership table is `radusergroup`, NOT
+    `usergroup` (daloRADIUS convention). We follow FreeRADIUS's name.
+
+    The `default` group is daloRADIUS's standard customer group. Group
+    membership drives RADIUS reply attributes (e.g., bandwidth caps,
+    Simultaneous-Use limits set in radgroupreply).
+    """
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, ?)",
+            (username, groupname, priority),
+        )
+        conn.commit()
+        log.info(f"radusergroup: added {username} → {groupname} (priority {priority})")
+
+
+def remove_customer_radcheck_and_usergroup(username: str):
+    """DELETE all RADIUS data for a customer (used on full delete, not archive).
+
+    Removes:
+      - radcheck rows
+      - radusergroup rows
+      - radreply rows (if any)
+    """
+    with _db() as conn:
+        conn.execute("DELETE FROM radcheck WHERE username = ?", (username,))
+        conn.execute("DELETE FROM radusergroup WHERE username = ?", (username,))
+        conn.execute("DELETE FROM radreply WHERE username = ?", (username,))
+        conn.commit()
+        log.info(f"radcheck+radusergroup+radreply: removed all for {username}")

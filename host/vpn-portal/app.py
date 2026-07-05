@@ -1220,6 +1220,21 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         dev_id = db_query(f"SELECT id FROM devices WHERE device_name = {_q(req.device_name)} "
                           f"AND customer_id = {int(cust_id)};")[0]["id"]
 
+        # Phase 4.3 + 4.7 (RADIUS migration): write radcheck + usergroup rows
+        # for the new customer. Best-effort: if RADIUS DB write fails here, the
+        # customer is still in MariaDB and PSK still works (charon uses
+        # rw-eap.conf for now). Phase 5 cutover will read from FreeRADIUS.
+        try:
+            portal_auth.add_customer_radcheck(
+                eap_identity, password, ntlm.hex().upper()
+            )
+            portal_auth.add_customer_usergroup(eap_identity, "default")
+        except Exception as e:
+            log.warning(
+                f"Phase 4B RADIUS write failed for {eap_identity} "
+                f"(non-fatal until Phase 5 cutover): {e}"
+            )
+
         # 7. EAP block
         append_eap_block(eap_identity, password)
 
