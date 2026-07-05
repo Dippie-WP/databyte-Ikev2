@@ -883,7 +883,7 @@ design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
 
 ---
 
-**Note on stale v2.x tags:** `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` exist on origin but pre-date the 2026-06-26 recovery baseline (they point to commits 2026-06-24/25, before `v1.7.0-recovered` was cut 2026-06-26). They are **orphaned** — do not build from them. Future cleanup: delete these tags.
+**Note on stale v2.x tags:** `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` previously existed on origin but pre-date the 2026-06-26 recovery baseline (they pointed to commits 2026-06-24/25, before `v1.7.0-recovered` was cut 2026-06-26). They were **orphaned** — and were **DELETED 2026-07-05 17:39 UTC** per Zun's instruction. Do not re-create them. `v1.7.0-recovered` is the canonical recovery baseline; everything on `main` post that commit is the live work stream.
 
 ---
 
