@@ -100,6 +100,31 @@ SWANCTL_PREFIX = ["docker", "exec", "strongswan", "swanctl", "--uri=tcp://127.0.
 # === Logging ===
 log = logging.getLogger("quota-monitor")
 
+# === DAE (RFC 5176 Disconnect-Request) — Phase 5D, 2026-07-06 14:11 SAST ===
+#
+# vpn_disconnect.py lives in the same dir as quota-monitor.py (systemd runs
+# us from /home/zunaid/strongswan/quota/). sys.path insert below is a
+# defensive belt that covers manual runs, future venv moves, or any case
+# where cwd != script dir.
+_VPN_DISC_DIR = "/home/zunaid/strongswan/quota"
+if _VPN_DISC_DIR not in sys.path:
+    sys.path.insert(0, _VPN_DISC_DIR)
+try:
+    from vpn_disconnect import send_dae_disconnect  # type: ignore[import-not-found]
+    _DAE_HELPER_IMPORTED = True
+except Exception as _dae_imp_err:  # ImportError, SyntaxError, anything
+    # Fall back to a no-op so the daemon still runs if vpn_disconnect.py
+    # is missing or broken on disk. We log loudly; _cut_customer will
+    # record "dae_result=missing_helper" in the audit row.
+    log.error("vpn_disconnect import failed (%s) — DAE disabled, "
+              "fallback no-op used; cut will fall back to "
+              "swanctl --terminate", _dae_imp_err)
+
+    def send_dae_disconnect(*_args, **_kwargs):  # type: ignore[no-redef]
+        return "error"
+
+    _DAE_HELPER_IMPORTED = False
+
 # === nft METER parsing (Phase 6, 2026-06-26) ===
 #
 # Meter output line example (from `nft list meter ip filter client_src`):
@@ -722,15 +747,25 @@ class QuotaMonitor:
 
     def _cut_customer(self, db: sqlite3.Connection, cust: dict, data_used: int) -> None:
         """100% threshold — kill RADIUS radcheck (PRIMARY), kill rw-eap.conf
-        (defense-in-depth), terminate SAs, set over_quota=1.
+        (defense-in-depth), DAE Disconnect-Request (RFC 5176 standards-based
+        SA kill), terminate SAs as belt-and-suspenders, set over_quota=1.
 
-        Phase 5 cutover (2026-07-06): charon authenticates via RADIUS
+        Phase 5+ cutover (2026-07-06): charon authenticates via RADIUS
         (`auth = eap-radius`). The rw-eap.conf secret KILL is no longer
         the mechanism that locks a customer out — only the radcheck
         Cleartext-Password in MariaDB is. We do BOTH: radcheck disable
         is the primary kill (a hard fail in this step is a cut failure);
         rw-eap.conf kill is defense-in-depth (warn but don't fail if
         the block is missing — Phase 5+ customers don't have one).
+
+        DAE Disconnect-Request (Phase 5D, 2026-07-06 14:11 SAST): the
+        cleanest, standards-based way to actively terminate the
+        customer's IKE_SA. Sent to charon's eap-radius.dae listener
+        on UDP/127.0.0.1:3799 via vpn_disconnect.send_dae_disconnect().
+        charon returns ACK = terminated, NAK = no SA matched (already
+        offline = OK). Replaces (complements) swanctl --terminate
+        which is kept as belt-and-suspenders for SAs the DAE path
+        misses (half-open, mid-rekey).
 
         Reverts /api/quota/{id}/reset restores radcheck via
         enable_customer_radcheck() in the portal.
@@ -741,18 +776,26 @@ class QuotaMonitor:
                   cust["vip"], username, cust["customer_name"],
                   data_used, cust["data_limit_bytes"])
 
-        # 1. PRIMARY: disable RADIUS radcheck (locks the customer out)
+        # 1. PRIMARY: disable RADIUS radcheck (locks future auth)
         radcheck_killed = disable_customer_radcheck(username)
 
         # 2. DEFENSE-IN-DEPTH: kill rw-eap.conf secret (Phase-5 obsolete
         # but kept for safety; no-op for Phase 5+ customers)
         rw_eap_killed = kill_customer_credentials(db, customer_id, username)
 
-        # 3. Terminate active SAs (so the customer can't keep using
-        # the existing tunnel even if they have a session in flight)
+        # 3. RFC 5176 DAE Disconnect-Request - standards-based active SA
+        #    termination via charon's eap-radius.dae listener (UDP/3799).
+        #    pyrad sends User-Name=<username>; charon matches against
+        #    active IKE_SAs and sends IKE DELETE INFORMATIONAL. ACK = ok,
+        #    NAK = no SA (already offline). Both are non-fatal in the
+        #    cut log: we're not blocking on either result.
+        dae_result = send_dae_disconnect(username)
+
+        # 4. Belt-and-suspenders: parse swanctl --list-sas and terminate.
+        #    Catches any SA the DAE path missed (e.g., half-open states).
         n_terminated = terminate_customer_sas(username)
 
-        # 4. Mark + audit + alert
+        # 5. Mark + audit + alert
         if radcheck_killed:
             db.execute(
                 "UPDATE customers SET over_quota = 1, updated_at = ? WHERE id = ?",
@@ -761,6 +804,7 @@ class QuotaMonitor:
             log_alert(db, customer_id, CUT_PCT, data_used)
             log_audit(db, "quota-monitor", "cut_100pct", "customer", customer_id,
                       f'{{"data_used": {data_used}, "data_limit": {cust["data_limit_bytes"]}, '
+                      f'"dae_result": "{dae_result}", '
                       f'"sas_terminated": {n_terminated}, '
                       f'"radcheck_killed": {radcheck_killed}, '
                       f'"rw_eap_killed": {rw_eap_killed}}}')
@@ -768,6 +812,8 @@ class QuotaMonitor:
             log_audit(db, "quota-monitor", "cut_100pct_FAILED", "customer", customer_id,
                       f'{{"data_used": {data_used}, '
                       f'"reason": "radcheck disable failed (customer NOT locked out)", '
+                      f'"dae_result": "{dae_result}", '
+                      f'"sas_terminated": {n_terminated}, '
                       f'"rw_eap_killed": {rw_eap_killed}}}')
 
     def run_daemon(self) -> None:
