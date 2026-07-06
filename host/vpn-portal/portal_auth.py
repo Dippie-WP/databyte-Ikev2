@@ -440,30 +440,32 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
 
 
 def lookup_customer_full(customer_id: int) -> Optional[dict]:
-    """Look up customer + tier info for the portal usage endpoint. Scoped to customer_id."""
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT c.id, c.name, c.display_name, c.email, c.status, c.is_operator, c.is_active, "
-            "c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, "
-            "t.name AS tier_name, t.display_name AS tier_display "
-            "FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
-            "WHERE c.id = ?",
-            (customer_id,)
-        ).fetchone()
-        if not row:
-            return None
-        return dict(row)
+    """Look up customer + tier info for the portal usage endpoint. Scoped to customer_id.
+
+    v1.9.3 — read from portal-local SQLite (where customer_create wrote it).
+    See lookup_user_and_customer for full rationale.
+    """
+    rows = _sqlite_query(
+        f"SELECT c.id, c.name, c.display_name, c.email, c.status, c.is_operator, c.is_active, "
+        f"c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, "
+        f"t.name AS tier_name, t.display_name AS tier_display "
+        f"FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
+        f"WHERE c.id = {int(customer_id)}"
+    )
+    if not rows:
+        return None
+    return rows[0]
 
 
 def list_customer_devices(customer_id: int) -> list:
-    """List devices for a customer. Scoped to customer_id — caller can only see their own devices."""
-    with _db() as conn:
-        rows = conn.execute(
-            "SELECT id, device_name, device_type, os_version, hostname, is_active, last_seen_at, created_at "
-            "FROM devices WHERE customer_id = ? ORDER BY id",
-            (customer_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+    """List devices for a customer. Scoped to customer_id — caller can only see their own devices.
+
+    v1.9.3 — read from portal-local SQLite (where customer_create wrote it).
+    """
+    return _sqlite_query(
+        f"SELECT id, device_name, device_type, os_version, hostname, is_active, last_seen_at, created_at "
+        f"FROM devices WHERE customer_id = {int(customer_id)} ORDER BY id"
+    )
 
 
 # ---------- Session helpers ----------
