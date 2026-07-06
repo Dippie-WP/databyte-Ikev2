@@ -274,7 +274,7 @@ For HA rollback (multiple instances + LB), see Phase 5H.
 | **5C.3** | Grafana `strongswan-quota` dashboard | ✅ **GREEN (v1.2.2)** |
 | **5C.4** | ~~RustFS daily backup verify~~ | ⛔ **CANCELLED (2026-06-20)** — replaced by PBS full-LXC backup |
 | **5C.5/5C.6** | ~~Self-service / multi-device~~ | ⛔ **REVERTED / SHELVED (v1.2.6)** — strongSwan 1-identity-1-VIP blocks per-device under EAP-MSCHAPv2 |
-| **5D (RADIUS migration)** | FreeRADIUS + daloRADIUS on prod VPS, single MariaDB, portal keeps management. Direct-to-prod, nuke + start fresh (per Zun #23766 + #23783). | 🟡 **IN PROGRESS 2026-07-05** (was SHELVED SaaS billing since 2026-06-19 — repurposed). Plan: `install-radius-daloradius.md` (7 phases); see tracker row 5D. |
+| **5D (RADIUS migration)** | FreeRADIUS + daloRADIUS on prod VPS, single MariaDB, portal keeps management. Direct-to-prod, nuke + start fresh (per Zun #23766 + #23783). | 🟢 **Phase 5 CUTOVER ACTIVE 2026-07-06 03:55 SAST** — rw-eap.conf `auth = eap-radius` live; ALL 40 customers must re-register via portal. Phase 4 (portal↔MariaDB) ✅, Phase 5 (charon eap-radius) ✅, Phase 6 (customer re-registration) ⏳ in progress, Phase 7 (cleanup + docs) ⏳. Plan: `install-radius-daloradius.md` (7 phases); see tracker row 5D. |
 | **5D (pre-launch)** | Per-customer bandwidth, customer portal, Windows installer, billing IDs | ✅ **LIVE on VPS** (rolled up under v1.4.0 → v1.7.0-recovered, deployed 2026-06-22 → 2026-06-26) |
 | **5H** | HA + LB (2x v1.9 + keepalived VRRP + shared DB) | ⏳ **NOT STARTED** — plan at `docs/PLAN-5H-HA-LB.md` |
 
