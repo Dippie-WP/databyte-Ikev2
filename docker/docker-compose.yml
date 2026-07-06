@@ -47,6 +47,7 @@ services:
       - ./strongswan.d/debug.conf:/etc/strongswan.d/debug.conf:ro
       - ./strongswan.d/attr-sql.conf:/etc/strongswan.d/attr-sql.conf:ro
       - ./strongswan.d/00-virtual-ip.conf:/etc/strongswan.d/00-virtual-ip.conf:ro
+      - ./strongswan.d/10-eap-radius.conf:/etc/strongswan.d/10-eap-radius.conf:ro
       # Host-side charon log (bind-mounted to container's filelog path)
       - /var/log/charon-log-host/charon.log:/var/log/charon-filog.log:rw
       # SQLite DB with user data + leases
