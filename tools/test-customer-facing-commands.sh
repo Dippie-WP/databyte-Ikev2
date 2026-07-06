@@ -46,7 +46,7 @@ set -uo pipefail
 # --- defaults ---
 PORTAL_BASE="${PORTAL_BASE:-https://vpn-portal.databyte.co.za}"
 ADMIN_USER="${ADMIN_USER:-admin}"
-ADMIN_PASS="${ADMIN_PASS:-RwKUuPvc4mEzwgC7mDUxu3TX}"
+ADMIN_PASS="${ADMIN_PASS:-At7S7rKtJqzSbOBqJymWv19iY_ImOfKs}"
 STRICT=0
 PWSH_BIN="${PWSH_BIN:-pwsh}"
 CURL_BIN="${CURL_BIN:-curl}"
