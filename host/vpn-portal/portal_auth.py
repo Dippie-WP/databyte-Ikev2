@@ -31,6 +31,7 @@ import os
 import secrets
 import subprocess
 import time
+import json
 from contextlib import contextmanager
 from typing import Optional
 
@@ -52,6 +53,50 @@ PORTAL_COOKIE = "portal_session"
 # Operator session cookie name. Distinct from portal_session for the same
 # reason (separation of concerns, defense in depth).
 OPERATOR_COOKIE = "session"
+
+# ---------------------------------------------------------------------------
+# Customer/users/devices SQLite path (portal-local data, not RADIUS data)
+# ---------------------------------------------------------------------------
+# The customer create flow writes customers/users/devices to a local SQLite
+# file at DB_PATH on the VPN gateway (via app.db_exec). RADIUS data (radcheck,
+# radusergroup) lives in MariaDB via _db() below.
+#
+# For portal login (lookup_user_and_customer), we MUST read the user row from
+# the same DB it was written to — otherwise we look in MariaDB and find nothing.
+# This mirrors app.py's db_query() helper. Cannot import db_query directly
+# (circular import: app.py imports portal_auth).
+_VPN_HOST_SQLITE = os.environ.get("VPN_HOST", "127.0.0.1")
+_SSH_KEY_SQLITE  = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
+_DB_PATH_SQLITE  = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
+_SSH_TIMEOUT_SQLITE = 10
+
+
+def _sqlite_query(sql: str) -> list:
+    """Query the portal's local SQLite DB (where customers/users/devices live).
+    Mirrors app.db_query() — returns list of dicts, NULLs preserved correctly.
+    """
+    def _shq(s: str) -> str:
+        return "'" + s.replace("'", "'\\''") + "'"
+    remote = "sqlite3 -json " + _shq(_DB_PATH_SQLITE) + " " + _shq(sql)
+    full = [
+        "ssh", "-i", _SSH_KEY_SQLITE,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=5",
+        "-o", "StrictHostKeyChecking=accept-new",
+        f"root@{_VPN_HOST_SQLITE}",
+        remote,
+    ]
+    r = subprocess.run(full, capture_output=True, text=True, timeout=_SSH_TIMEOUT_SQLITE)
+    if r.returncode != 0:
+        raise HTTPException(502, f"portal sqlite error: {r.stderr.strip()[:200]}")
+    rows = json.loads(r.stdout) if r.stdout.strip() else []
+    # sqlite3 -json quirk: NULL serializes as the literal string "None".
+    # Convert back to None so the rest of the code sees proper nulls.
+    for row in rows:
+        for k, v in row.items():
+            if v == "None":
+                row[k] = None
+    return rows
 
 # 1h sliding expiry for the customer portal.
 #
@@ -338,46 +383,57 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
     Returns dict with keys: user_id, identity, password_hash, customer_id, customer_name,
     customer_status, customer_is_operator, customer_data_*, devices info.
     Returns None if user not found or device not found.
+
+    v1.9.2 — read from portal-local SQLite (where customer_create wrote it).
+    Previously used MariaDB _db() which never matched because Phase 4 migration
+    only put RADIUS data in MariaDB; portal-local rows stayed in SQLite. Any new
+    customer since 2026-07-05 (Phase 4) would silently fail portal login.
+
+    RADIUS data (Cleartext-Password, NT-Password, radusergroup) stays in MariaDB
+    via _db() — that part is correct. We only need to read user/customer/device
+    from SQLite to match where the customer_create flow wrote them.
     """
-    with _db() as conn:
-        user_row = conn.execute(
-            "SELECT id, name, password FROM users WHERE name = ? AND password IS NOT NULL AND length(password) > 0",
-            (identity,)
-        ).fetchone()
-        if not user_row:
-            return None
+    # 1. Find the user row (EAP identity = users.name)
+    user_rows = _sqlite_query(
+        f"SELECT id, name, password FROM users "
+        f"WHERE name = '{identity.replace(chr(39), chr(39)+chr(92)+chr(39))}' "
+        f"AND password IS NOT NULL AND length(password) > 0"
+    )
+    if not user_rows:
+        return None
+    user_row = user_rows[0]
 
-        # Find the device row that matches the user name
-        device_row = conn.execute(
-            "SELECT d.id AS device_id, d.device_name, d.customer_id, d.device_type, d.os_version, d.is_active, "
-            "c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
-            "c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
-            "FROM devices d JOIN customers c ON c.id = d.customer_id "
-            "WHERE d.strongswan_user_id = ?",
-            (user_row["id"],)
-        ).fetchone()
-        if not device_row:
-            return None
+    # 2. Find the device row that links user -> customer
+    device_rows = _sqlite_query(
+        f"SELECT d.id AS device_id, d.device_name, d.customer_id, d.device_type, d.os_version, d.is_active, "
+        f"c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
+        f"c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
+        f"FROM devices d JOIN customers c ON c.id = d.customer_id "
+        f"WHERE d.strongswan_user_id = {int(user_row['id'])}"
+    )
+    if not device_rows:
+        return None
+    device_row = device_rows[0]
 
-        return {
-            "user_id": user_row["id"],
-            "identity": user_row["name"],
-            "password_hash": user_row["password"],
-            "device_id": device_row["device_id"],
-            "device_name": device_row["device_name"],
-            "device_type": device_row["device_type"],
-            "device_os_version": device_row["os_version"],
-            "device_is_active": bool(device_row["is_active"]),
-            "customer_id": device_row["customer_id"],
-            "customer_name": device_row["customer_name"],
-            "customer_display_name": device_row["display_name"],
-            "customer_status": device_row["customer_status"],
-            "customer_is_operator": bool(device_row["customer_is_operator"]),
-            "customer_email": device_row["email"],
-            "customer_data_used_bytes": device_row["data_used_bytes"] or 0,
-            "customer_data_limit_bytes": device_row["data_limit_bytes"] or 0,
-            "customer_over_quota": bool(device_row["over_quota"]),
-        }
+    return {
+        "user_id": user_row["id"],
+        "identity": user_row["name"],
+        "password_hash": user_row["password"],
+        "device_id": device_row["device_id"],
+        "device_name": device_row["device_name"],
+        "device_type": device_row["device_type"],
+        "device_os_version": device_row["os_version"],
+        "device_is_active": bool(device_row["is_active"]),
+        "customer_id": device_row["customer_id"],
+        "customer_name": device_row["customer_name"],
+        "customer_display_name": device_row["display_name"],
+        "customer_status": device_row["customer_status"],
+        "customer_is_operator": bool(device_row["customer_is_operator"]),
+        "customer_email": device_row["email"],
+        "customer_data_used_bytes": device_row["data_used_bytes"] or 0,
+        "customer_data_limit_bytes": device_row["data_limit_bytes"] or 0,
+        "customer_over_quota": bool(device_row["over_quota"]),
+    }
 
 
 def lookup_customer_full(customer_id: int) -> Optional[dict]:
