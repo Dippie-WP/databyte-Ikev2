@@ -1222,13 +1222,25 @@
     if (!confirm('Full reset for ' + name + '?\n\n' +
                  '• data_used_bytes → 0\n' +
                  '• over_quota → 0\n' +
-                 '• Restore KILLED EAP secret (if any)\n' +
+                 '• Restore radcheck Cleartext-Password (Phase 5+ customers)\n' +
+                 '• Restore KILLED EAP secret (Phase 1–4 customers)\n' +
                  '• Zero iptables FORWARD counters\n' +
                  '• Clear daemon session sidecar\n\n' +
                  'iOS may need a manual VPN toggle to reconnect.')) return;
     try {
       const r = await post('/api/quota/' + id + '/reset', {});
       let msg = 'Reset ' + name + ': ' + fmtBytes(r.reset_from_bytes) + ' → 0';
+      // Bug fix 2026-07-06: show per-step restore results from the audit response.
+      // restore_radcheck is the Phase 5+ primary path; secret_restored was
+      // Phase 1–4 only. We surface both so the operator knows which mechanism
+      // actually unlocked the customer.
+      const steps = (r.steps || []);
+      const radStep = steps.find(s => s.step === 'restore_radcheck');
+      if (radStep && radStep.ok && !radStep.skipped) {
+        msg += ' · radcheck restored for ' + radStep.eap_identity;
+      } else if (radStep && !radStep.ok) {
+        msg += ' · radcheck RESTORE FAILED (' + radStep.error + ')';
+      }
       if (r.secret_restored) {
         msg += ' · EAP secret restored for ' + (r.secret_devices || []).join(', ');
       }
