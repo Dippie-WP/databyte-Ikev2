@@ -1,5 +1,5 @@
 [Unit]
-Description=databyte VPN Portal — FastAPI backend (v1.9.0, 2026-06-28 — deployed via host/scripts/deploy-portal-vps.sh)
+Description=databyte VPN Portal — FastAPI backend (v2.0.0, 2026-07-06 — deployed via host/scripts/deploy-portal-vps.sh)
 Documentation=file:///opt/vpn-portal/README.md
 After=network-online.target docker.service
 Wants=network-online.target
