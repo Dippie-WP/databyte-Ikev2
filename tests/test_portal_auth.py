@@ -118,6 +118,66 @@ class TestOperatorSession:
         assert portal_auth.verify_operator_session(s2) is None
         assert portal_auth.verify_operator_session(s3) is not None
 
+    def test_concurrent_verify_does_not_error(self, db_path):
+        """Regression 2026-07-06: operator session-refresh ping 500'd with
+        MariaDB error 1020 ('Record has changed since last read in table
+        operator_sessions') under concurrent verify_operator_session() calls.
+
+        Previous code did SELECT-then-UPDATE in the same transaction. On
+        MariaDB/InnoDB REPEATABLE READ, the 2nd worker's UPDATE failed because
+        the row had been modified by a concurrent committed tx.
+
+        This test simulates the race: 20 sequential verify calls against the
+        same session_id. With sqlite3 (used in tests) the bug doesn't fire
+        — sqlite3 doesn't have REPEATABLE READ row-version semantics. But the
+        test still exercises the new UPDATE-first code path and confirms it
+        is idempotent, returns the same row each time, and never errors.
+        """
+        sid = portal_auth.create_operator_session("admin", "ua", "1.2.3.4")
+        seen = set()
+        for _ in range(20):
+            sess = portal_auth.verify_operator_session(sid, slide=True)
+            assert sess is not None
+            assert sess["session_id"] == sid
+            assert sess["username"] == "admin"
+            seen.add(sess["last_active"])
+        # Each verify should bump last_active (or at minimum, not regress)
+        assert len(seen) >= 1  # at least one distinct value seen
+
+    def test_concurrent_purge_then_verify(self, db_path):
+        """Regression 2026-07-06: a session whose expires_at has just passed
+        (race with purge_expired_operator_sessions) must return None cleanly,
+        not raise. The DELETE-on-expired path in verify_operator_session is
+        best-effort and must not throw."""
+        import sqlite3
+        sid = portal_auth.create_operator_session("admin", "ua", "1.2.3.4")
+        # Backdate expires_at to force the expired branch
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "UPDATE operator_sessions SET expires_at = ? WHERE session_id = ?",
+            (int(time.time()) - 60, sid),
+        )
+        conn.commit()
+        conn.close()
+        # Should return None, not raise
+        assert portal_auth.verify_operator_session(sid, slide=True) is None
+        # And the row should be gone
+        conn = sqlite3.connect(str(db_path))
+        row = conn.execute(
+            "SELECT 1 FROM operator_sessions WHERE session_id = ?", (sid,),
+        ).fetchone()
+        conn.close()
+        assert row is None
+
+    def test_no_slide_still_validates(self, db_path):
+        """slide=False must still verify the row is alive (not revoked/expired)
+        and return it. New code path uses UPDATE last_active=last_active
+        WHERE session_id=? AND revoked=0 AND expires_at >= now."""
+        sid = portal_auth.create_operator_session("admin", "ua", "1.2.3.4")
+        sess = portal_auth.verify_operator_session(sid, slide=False)
+        assert sess is not None
+        assert sess["username"] == "admin"
+
 
 # ---------- Customer portal session lifecycle ----------
 

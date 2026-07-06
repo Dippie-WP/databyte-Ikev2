@@ -425,38 +425,52 @@ def create_session(customer_id: int, identity: str, user_agent: str, ip_address:
 
 
 def verify_session(session_id: str, slide: bool = True) -> Optional[dict]:
-    """Verify a session_id and return the session info. Updates last_active if slide=True."""
+    """Verify a session_id and return the session info. Updates last_active if slide=True.
+
+    Bug fix 2026-07-06: same SELECT-then-UPDATE race condition as
+    verify_operator_session — see that docstring. Fixed by UPDATE-first pattern.
+    Also folded the absolute-age cap into the WHERE clause so the check is atomic.
+    """
     now = int(time.time())
+    max_age_cutoff = now - CUSTOMER_MAX_SESSION_AGE
     with _db() as conn:
+        if slide:
+            new_expires = now + PORTAL_TTL
+            # Bug #2/R2 absolute cap is now part of the WHERE — atomic check.
+            # created_at > max_age_cutoff means (now - created_at) <= CUSTOMER_MAX_SESSION_AGE.
+            cur = conn.execute(
+                "UPDATE customer_portal_sessions "
+                "SET last_active = ?, expires_at = ? "
+                "WHERE session_id = ? AND expires_at >= ? AND created_at > ?",
+                (now, new_expires, session_id, now, max_age_cutoff),
+            )
+            if cur.rowcount == 0:
+                # Either row is gone/expired OR exceeded absolute max age.
+                # Best-effort cleanup of both classes.
+                conn.execute(
+                    "DELETE FROM customer_portal_sessions "
+                    "WHERE session_id = ? AND (expires_at < ? OR created_at <= ?)",
+                    (session_id, now, max_age_cutoff),
+                )
+                conn.commit()
+                return None
+        else:
+            # No slide: just verify the row is still valid. UPDATE...WHERE locks
+            # the row to prevent concurrent purge from racing our read.
+            cur = conn.execute(
+                "UPDATE customer_portal_sessions SET last_active = last_active "
+                "WHERE session_id = ? AND expires_at >= ? AND created_at > ?",
+                (session_id, now, max_age_cutoff),
+            )
+            if cur.rowcount == 0:
+                return None
         row = conn.execute(
             "SELECT session_id, customer_id, identity, created_at, last_active, expires_at "
             "FROM customer_portal_sessions WHERE session_id = ?",
-            (session_id,)
+            (session_id,),
         ).fetchone()
-        if not row:
-            return None
-        # Bug #2/R2 absolute cap (added 2026-06-25): even if expires_at (1h sliding)
-        # keeps being refreshed, a session older than CUSTOMER_MAX_SESSION_AGE
-        # must be rejected and deleted. Without this, a continuously-active
-        # session would live forever.
-        if (now - row["created_at"]) > CUSTOMER_MAX_SESSION_AGE:
-            conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
-            log.warning("portal session %s... exceeded absolute max age %ds, deleted",
-                        session_id[:8], CUSTOMER_MAX_SESSION_AGE)
-            return None
-        if row["expires_at"] < now:
-            conn.execute("DELETE FROM customer_portal_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
-            return None
-        if slide:
-            new_expires = now + PORTAL_TTL
-            conn.execute(
-                "UPDATE customer_portal_sessions SET last_active = ?, expires_at = ? WHERE session_id = ?",
-                (now, new_expires, session_id)
-            )
-            conn.commit()
-        return dict(row)
+        conn.commit()
+        return dict(row) if row else None
 
 
 def delete_session(session_id: str) -> None:
@@ -527,29 +541,56 @@ def verify_operator_session(session_id: str, slide: bool = True) -> Optional[dic
     Side effects (when slide=True): refreshes last_active + extends expires_at
     (sliding 8h window). Sessions past expires_at are deleted and return None.
     Revoked sessions (revoked=1) return None.
+
+    Bug fix 2026-07-06 (race condition on MariaDB / InnoDB):
+        Previous version did SELECT-then-UPDATE inside the same transaction.
+        With 4 gunicorn workers + a periodic purge_expired_operator_sessions()
+        task, two workers could race on the same row. The 2nd worker's UPDATE
+        failed with MariaDB error 1020 ("Record has changed since last read in
+        table 'operator_sessions'") because InnoDB's REPEATABLE READ snapshot
+        detected the row had been modified by a concurrent committed tx.
+
+        Fix: do the UPDATE FIRST (acquires an exclusive row lock + checks
+        rowcount atomically), then SELECT for the return value. rowcount==0
+        means the row is gone, revoked, or expired — return None.
     """
     now = int(time.time())
     with _db() as conn:
+        if slide:
+            new_expires = now + OPERATOR_TTL
+            cur = conn.execute(
+                "UPDATE operator_sessions SET last_active = ?, expires_at = ? "
+                "WHERE session_id = ? AND revoked = 0 AND expires_at >= ?",
+                (now, new_expires, session_id, now),
+            )
+            if cur.rowcount == 0:
+                # Either row is gone, revoked, or expired.
+                # If expired, clean it up (best-effort, ignore failures).
+                conn.execute(
+                    "DELETE FROM operator_sessions WHERE session_id = ? AND expires_at < ?",
+                    (session_id, now),
+                )
+                conn.commit()
+                return None
+        else:
+            # No slide: just verify the row is still valid (not revoked/expired).
+            # Use UPDATE...WHERE so the row is locked during our read, preventing
+            # a concurrent purge from modifying it between our SELECT and return.
+            cur = conn.execute(
+                "UPDATE operator_sessions SET last_active = last_active "
+                "WHERE session_id = ? AND revoked = 0 AND expires_at >= ?",
+                (session_id, now),
+            )
+            if cur.rowcount == 0:
+                return None
         row = conn.execute(
             "SELECT session_id, username, created_at, last_active, expires_at, revoked "
             "FROM operator_sessions WHERE session_id = ?",
-            (session_id,)
+            (session_id,),
         ).fetchone()
-        if not row:
+        conn.commit()
+        if not row or row["revoked"]:
             return None
-        if row["revoked"]:
-            return None
-        if row["expires_at"] < now:
-            conn.execute("DELETE FROM operator_sessions WHERE session_id = ?", (session_id,))
-            conn.commit()
-            return None
-        if slide:
-            new_expires = now + OPERATOR_TTL
-            conn.execute(
-                "UPDATE operator_sessions SET last_active = ?, expires_at = ? WHERE session_id = ?",
-                (now, new_expires, session_id)
-            )
-            conn.commit()
         return dict(row)
 
 
