@@ -34,12 +34,14 @@ import argparse
 import logging
 import os
 import re
+import secrets
 import signal
 import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 # === Config (paths) ===
 DB_PATH = Path("/var/lib/strongswan/ipsec.db")
@@ -240,18 +242,27 @@ def log_audit(db: sqlite3.Connection, actor: str, action: str, target_type: str,
 def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username: str) -> bool:
     """Replace rw-eap.conf secret for `username` with KILLED-<random>.
 
-    Returns True on success. Backups the original conf first.
+    Phase 5 (post-cutover 2026-07-06): charon authenticates via RADIUS
+    (`auth = eap-radius`). The rw-eap.conf `secrets { eap-XXX { ... } }`
+    block is dead-weight — killing it does NOT lock the customer out.
+    The PRIMARY kill mechanism is now disable_customer_radcheck() (RADIUS).
+    This rw-eap.conf kill is kept as defense-in-depth: if eap-radius
+    ever fails and charon falls back to eap-mschapv2, the dead secret
+    is still useful.
+
+    Returns True on success OR if no block was found (Phase 5+ customer
+    that never had a rw-eap.conf entry — normal, not an error).
+    Returns False only on write/reload failure.
     """
     if not CONF_PATH.exists():
         log.error("rw-eap.conf not found at %s", CONF_PATH)
         return False
 
-    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     original = CONF_PATH.read_text()
 
     # Match:  eap-<username> {\n    id     = <username>\n    secret = "..."\n  }
     # Replace secret value with a random unguessable token.
-    killed = f"KILLED-{os.urandom(8).hex()}"
+    killed = f"KILLED-{secrets.token_hex(8)}"
     pattern = re.compile(
         r"(eap-" + re.escape(username) + r"\s*\{\s*id\s*=\s*"
         + re.escape(username) + r"\s*secret\s*=\s*\")[^\"]*(\")",
@@ -259,10 +270,14 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     )
     new_text, n_subs = pattern.subn(r"\g<1>" + killed + r"\g<2>", original)
     if n_subs == 0:
-        log.error("No eap-%s block found in rw-eap.conf — refusing to kill", username)
-        return False
+        # No rw-eap.conf block — expected for customers created post-Phase-5
+        # cutover (only radcheck rows exist). Not an error.
+        log.info("No eap-%s block in rw-eap.conf (Phase 5+ customer, "
+                 "auth via RADIUS only) — rw-eap kill skipped", username)
+        return True
 
     # Backup before write
+    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     bak = CONF_BACKUP_DIR / f"rw-eap.conf.bak-quotamon-{int(time.time())}"
     bak.write_text(original)
     log.info("Backed up original to %s", bak)
@@ -286,6 +301,89 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
         return False
 
     return True
+
+
+# === Phase 5: RADIUS radcheck disable (primary kill mechanism) ===
+
+_RADIUS_DB_NAME = "radius"
+_RADIUS_PW_FILE = Path("/root/.mariadb-radius-pw")
+
+
+def _read_radius_db_password() -> Optional[str]:
+    """Read MariaDB radius@127.0.0.1 password from /root/.mariadb-radius-pw.
+
+    The file is root-only (mode 600). quota-monitor.service runs as root,
+    so this is safe. Returns None if the file is missing/unreadable.
+    Skips comment lines (file starts with `# ...` metadata).
+    """
+    if not _RADIUS_PW_FILE.exists():
+        log.error("RADIUS password file missing: %s", _RADIUS_PW_FILE)
+        return None
+    try:
+        text = _RADIUS_PW_FILE.read_text()
+    except (PermissionError, OSError) as e:
+        log.error("Cannot read %s: %s (quota-monitor must run as root)",
+                  _RADIUS_PW_FILE, e)
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    log.error("No password line found in %s (only comments?)", _RADIUS_PW_FILE)
+    return None
+
+
+def disable_customer_radcheck(username: str) -> bool:
+    """Replace radcheck Cleartext-Password with DISABLED-<random> marker.
+
+    Phase 5 cutover (2026-07-06): this is the PRIMARY kill mechanism.
+    Charon authenticates via RADIUS (`auth = eap-radius` in rw-eap.conf);
+    only the radcheck row matters for whether the customer can reconnect.
+
+    SQL mirrors the portal_auth.disable_customer_radcheck() function:
+      1. DELETE all existing radcheck rows for this username
+      2. INSERT a Cleartext-Password := DISABLED-<random> marker
+         (fails MSCHAPv2 verification — rejects every auth attempt)
+
+    Returns True on success, False if DB unavailable or SQL failed.
+    The original Cleartext-Password is preserved in customer_auth
+    (managed by the portal) for restoration via /api/quota/{id}/reset.
+    """
+    pw = _read_radius_db_password()
+    if not pw:
+        return False
+
+    disabled_marker = f"DISABLED-{secrets.token_hex(8)}"
+    # token_hex output is `[0-9a-f]+` — safe to interpolate directly.
+    # username comes from our DB join (already validated by SQLite path);
+    # still escape single quotes defensively.
+    safe_user = username.replace("'", "''")
+    sql = (
+        f"DELETE FROM radcheck WHERE username = '{safe_user}';\n"
+        f"INSERT INTO radcheck (username, attribute, op, value) "
+        f"VALUES ('{safe_user}', 'Cleartext-Password', ':=', '{disabled_marker}');\n"
+    )
+
+    try:
+        # Use MYSQL_PWD env var instead of -p<pw> arg to avoid leaking
+        # the password via `ps`. mariadb/mysql CLI both respect MYSQL_PWD.
+        proc = subprocess.run(
+            ["mariadb", "-u", "radius", "-h", "127.0.0.1", _RADIUS_DB_NAME],
+            input=sql,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "MYSQL_PWD": pw},
+        )
+        log.info("radcheck: disabled %s (marker=%s)", username, disabled_marker)
+        return True
+    except subprocess.CalledProcessError as e:
+        log.error("mariadb radcheck disable failed for %s: rc=%s stderr=%s",
+                  username, e.returncode, e.stderr.strip()[:500])
+        return False
+    except FileNotFoundError:
+        log.error("mariadb CLI not found in PATH — cannot disable radcheck")
+        return False
 
 
 def terminate_customer_sas(username: str) -> int:
@@ -487,17 +585,39 @@ class QuotaMonitor:
                   f'"data_limit": {cust["data_limit_bytes"]}}}')
 
     def _cut_customer(self, db: sqlite3.Connection, cust: dict, data_used: int) -> None:
-        """100% threshold — kill creds, terminate SAs, set over_quota=1."""
+        """100% threshold — kill RADIUS radcheck (PRIMARY), kill rw-eap.conf
+        (defense-in-depth), terminate SAs, set over_quota=1.
+
+        Phase 5 cutover (2026-07-06): charon authenticates via RADIUS
+        (`auth = eap-radius`). The rw-eap.conf secret KILL is no longer
+        the mechanism that locks a customer out — only the radcheck
+        Cleartext-Password in MariaDB is. We do BOTH: radcheck disable
+        is the primary kill (a hard fail in this step is a cut failure);
+        rw-eap.conf kill is defense-in-depth (warn but don't fail if
+        the block is missing — Phase 5+ customers don't have one).
+
+        Reverts /api/quota/{id}/reset restores radcheck via
+        enable_customer_radcheck() in the portal.
+        """
         customer_id = cust["customer_id"]
         username = cust["username"]
         log.error("VIP %s user=%s cust=%s: 100%% CUT — used %d / %d",
                   cust["vip"], username, cust["customer_name"],
                   data_used, cust["data_limit_bytes"])
 
-        ok = kill_customer_credentials(db, customer_id, username)
+        # 1. PRIMARY: disable RADIUS radcheck (locks the customer out)
+        radcheck_killed = disable_customer_radcheck(username)
+
+        # 2. DEFENSE-IN-DEPTH: kill rw-eap.conf secret (Phase-5 obsolete
+        # but kept for safety; no-op for Phase 5+ customers)
+        rw_eap_killed = kill_customer_credentials(db, customer_id, username)
+
+        # 3. Terminate active SAs (so the customer can't keep using
+        # the existing tunnel even if they have a session in flight)
         n_terminated = terminate_customer_sas(username)
 
-        if ok:
+        # 4. Mark + audit + alert
+        if radcheck_killed:
             db.execute(
                 "UPDATE customers SET over_quota = 1, updated_at = ? WHERE id = ?",
                 (int(time.time()), customer_id),
@@ -505,10 +625,14 @@ class QuotaMonitor:
             log_alert(db, customer_id, CUT_PCT, data_used)
             log_audit(db, "quota-monitor", "cut_100pct", "customer", customer_id,
                       f'{{"data_used": {data_used}, "data_limit": {cust["data_limit_bytes"]}, '
-                      f'"sas_terminated": {n_terminated}}}')
+                      f'"sas_terminated": {n_terminated}, '
+                      f'"radcheck_killed": {radcheck_killed}, '
+                      f'"rw_eap_killed": {rw_eap_killed}}}')
         else:
             log_audit(db, "quota-monitor", "cut_100pct_FAILED", "customer", customer_id,
-                      f'{{"data_used": {data_used}, "reason": "kill_customer_credentials returned False"}}')
+                      f'{{"data_used": {data_used}, '
+                      f'"reason": "radcheck disable failed (customer NOT locked out)", '
+                      f'"rw_eap_killed": {rw_eap_killed}}}')
 
     def run_daemon(self) -> None:
         """Long-running loop with graceful shutdown on SIGTERM/SIGINT."""
