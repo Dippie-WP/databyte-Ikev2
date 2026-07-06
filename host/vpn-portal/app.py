@@ -1451,16 +1451,149 @@ def get_quota(customer_id: int, _: dict = Depends(require_session)):
     }
 
 
+def _restore_radcheck_from_rw_eap_backup(customer_id: int) -> dict:
+    """Phase 5+ reset bug fix (2026-07-06): after a 100% cut, radcheck
+    Cleartext-Password gets replaced with `DISABLED-<16hex>`. The plaintext
+    customer password is preserved IN NO PLACE server-side as plaintext —
+    `users.password` is a BLOB of the NTLM hash (one-way). The ONLY on-disk
+    copy of the plaintext lives in the latest pre-cut rw-eap.conf backup
+    (filename = `.backups/rw-eap.conf.bak-quotamon-<unix_epoch>` — written
+    just before the `KILLED-<hex>` substitution).
+
+    This helper:
+      1. SELECTs the customer's EAP identity (users.name joined via devices)
+      2. SELECTs the latest backup file newer than any current KILLED block
+      3. Streams the backup, finds `eap-<identity> { id = <identity> ...
+         secret = "..." ... }`, extracts the plaintext secret
+      4. Computes NTLM hash; calls portal_auth.enable_customer_radcheck()
+         which REPLACES the DISABLED marker with real Cleartext-Password +
+         NT-Password in MariaDB radcheck table. Future charon eap-radius
+         authentications ACCEPT the customer's password.
+
+    Returns a step dict for the audit log. Idempotent:
+      - If no DISABLED row exists for this username (e.g., customer was
+        never cut), ok=True, already_enabled=True, no-op.
+      - If customer has no devices (operator, archived-without-devices),
+        ok=True, skipped=True.
+      - If newest backup doesn't have an eap-<identity> block (cut happened
+        BEFORE this customer was migrated to Phase 5+), ok=False with
+        "no secret_in_backup". The reset still proceeds for other steps;
+        the operator must run /rotate_eap to set a fresh password.
+
+    Security note: the plaintext secret is held in a Python str only during
+    this function's execution; it is passed verbatim to enable_customer_radcheck
+    and not logged.
+    """
+    import json as _json
+    step = {"step": "restore_radcheck", "ok": False}
+
+    # 1. Get the customer's EAP identity (one device row, since v1.2.6 enforces 1:1)
+    devs = db_query(
+        f"SELECT u.name AS eap_identity "
+        f"FROM devices d JOIN users u ON u.id = d.strongswan_user_id "
+        f"WHERE d.customer_id = {int(customer_id)};"
+    )
+    if not devs or not devs[0].get("eap_identity"):
+        return {**step, "ok": True, "skipped": True,
+                "reason": "no_devices_or_eap_identity"}
+
+    eap_identity = devs[0]["eap_identity"]
+
+    # 2. Is the radcheck row currently DISABLED? (Skip if not — nothing to fix.)
+    try:
+        with portal_auth._db() as conn:
+            rc_rows = conn.execute(
+                "SELECT attribute, value FROM radcheck WHERE username = :u",
+                {"u": eap_identity},
+            ).fetchall()
+        if not rc_rows:
+            # No radcheck rows at all = cut never triggered for this user
+            # (no DISABLED marker was inserted). Nothing to restore.
+            return {**step, "ok": True, "skipped": True,
+                    "reason": "no_radcheck_rows_for_user"}
+        cp_value = next((r["value"] for r in rc_rows
+                         if r["attribute"] == "Cleartext-Password"), None)
+        if cp_value and not cp_value.startswith("DISABLED-"):
+            # Already has a real password. No-op.
+            return {**step, "ok": True, "skipped": True,
+                    "reason": "radcheck_already_enabled"}
+    except Exception as e:
+        log.warning("radcheck pre-check failed for %s: %s", eap_identity, e)
+        # Fall through — try restore anyway, enable_customer_radcheck is idempotent.
+
+    # 3. Find the latest backup that contains eap-<identity> with a real secret.
+    try:
+        ls_out = ssh_903(["ls", "-1", BACKUP_DIR + "/"])
+        candidates = sorted(
+            [f.strip() for f in ls_out.splitlines()
+             if f.strip().startswith("rw-eap.conf.bak-quotamon-")]
+        )
+    except HTTPException as e:
+        return {**step, "ok": False, "error": f"list_backups_failed: {e.detail}"}
+
+    if not candidates:
+        return {**step, "ok": False, "error": "no_pre_cut_backups_on_disk"}
+
+    plaintext = None
+    used_backup = None
+    # Walk from newest to oldest — the most recent backup before the cut is
+    # what we want. Limit to the last 10 to bound read cost.
+    for backup_name in reversed(candidates[-10:]):
+        try:
+            bak = ssh_903(["cat", f"{BACKUP_DIR}/{backup_name}"])
+        except HTTPException:
+            continue
+        # Find the eap-<identity> block: starts with `eap-<identity> {`,
+        # ends with matching `}`. Capture `secret = "..."` inside.
+        m = re.search(
+            rf"eap-{re.escape(eap_identity)}\s*\{{[^}}]*"
+            rf"secret\s*=\s*\"([^\"]*)\"[^}}]*\}}",
+            bak, flags=re.DOTALL,
+        )
+        if m:
+            plaintext = m.group(1)
+            used_backup = backup_name
+            break
+
+    if not plaintext or plaintext.startswith("KILLED-"):
+        return {**step, "ok": False,
+                "error": "no_secret_in_any_backup",
+                "backups_scanned": len(candidates[-10:])}
+
+    # 4. Push to radcheck.
+    try:
+        ntlm = ntlm_hash_bytes(plaintext).hex().upper()
+    except Exception as e:
+        return {**step, "ok": False, "error": f"ntlm_compute_failed: {e}"}
+
+    try:
+        portal_auth.enable_customer_radcheck(eap_identity, plaintext, ntlm)
+    except Exception as e:
+        log.error("enable_customer_radcheck(%s) failed: %s", eap_identity, e)
+        return {**step, "ok": False, "error": f"enable_customer_radcheck_failed: {e}",
+                "eap_identity": eap_identity, "backup": used_backup}
+
+    log.info("radcheck restored for %s from %s (Phase 5+ reset)", eap_identity, used_backup)
+    return {**step, "ok": True,
+            "eap_identity": eap_identity,
+            "backup": used_backup,
+            # Never log the plaintext secret. ntlm-safe (one-way, can't recover pw).
+            "nt_hash_hex": ntlm[:8] + "..."}
+
+
 @app.post("/api/quota/{customer_id}/reset")
 def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     """Full operator reset for a customer. Does everything `reset_demo.sh` does, idempotently:
 
       1. data_used_bytes → 0, over_quota → 0 in customers
-      2. Detect KILLED EAP secrets for any of this customer's devices
-         → restore from latest pre-cut backup, reload charon creds
-      3. Zero iptables FORWARD counters for the customer's VIPs
-      4. Clear the quota-monitor session sidecar so it re-baselines
-      5. Audit-log each step
+      2. Restore radcheck Cleartext-Password + NT-Password from latest
+         rw-eap.conf backup (Phase 5+ — without this, RADIUS rejects auth
+         and the customer's iPhone shows "unable to connect" after cut+reset)
+      3. Detect KILLED EAP secrets in rw-eap.conf → restore from backup,
+         reload charon creds (Phase <5 fallback)
+      4. Zero iptables FORWARD counters for the customer's VIPs
+      5. Clear the quota-monitor session sidecar so it re-baselines
+      6. Audit-log each step
 
     Safe to run repeatedly; no-ops when nothing needs resetting.
     Returns a per-step report so the UI can show what happened.
@@ -1477,7 +1610,14 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     db_reset_from = cu.get("data_used_bytes", 0)
     steps.append({"step": "db_reset", "ok": True, "reset_from_bytes": db_reset_from})
 
-    # 2. Restore EAP secrets if KILLED
+    # 2. Phase 5+ RADIUS: restore radcheck Cleartext-Password + NT-Password
+    #    from the latest pre-cut rw-eap.conf backup. Phase 4 quota-monitor
+    #    (cut_100pct) replaces radcheck with a DISABLED-<16hex> marker; without
+    #    restoring it, charon eap-radius rejects every auth after reset and the
+    #    customer's iPhone stays disconnected.
+    steps.append(_restore_radcheck_from_rw_eap_backup(int(customer_id)))
+
+    # 3. Restore EAP secrets if KILLED
     # v1.6.7 — Bug fix: must query the EAP IDENTITY (users.name), not device_name.
     # rw-eap.conf blocks use `id = zade-cellphone` (EAP identity format =
     # `{customer.name}-{device.device_name}`), not `cellphone`. The old code
