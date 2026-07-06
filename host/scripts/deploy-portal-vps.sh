@@ -320,7 +320,9 @@ DEPLOYED_HTML_SHA="$(ssh "${VPS_HOST}" "sha256sum ${VPS_PORTAL_DIR}/www/index.ht
 echo ""
 echo "=== STEP 8: verify feature marker in LIVE resources (post cache-bust) ==="
 # Note: the portal shell is a SPA — the actual feature lives in app.js OR app.css.
-# Fetch the live HTML, extract the new ?v= app.js + app.css URLs, then check all three.
+# Also check portal/index.html and portal.js for customer-portal-only features
+# (e.g. /portal/ endpoints — add 30s auto-refresh, installer token display, etc.).
+# Fetch the live HTMLs, extract the new ?v= app.js + portal.js URLs, then check all.
 INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
 # Extract the versioned app.js URL from live HTML (post cache-bust should be ?v=$NEW_CACHE_VERSION)
 JS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.js\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
@@ -330,17 +332,29 @@ JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${JS_URL}' --max-time 10 2>/dev/null | gr
 CSS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PUBLIC_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/app\\.css\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
 CSS_URL="${PUBLIC_HTML_URL%/}${CSS_URL_VERSIONED:-/static/app.css}"
 CSS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${CSS_URL}' --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
+# Also check the customer portal HTML + portal.js (for portal-only features).
+PORTAL_HTML_URL="${PUBLIC_HTML_URL%/}/portal/"
+PORTAL_INDEX_RAW="$(ssh "${VPS_HOST}" "curl -sk ${PORTAL_HTML_URL} --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
+PORTAL_JS_URL_VERSIONED="$(ssh "${VPS_HOST}" "curl -sk ${PORTAL_HTML_URL} --max-time 10 2>/dev/null | grep -oE '/static/portal\\.js\\?v=[0-9a-f.]+' | head -1" 2>/dev/null || true)"
+PORTAL_JS_URL="${PUBLIC_HTML_URL%/}${PORTAL_JS_URL_VERSIONED:-/static/portal.js}"
+PORTAL_JS_RAW="$(ssh "${VPS_HOST}" "curl -sk '${PORTAL_JS_URL}' --max-time 10 2>/dev/null | grep -c -- '${FEATURE_MARKER}'" 2>/dev/null || true)"
 INDEX_MATCH="$(echo "${INDEX_RAW}" | head -1 | tr -dc '0-9')"
 JS_MATCH="$(echo "${JS_RAW}" | head -1 | tr -dc '0-9')"
 CSS_MATCH="$(echo "${CSS_RAW}" | head -1 | tr -dc '0-9')"
+PORTAL_INDEX_MATCH="$(echo "${PORTAL_INDEX_RAW}" | head -1 | tr -dc '0-9')"
+PORTAL_JS_MATCH="$(echo "${PORTAL_JS_RAW}" | head -1 | tr -dc '0-9')"
 [[ -z "${INDEX_MATCH}" ]] && INDEX_MATCH=0
 [[ -z "${JS_MATCH}" ]] && JS_MATCH=0
 [[ -z "${CSS_MATCH}" ]] && CSS_MATCH=0
-FEATURE_MATCH=$(( INDEX_MATCH + JS_MATCH + CSS_MATCH ))
-echo "  '${FEATURE_MARKER}' matches in index.html: ${INDEX_MATCH}"
-echo "  '${FEATURE_MARKER}' matches in app.js:     ${JS_MATCH}  (URL: ${JS_URL})"
-echo "  '${FEATURE_MARKER}' matches in app.css:    ${CSS_MATCH}  (URL: ${CSS_URL})"
-echo "  total:                                    ${FEATURE_MATCH}"
+[[ -z "${PORTAL_INDEX_MATCH}" ]] && PORTAL_INDEX_MATCH=0
+[[ -z "${PORTAL_JS_MATCH}" ]] && PORTAL_JS_MATCH=0
+FEATURE_MATCH=$(( INDEX_MATCH + JS_MATCH + CSS_MATCH + PORTAL_INDEX_MATCH + PORTAL_JS_MATCH ))
+echo "  '${FEATURE_MARKER}' matches in index.html:        ${INDEX_MATCH}"
+echo "  '${FEATURE_MARKER}' matches in app.js:            ${JS_MATCH}  (URL: ${JS_URL})"
+echo "  '${FEATURE_MARKER}' matches in app.css:           ${CSS_MATCH}  (URL: ${CSS_URL})"
+echo "  '${FEATURE_MARKER}' matches in portal/index.html: ${PORTAL_INDEX_MATCH}  (URL: ${PORTAL_HTML_URL})"
+echo "  '${FEATURE_MARKER}' matches in portal.js:         ${PORTAL_JS_MATCH}  (URL: ${PORTAL_JS_URL})"
+echo "  total:                                            ${FEATURE_MATCH}"
 if [[ "${FEATURE_MATCH}" -lt 1 ]]; then
     echo "FAIL: feature marker not found in live resources"
     echo "Either: (a) feature not deployed, (b) marker string wrong, (c) cache not busted"
