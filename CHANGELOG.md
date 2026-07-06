@@ -6,6 +6,65 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v2.0.0 — 2026-07-06
+
+**Architectural boundary: charon authentication now flows through FreeRADIUS (`eap-radius`). DAE/Disconnect-Request (RFC 5176) wired for hard-cut enforcement. Reset flow restores radcheck from pre-cut backup. Phase 7 cleanup: vestigial eap-radius blocks removed, FR IPv6 secret realigned.**
+
+This is the **first v2 baseline**. The system at HEAD (`caf7265`) is no longer the same architecture as `v1.7.0-recovered` (`01a475f`): customer EAP identities live in MariaDB `radcheck`/`radusergroup`, not in `rw-eap.conf`. Quota enforcement cuts by killing `radcheck` + sending a signed Disconnect-Request, not by rewriting the local EAP secret.
+
+#### 1. Phase 5 cutover (charon → FreeRADIUS)
+
+- `host/strongswan/swanctl/conf.d/10-eap-radius.conf` — `rw-eap` connection now uses `eap-radius {}` instead of inline `eap-mschapv2 { secret = ... }`. EAP identities resolved by FreeRADIUS at runtime.
+- `10-eap-radius.conf` bind-mounted into the strongSwan container (`2527dcb`).
+- Dockerfile EXPOSE comment documents RADIUS ports (1812/1813 auth+acct, 3799 DAE) (`953f06b`).
+- Operator README + customer re-onboarding broadcast template (`5891d45`).
+- Cutover-active marker in code (`5891d45`).
+- `radcheck` disable is the **primary** kill (`649918f`) — written BEFORE DAE attempt, so even if DAE fails the next re-auth is denied.
+
+#### 2. Phase 5 follow-ups (the real v2 hardening)
+
+- **RFC 5176 DAE Disconnect-Request (`3b00b8e`)** — `host/scripts/vpn-disconnect.py` opens UDP 3799 and sends a signed Disconnect-Request to `charon eap-radius.dae`. quota-monitor now kills active SAs at hard cut instead of waiting for the next re-auth.
+- **Unit + integration tests for the DAE sender (`ffd6c5d`)** — 5 unit tests for the RFC 5176 packet shape + 1 integration test against live charon.
+- **Reset bug fix (`fe60527`)** — `reset_quota` now restores the customer's `radcheck` row from the `rw-eap.conf.bak-quotamon-<epoch>` backup (created pre-cut), instead of leaving the customer permanently disabled after a 100% cut. UI toast shows the restore step explicitly (`726eb1f`).
+- **Pool-LEASE attribution sync (`9a93832`)** — quota-monitor reads `swanctl --list-pools --leases` for live VIP→identity mapping (drift-proof). Was reading stale `devices.last_seen_vip`.
+- **Portal SQLite/MariaDB split-brain fix** (`29a96cf`, `b6caa6c`, `c63eae9`) — `lookup_user_and_customer`, `lookup_customer_full`, `list_customer_devices` now read portal-local SQLite (the actual data store for customers/users/devices) instead of MariaDB (which only holds RADIUS rows).
+- **`verify_operator_session` race fix (`6f62d98`, `73affaf`)** — UPDATE-first to eliminate the MariaDB "1020 Error writing file" (HTTP 500) on dashboard.
+- **30s auto-refresh on customer dashboard (`d6bd0e2`)** — operator no longer misses quota cuts while watching stale data.
+- **STEP 8 deploy marker check broadened (`8f85bf2`)** — now greps `portal/index.html` + `portal.js` in addition to `app.js` + `app.css`, so portal-only deploys don't false-fail the marker grep.
+
+#### 3. Phase 7 cleanup (deployed-only, applied to `vpn-prod-01` 2026-07-06)
+
+- **Cleanup 1: vestigial `eap-radius` blocks removed** — `rw-eap.conf` 71 → 59 lines. Removed 6 zombie `eap-{customer}-*` blocks that Phase 4 left behind when migrating customers to RADIUS. charon reload verified clean.
+- **Cleanup 3: FreeRADIUS `clients.conf` IPv6 secret realigned** — `client localhost_ipv6 { secret = ... }` was using `testing123` (FR default). Replaced with the real 64-hex-char secret matching the local-IPv4 block. **Root cause** of the 15+ "Invalid Message-Authenticator" bursts across charon reload windows (long-standing, non-impacting until Phase 5 DAE made the IPv6 path live).
+- **Cleanup 2: docs only** — `install-radius-daloradius.md` expanded 339 → 506 lines with the lessons learned from Phases 4/5. No code change.
+
+#### 4. Verification
+
+- 3 customers in DB: `zun-operator` (1), `zun-100mb-test` (87, DISABLED), `zun-customer-demo` (89, at 101.6% on `demo_100mb` tier).
+- Last cut drill at 17:39:23 SAST (customer 93): DAE ack received, radcheck DISABLED, reset through portal UI restored radcheck, customer re-authenticated.
+- `check_github_parity.sh` PASS.
+- `check-portal-deployed.sh --strict` PASS (pre-commit: source = deployed on `vpn-prod-01`).
+- FreeRADIUS restarted cleanly, no "Invalid Message-Authenticator" in last 30s log window.
+- charon loaded 2 connections (`rw-eap` + `rw-psk`) cleanly, no "unknown option: id" log noise.
+
+#### 5. Files changed (this commit)
+
+- `CHANGELOG.md` — this entry + updated v2.x note (old orphans were never on origin).
+- `host/vpn-portal/www/static/app.js` — `SCRIPT_VERSION = 'v2.0.0'` (was `'v1.9.0-sse'`).
+- `host/vpn-portal/app.py` — `FastAPI(title="databyte vpn-portal", version="2.0.0")` (was `"0.1.0"`, OpenAPI metadata consistency).
+
+#### 6. Deferred (NOT in v2.0.0)
+
+- **Phase 4E: SQLite → MariaDB unify** — `customers`, `users`, `devices`, `tiers`, `audit_log` still in portal-local SQLite. Split-brain by design for now. Scope at `docs/PHASE-4E-SCOPE-ASSESSMENT.md`. Target: Friday 18:00 SAST or Saturday morning (Zun's call).
+- **Customer re-onboarding broadcast** — 40 customers need to re-register through the new portal-install flow. Template at `docs/design/vpn-credentials-reset-comms.md`.
+- **Collation drift fix** — 23 MariaDB tables with `utf8mb4_uca1400_ai_ci` as table default. 30-sec ALTER in next maintenance.
+- **Docker image prune** — 3 unused images, 118.7MB reclaimable.
+
+#### 7. Known anomalies (deferred, non-blocking)
+
+- charon log "loading X failed: cert/key data missing" — cosmetic, dirs don't exist.
+- SQLite/MariaDB split-brain — Phase 4E will fix.
+
 ### v1.2.15 — 2026-06-21
 
 **Edit Customer modal: fix PATCH not firing (Zun reported)** — reported via Telegram that editing customer "saalieg" was a no-op.
@@ -883,7 +942,7 @@ design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
 
 ---
 
-**Note on stale v2.x tags:** `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` previously existed on origin but pre-date the 2026-06-26 recovery baseline (they pointed to commits 2026-06-24/25, before `v1.7.0-recovered` was cut 2026-06-26). They were **orphaned** — and were **DELETED 2026-07-05 17:39 UTC** per Zun's instruction. Do not re-create them. `v1.7.0-recovered` is the canonical recovery baseline; everything on `main` post that commit is the live work stream.
+**Note on v2.x version numbering:** The `v2.3.0` / `v2.6.0` / `v2.7.0` / `v2.7.1` / `v2.7.2` references in `tracker/generate_tracker.py` are **Windows installer version labels** for `setup-databyte-vpn.ps1` (HARDLOCKED at v2.6.5 in `MEMORY.md`), **not** git tags — they were never pushed to origin. The `v2.0.0` git tag (above, 2026-07-06) is the **first v2 baseline** — the architectural boundary at Phase 5 eap-radius cutover. `v1.7.0-recovered` remains the recovery baseline prior to that work.
 
 ---
 

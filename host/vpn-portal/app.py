@@ -103,7 +103,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 log = logging.getLogger("vpn-portal")
 
 # ---------- App ----------
-app = FastAPI(title="databyte vpn-portal", version="0.1.0")
+app = FastAPI(title="databyte vpn-portal", version="2.0.0")
 
 # Serve frontend (static assets + SPA index)
 WWW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")

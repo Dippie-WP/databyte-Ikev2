@@ -2790,7 +2790,7 @@
   //
   // Fallback: if SSE fails to connect or stays disconnected, the existing
   // setIntervals (startSessionsAutoRefresh, etc.) still poll as degraded.
-  const SCRIPT_VERSION = 'v1.9.0-sse';
+  const SCRIPT_VERSION = 'v2.0.0';
   console.log('[vpn-portal]', SCRIPT_VERSION, 'loaded at', new Date().toISOString());
 
   function refreshActivePage() {
