@@ -1,24 +1,24 @@
 # Last successful deploy of vpn-portal to vpn-prod-01
 # This file is updated by host/scripts/deploy-portal-vps.sh — DO NOT EDIT BY HAND.
 
-deployed_at_utc=2026-07-06T15:22:39Z
+deployed_at_utc=2026-07-06T15:27:00Z
 deployed_by=root
-git_head=fe605273fa3a6d3b7c342d41861749f3abfc7052
-git_head_short=fe60527
-feature_marker=restore_radcheck_from_rw_eap_backup
-cache_bust_version=fe60527
+git_head=726eb1feec97f95a4bb3c14ed4ec0c0be7d75033
+git_head_short=726eb1f
+feature_marker=radcheck restored for
+cache_bust_version=c5cec87
 
 source_sha256:
   app.py=d0d0c11682338b317f0a0fc50d23d49758c565ddf4eff618983496bdcc47e6c5
-  app.js=e2a6858f623863720b35e2edda172545cf750168d4899ef6ef69c5fdf9e00075
+  app.js=b355adb320d24e5a6ae8c9d893bd546970207530ff2f16493ee2ecc4580225f1
   app.css=f8ea4493cf5747601eaaa52ad4105002a8bffc9feee6531a93c8fb479a5587d6
   index.html=65b2e9e1935859e9fc0fb7041759f135d612a46d94ef7af113c95a95e3f1133e
 
 deployed_sha256:
   app.py=d0d0c11682338b317f0a0fc50d23d49758c565ddf4eff618983496bdcc47e6c5
-  app.js=e2a6858f623863720b35e2edda172545cf750168d4899ef6ef69c5fdf9e00075
+  app.js=b355adb320d24e5a6ae8c9d893bd546970207530ff2f16493ee2ecc4580225f1
   app.css=f8ea4493cf5747601eaaa52ad4105002a8bffc9feee6531a93c8fb479a5587d6
-  index.html=dd2aa0eee06a8124fafe09af336abb424c0da6a44bb12381221d8d43bc14586d
+  index.html=e63b63c2b57c272a3a43f530232652cf8db3ee8aaf20ec0b8dfe2c22ad8390ca
 
 health_url=https://vpn-portal.databyte.co.za/api/health
 public_url=https://vpn-portal.databyte.co.za/
