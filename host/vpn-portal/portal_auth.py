@@ -394,8 +394,11 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
     from SQLite to match where the customer_create flow wrote them.
     """
     # 1. Find the user row (EAP identity = users.name)
+    # Use hex(password) — sqlite3 -json encodes BLOB columns as garbage text
+    # like "ufffffdeu0019u001eufffffc2..." that can't be reversed. hex() gives
+    # us a clean 32-char hex string that _stored_hash_bytes handles correctly.
     user_rows = _sqlite_query(
-        f"SELECT id, name, password FROM users "
+        f"SELECT id, name, hex(password) AS password FROM users "
         f"WHERE name = '{identity.replace(chr(39), chr(39)+chr(92)+chr(39))}' "
         f"AND password IS NOT NULL AND length(password) > 0"
     )
