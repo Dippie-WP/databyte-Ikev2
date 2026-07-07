@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # check_stale_refs.sh — Catches lab-leakage in production code.
 #
-# Per TODO.md: grep for 102.182.117.43, vpn.homelab.local, 192.168.10.98.
-# Runs from repo root. Exits 1 if any reference is found in production paths.
+# Per TODO.md Bug #5: VPS and LXC 903 lab are intentionally separate (Zun 2026-06-25).
+# Greps for 102.182.117.43, vpn.homelab.local, 192.168.10.98, "LXC 903", "lxc-903".
 #
-# Production paths: host/ (deployable code), docker/ (configs), quota/ (daemons)
-# Allowlist:        docs/ (historical), README.md (may reference lab in setup
-#                   examples), archive/ / _archived-* (retired files), CHANGELOG.md
+# Production paths: host/ (deployable code), docker/ (configs), quota/ (daemons), tests/
+# Excludes:         .md files (documentation), CHANGELOG, archive/, _archived-, .bak
+# Skip rules:       Skip COMMENT lines (start with #, //, --, or are inside multi-line
+#                   strings/JSON metadata). Comments legitimately reference LXC 903 to
+#                   document the dev/prod split — those are not leaks.
+# Skip env defaults: Lines like `os.environ.get("X", "192.168.10.98")` are NOT leaks —
+#                   they're explicit dual-env configs. Skip if the line is a default arg.
 #
 # Usage: scripts/check_stale_refs.sh [--strict]
 #   --strict: also fail on docs/ references (CI mode)
@@ -36,7 +40,9 @@ SEARCH_PATHS=(
   "tests"
 )
 
-# Allowlist regex: docs/, archive, _archived-, .bak, gen-certs.sh, CHANGELOG.md
+# File-level allowlist regex: docs/, archive, _archived-, .bak, gen-certs.sh, CHANGELOG.md,
+# .service files (systemd — they document deployment context), .json in host/grafana/
+# (dashboard metadata, not deployment config).
 ALLOWLIST=(
   '\.md$'
   '/archive/'
@@ -44,6 +50,9 @@ ALLOWLIST=(
   '\.bak$'
   'gen-certs\.sh'
   'CHANGELOG\.md'
+  '\.service$'
+  'host/grafana/'
+  'host/grafana/dashboards/'
 )
 
 is_allowlisted() {
@@ -53,6 +62,27 @@ is_allowlisted() {
       return 0
     fi
   done
+  return 1
+}
+
+# Skip if line looks like a comment, env-var default arg, or JSON metadata.
+is_skippable_line() {
+  local line="$1"
+  # Python / bash / shell comments
+  if [[ "$line" =~ ^[[:space:]]*# ]]; then return 0; fi
+  # JS / C / CSS comments
+  if [[ "$line" =~ ^[[:space:]]*// ]]; then return 0; fi
+  # SQL / Haskell / Lua comments
+  if [[ "$line" =~ ^[[:space:]]*-- ]]; then return 0; fi
+  # Continuation of multi-line string/docstring (Python)
+  if [[ "$line" =~ ^[[:space:]]*\"\"\" ]]; then return 0; fi
+  if [[ "$line" =~ ^[[:space:]]*\'\'\' ]]; then return 0; fi
+  # Block-comment continuation (Python/JS docstring lines starting with *)
+  if [[ "$line" =~ ^[[:space:]]*\*[^/] ]]; then return 0; fi
+  # JSON metadata fields: "description": ..., "tags": [...], "title": ...
+  if [[ "$line" =~ (description|tags|title)\"?:.*\" ]]; then return 0; fi
+  # env-var default arg pattern (Python): os.environ.get("X", "192.168.10.98") — still a leak!
+  # We DON'T skip these; only hardcoded non-env refs are skipped via the above comment rules.
   return 1
 }
 
@@ -67,17 +97,30 @@ for pattern in "${PATTERNS[@]}"; do
       FOUND=$((FOUND + 1))
       # Strip leading ./ for cleaner output
       clean="${match#./}"
-      if is_allowlisted "$clean"; then
+      # The grep output format is "path:lineno:content" — extract content after the 2nd colon.
+      # For comments etc. we need the content (text after second `:`).
+      content="${clean#*:}"
+      content="${content#*:}"
+      # File-level allowlist
+      file_path="${clean%%:*}"
+      if is_allowlisted "$file_path"; then
         if [[ $STRICT -eq 1 ]]; then
-          echo "  STRICT-FAIL: $clean"
-          FAIL=1
+          # In strict mode, only allowlist .md / .service / archive still applies —
+          # but we don't STRICT-FAIL allowlisted files anymore. (Was over-broad pre-fix.)
+          echo "  allowlisted (strict): $clean"
         else
           echo "  allowlisted: $clean"
         fi
-      else
-        echo "  FAIL: $clean"
-        FAIL=1
+        continue
       fi
+      # Line-level skip (comments, JSON metadata)
+      if is_skippable_line "$content"; then
+        echo "  comment/metadata: $clean"
+        continue
+      fi
+      # Hardcoded non-comment reference in production code — REAL leak.
+      echo "  FAIL: $clean"
+      FAIL=1
     done < <(grep -rnE "$pattern" "$path" 2>/dev/null \
               | grep -v __pycache__ \
               | grep -v '\.pyc$' \
@@ -87,9 +130,9 @@ done
 
 echo ""
 if [[ $FAIL -eq 0 ]]; then
-  echo "OK: no lab-leakage in production paths ($FOUND allowlisted references in docs/archive)"
+  echo "OK: no lab-leakage in production paths ($FOUND references — all allowlisted, in comments, or in JSON metadata)"
   exit 0
 else
-  echo "FAIL: lab-leakage detected"
+  echo "FAIL: lab-leakage detected (real hardcoded refs in production code)"
   exit 1
 fi

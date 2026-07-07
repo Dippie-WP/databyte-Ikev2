@@ -214,12 +214,12 @@ class TestCustomerPortalSession:
             f"Both are {portal_auth.PORTAL_TTL}s."
         )
 
-    def test_new_session_expires_within_portal_ttl(self):
+    def test_new_session_expires_within_portal_ttl(self, db_path, patch_portal_auth_db):
         """Sliding window: a freshly-created session expires at now + PORTAL_TTL."""
         import sqlite3
         now = int(time.time())
         sid = portal_auth.create_session(1, "c-laptop", "ua", "9.9.9.9")
-        conn = sqlite3.connect(str(portal_auth.DB_PATH))
+        conn = sqlite3.connect(str(db_path))
         # conftest sets DB_PATH to the tmp DB
         row = conn.execute(
             "SELECT expires_at FROM customer_portal_sessions WHERE session_id = ?",
@@ -234,7 +234,7 @@ class TestCustomerPortalSession:
             f"Session expires_at differs from now+PORTAL_TTL by {delta - portal_auth.PORTAL_TTL}s"
         )
 
-    def test_sliding_window_refreshes_expiry(self):
+    def test_sliding_window_refreshes_expiry(self, db_path, patch_portal_auth_db):
         """Sliding: verify_session(..., slide=True) extends expires_at to now+PORTAL_TTL."""
         import sqlite3
         from unittest.mock import patch
@@ -243,7 +243,7 @@ class TestCustomerPortalSession:
         time.sleep(1.1)
         portal_auth.verify_session(sid, slide=True)
         now = int(time.time())
-        conn = sqlite3.connect(str(portal_auth.DB_PATH))
+        conn = sqlite3.connect(str(db_path))
         row = conn.execute(
             "SELECT expires_at FROM customer_portal_sessions WHERE session_id = ?",
             (sid,),
