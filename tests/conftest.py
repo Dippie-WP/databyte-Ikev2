@@ -10,6 +10,7 @@ command and runs it against a tmp SQLite DB seeded from real schemas.
 """
 import contextlib
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -24,6 +25,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "host" / "vpn-portal"))
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# app.py requires VPN_HOST env var (fail-fast RuntimeError at import time
+# since commit 2022736, which closed the 192.168.10.98 leak). CI doesn't set it,
+# so set a safe default before any test imports app. Tests that exercise
+# subprocess.run mock ssh commands anyway — they don't actually connect.
+os.environ.setdefault("VPN_HOST", "127.0.0.1")
+os.environ.setdefault("SSH_KEY", "/dev/null")  # tests mock subprocess.run
+os.environ.setdefault("DB_PATH", "/tmp/test_ipsec.db")
 
 
 # ---------- DB schema ----------
