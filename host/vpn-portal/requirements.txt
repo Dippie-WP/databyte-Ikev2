@@ -3,6 +3,8 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 argon2-cffi==23.1.0
 gunicorn==23.0.0
+sqlalchemy==2.0.35
+pymysql==1.1.1
 
 # Test deps (Layer 1 — pytest integration)
 pytest==8.3.3

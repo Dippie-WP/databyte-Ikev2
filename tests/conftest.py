@@ -104,10 +104,16 @@ connections {
 # ---------- portal_auth DB patching ----------
 
 @pytest.fixture
-def patch_portal_auth_db(db_path, monkeypatch):
-    """portal_auth._db() reads module-level DB_PATH. Patch it AND the constant."""
+def patch_portal_auth_db(db_path, monkeypatch, rw_eap_conf):
+    """portal_auth._db() reads module-level DB_URL (Phase 4A) via SQLAlchemy.
+    Patch DB_URL to sqlite + override _db() with a sqlite version for tests.
+    Also patches subprocess.run so portal_auth._sqlite_query (which shells out to
+    `ssh ... sqlite3 ...`) hits a local sqlite instead of an SSH command."""
     import portal_auth
-    monkeypatch.setattr(portal_auth, "DB_PATH", str(db_path))
+
+    # 1. Patch DB_URL + _db() so RADIUS data reads use sqlite.
+    monkeypatch.setattr(portal_auth, "DB_URL", f"sqlite:///{db_path}")
+
     @contextlib.contextmanager
     def _test_db():
         conn = sqlite3.connect(str(db_path), timeout=10)
@@ -119,7 +125,77 @@ def patch_portal_auth_db(db_path, monkeypatch):
         finally:
             conn.close()
     monkeypatch.setattr(portal_auth, "_db", _test_db)
-    return db_path
+
+    # 2. Patch subprocess.run so portal_auth._sqlite_query (which calls
+    #    `ssh -i KEY root@HOST sqlite3 -json /path SQL`) hits the local db_path
+    #    instead of trying to SSH to the lab gateway.
+    import subprocess as _subprocess
+
+    def _parse_sqlite_call(cmd_str: str) -> tuple[str, str]:
+        try:
+            outer_tokens = shlex.split(cmd_str)
+            if "sqlite3" not in outer_tokens:
+                return "", ""
+            idx = outer_tokens.index("sqlite3")
+            sql_idx = idx + 1
+            if sql_idx < len(outer_tokens) and outer_tokens[sql_idx] == "-json":
+                sql_idx += 1
+            if sql_idx < len(outer_tokens):
+                db_arg = outer_tokens[sql_idx]
+                sql_idx += 1
+            else:
+                db_arg = ""
+            sql = " ".join(outer_tokens[sql_idx:]) if sql_idx < len(outer_tokens) else ""
+            return db_arg, sql
+        except Exception:
+            return "", ""
+
+    def fake_run(cmd_args, *args, **kwargs):
+        cmd = cmd_args if isinstance(cmd_args, list) else (
+            cmd_args.split() if isinstance(cmd_args, str) else []
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        if cmd and cmd[0] == "ssh" and "sqlite3" in cmd_str:
+            _db_arg, sql = _parse_sqlite_call(cmd_str)
+            c = sqlite3.connect(str(db_path))
+            try:
+                cur = c.cursor()
+                if sql.strip().upper().startswith(("SELECT", "PRAGMA", "WITH")):
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    rows = cur.fetchall()
+                    def _coerce(v):
+                        if isinstance(v, (bytes, bytearray)):
+                            return v.hex()
+                        return v
+                    out = json.dumps([{k: _coerce(v) for k, v in zip(cols, r)} for r in rows])
+                else:
+                    if ";" in sql and "\n" in sql:
+                        cur.executescript(sql)
+                    else:
+                        cur.execute(sql)
+                    c.commit()
+                    out = ""
+            finally:
+                c.close()
+            class _R:
+                returncode = 0
+                stdout = out
+                stderr = ""
+            return _R()
+        # Not an ssh+sqlite3 — fall through to original subprocess.run.
+        return _orig_run(cmd_args, *args, **kwargs)
+
+    _orig_run = _subprocess.run
+    _subprocess.run = fake_run
+
+    # 3. Patch _DB_PATH_SQLITE in portal_auth so its SQL targets the test DB.
+    monkeypatch.setattr(portal_auth, "_DB_PATH_SQLITE", str(db_path))
+
+    yield db_path
+
+    # Teardown
+    _subprocess.run = _orig_run
 
 
 # ---------- App + TestClient ----------
@@ -258,6 +334,23 @@ def app_module(db_path, rw_eap_conf, request):
     # Patch DB_PATH on the (cached) portal_auth module
     import portal_auth
     portal_auth.DB_PATH = str(db_path)
+    # Phase 4A: portal_auth also has DB_URL (MariaDB SQLAlchemy) + _db() that calls _engine().
+    # Tests don't have a real MariaDB, so point DB_URL at a sqlite file + override _db()
+    # with the sqlite version (same pattern as patch_portal_auth_db fixture).
+    import sqlite3 as _sqlite3
+    portal_auth.DB_URL = f"sqlite:///{db_path}"
+
+    @contextlib.contextmanager
+    def _test_db_sqlite():
+        conn = _sqlite3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        conn.row_factory = _sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+    portal_auth._db = _test_db_sqlite
 
     import app
 

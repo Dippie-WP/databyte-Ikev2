@@ -85,7 +85,7 @@ curl -sS http://192.168.10.212:8080/api/health | jq
 | `ADMIN_USER` | admin | |
 | `ADMIN_PASS_HASH` | (REQUIRED) | bcrypt hash; generate with `python -c "import bcrypt; print(bcrypt.hashpw(b'YOURPASS', bcrypt.gensalt()).decode())"` |
 | `SESSION_SECRET` | random per process | Set explicitly so cookies survive restarts |
-| `VPN_HOST` | 192.168.10.98 | LXC 903 |
+| `VPN_HOST` | (REQUIRED) | `127.0.0.1` on VPS, LXC 903 IP for dev — no default (fail-fast at startup) |
 | `SSH_KEY` | /root/.ssh/id_ed25519_vpn | |
 | `DB_PATH` | /var/lib/strongswan/ipsec.db | On 903 |
 | `SESSION_TTL` | 86400 | seconds (24h) |

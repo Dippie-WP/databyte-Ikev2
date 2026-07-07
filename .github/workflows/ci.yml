@@ -115,8 +115,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Run check_stale_refs.sh --strict
-        run: bash scripts/check_stale_refs.sh --strict
+      - name: Run check_stale_refs.py --strict (Python tokenize-aware)
+        run: python3 scripts/check_stale_refs.py --strict
 
   # ---------- Layer 1: Portal API integration tests (pytest) ----------
   # Catch portal regressions (e.g. Lesson #193: lookup_user_and_customer SQL bug
@@ -147,7 +147,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio httpx fastapi[all] argon2-cffi pydantic
+          pip install pytest pytest-asyncio httpx fastapi[all] argon2-cffi pydantic sqlalchemy pymysql
 
       - name: Run portal API tests
         run: |

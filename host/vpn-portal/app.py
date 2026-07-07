@@ -29,7 +29,10 @@ Endpoints:
   GET  /api/security/deadman           ipban-ctl deadman status (raw)
 
 Config via env:
-  VPN_HOST       VPN gateway IP/host (default 192.168.10.98). On VPS, set to 127.0.0.1
+  VPN_HOST       VPN gateway IP/host. **MUST** be set explicitly. Use 127.0.0.1 on VPS
+                (charon VICI socket on localhost) or the LXC 903 lab IP for development.
+                No default — startup fails fast if unset (avoids accidentally connecting
+                prod to lab if env var is forgotten).
   SSH_KEY        path to SSH private key (default /root/.ssh/id_ed25519_vpn)
   DB_PATH        SQLite on the gateway (default /var/lib/strongswan/ipsec.db)
   ADMIN_USER     admin username (default admin)
@@ -60,7 +63,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # ---------- Config ----------
-VPN_HOST        = os.environ.get("VPN_HOST", "192.168.10.98")
+VPN_HOST        = os.environ.get("VPN_HOST", "")
+if not VPN_HOST:
+    raise RuntimeError(
+        "VPN_HOST env var is REQUIRED. "
+        "Set to 127.0.0.1 on VPS, or the LXC 903 lab IP for dev."
+    )
 SSH_KEY         = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
 DB_PATH         = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
 ADMIN_USER      = os.environ.get("ADMIN_USER", "admin")
