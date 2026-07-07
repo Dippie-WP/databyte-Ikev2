@@ -147,7 +147,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-asyncio httpx fastapi[all] argon2-cffi pydantic sqlalchemy pymysql
+          pip install -r host/vpn-portal/requirements.txt
 
       - name: Run portal API tests
         run: |
