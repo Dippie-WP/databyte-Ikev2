@@ -152,8 +152,24 @@ jobs:
       - name: Run portal API tests
         run: |
           cd ${{ github.workspace }}
-          python -m pytest tests/ -v --tb=short --color=yes \
-            -p no:cacheprovider
+          echo "=== env (CI-only) ==="
+          printenv | grep -E '^(CI|GITHUB_|RUNNER_)' || true
+          echo "=== python + pytest + pinned versions ==="
+          python -V
+          python -m pytest --version
+          python -m pip list 2>/dev/null | grep -iE "fastapi|sqlalchemy|pymysql|pytest|httpx|pydantic|argon2" || true
+          echo "=== running tests ==="
+          set +e
+          python -m pytest tests/ -v --tb=long --color=no \
+            -p no:cacheprovider 2>&1 | tee /tmp/pytest.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "=== exit code: $rc ==="
+          echo "=== TAIL of log if rc != 0 ==="
+          if [ "$rc" != "0" ]; then
+            tail -80 /tmp/pytest.log || true
+          fi
+          exit $rc
 
   # ---------- Layer 2: DB integrity check ----------
   # Catch silent DB drift that production users would hit but L1 pytest
