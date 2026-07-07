@@ -1,8 +1,8 @@
-# DAT-VPN-WINDOWS-CLIENT-MASTER-001 — Windows IKEv2 VPN Client: Complete Build Manual
+# DAT-VPN-INT-WIN-001 — Windows IKEv2 VPN Client: Complete Build Manual
 
 | Field | Value |
 |---|---|
-| Document ID | DAT-VPN-WINDOWS-CLIENT-MASTER-001 |
+| Document ID | DAT-VPN-INT-WIN-001 |
 | Title | Windows IKEv2 + EAP-MSCHAPv2 VPN Client Build Manual |
 | Rev | v1.1.0 (refresh-in-place 2026-07-07: script facts corrected to v2.6.5) |
 | Date | 2026-07-07 |
@@ -1137,4 +1137,4 @@ iex (irm 'https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=latest')
 
 ---
 
-**END OF DOCUMENT — DAT-VPN-WINDOWS-CLIENT-MASTER-001 v1.0.0**
+**END OF DOCUMENT — DAT-VPN-INT-WIN-001 v1.1.0**
