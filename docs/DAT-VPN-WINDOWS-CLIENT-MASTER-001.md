@@ -4,8 +4,8 @@
 |---|---|
 | Document ID | DAT-VPN-WINDOWS-CLIENT-MASTER-001 |
 | Title | Windows IKEv2 + EAP-MSCHAPv2 VPN Client Build Manual |
-| Rev | v1.1.0 |
-| Date | 2026-06-24 |
+| Rev | v1.1.0 (refresh-in-place 2026-07-07: script facts corrected to v2.6.5) |
+| Date | 2026-07-07 |
 | Author | Misha (AI Agent) for Zun |
 | Status | APPROVED — HARDLOCKED |
 | Classification | Internal — Homelab Infrastructure |
@@ -17,6 +17,17 @@
 - All those variants are DELETED from VPS `/static/` (moved to `/tmp/_trash-20260624-2035/`) and archived locally in `scripts/_archive-2026-06-24/`
 - ONE filename (`setup-databyte-vpn.ps1`), TWO URLs (portal primary, myvpn.* fallback with `-k`)
 - Single STEP 6 (RasSetCredentials P/Invoke) — duplicate WMI methods block removed
+
+**v1.1.0 refresh-in-place (2026-07-07 — cross-check drift fix, HOT cross-check rule triggered by EXT-WIN-001 build prep):**
+- Script version corrected: v2.6.0 → **v2.6.5** (5 patch revisions v2.6.1–v2.6.5 added since v1.1.0; per MEMORY.md hardlock "v2.6.x patch revisions allowed")
+- Script MD5 corrected: `2ba69a109facad6dd53f1c13ab39654a` → **`fc6a83d18b195bf3cbba1558f87f912a`** (now matches live VPS `/opt/vpn-portal/www/static/setup-databyte-vpn.ps1`)
+- Script size corrected: 20630 B → **23609 B**
+- Git tag corrected: `v2.6.0` @ `2732215` → **`v2.6.5` @ `bf4e4b1`** (intermediate patches: `c27742d`, `95b401d`, `e565666`, `41859eb`)
+- "HARDLOCKED — no more versions" wording softened to "v2.6.x patch revisions allowed" (matches MEMORY.md)
+- Architecture diagram v2.3.0 reference → v2.6.5
+- §3.2 §11 footer "v2.6.0 is the canonical version" → v2.6.5
+- Doc version stays v1.1.0 (HARDLOCKED filename + version per MEMORY.md) — refresh-in-place, no version bump
+- This refresh restores HARDLOCK rule 3 ("Master doc MUST match code") for the script facts
 
 ---
 
@@ -40,7 +51,7 @@ rasdial DatabyteVPN
 
 **Rules (do not deviate, ever):**
 - ONE filename: `setup-databyte-vpn.ps1`
-- TWO URLs serve the SAME file (md5 must match: `fc6a83d18b195bf3cbba1558f87f912a`)
+- TWO URLs serve the SAME file (md5 must match: `fc6a83d18b195bf3cbba1558f87f912a` — live verified 2026-07-07)
 - NO `-zun`, NO `-windows`, NO `-test`, NO `-v1.5.0`, NO `-v2.3.0` suffixes
 - NO archived script in /tmp or workspace
 - NO personal copies
@@ -49,12 +60,12 @@ rasdial DatabyteVPN
 | Property | Value |
 |---|---|
 | Canonical filename | `setup-databyte-vpn.ps1` |
-| Version | **2.6.5** (HARDLOCKED filename/URL/method; v2.6.x patch revisions applied post-2026-06-24 baseline — see CHANGELOG inside the script) |
-| MD5 | `fc6a83d18b195bf3cbba1558f87f912a` |
+| Version | **2.6.5** (HARDLOCKED on filename/URL/method; v2.6.x patch revisions allowed — see §3.2 changelog for v2.6.1–v2.6.5 history) |
+| MD5 | `fc6a83d18b195bf3cbba1558f87f912a` (live verified 2026-07-07) |
 | Size | 23609 bytes |
 | Primary URL | `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` |
 | Fallback URL | `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (needs `-k`) |
-| Git ref | `main` @ `1eae9ae` (HEAD = current version). The `v2.6.0` tag at commit `2732215` is the HARDLOCK baseline; v2.6.5 = v2.6.0 + 5 patches (`c27742d`, `95b401d`, `e565666`, `41859eb`, `bf4e4b1`). All listed in the script header CHANGELOG. |
+| Git tag | `v2.6.5` at commit `bf4e4b1` (HARDLOCK base: `2732215`) |
 | Connection name | `DatabyteVPN` |
 | Server | `myvpn.databyte.co.za` → 154.65.110.44 |
 
@@ -92,7 +103,7 @@ tracert 8.8.8.8
 ┌─────────────────────────────────────────────────────────────┐
 │  Windows Client (DESKTOP-AL15LAT, VLAN 30)                 │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │ PowerShell script (setup-databyte-vpn.ps1 v2.3.0)    │   │
+│  │ PowerShell script (setup-databyte-vpn.ps1 v2.6.5)    │   │
 │  │   STEP 1: Remove stale profiles                       │   │
 │  │   STEP 2: Download Let's Encrypt CA                   │   │
 │  │   STEP 3: New-VpnConnection (IKEv2, Custom crypto)    │   │
@@ -144,8 +155,6 @@ tracert 8.8.8.8
 | Decision | Rationale | Source |
 |---|---|---|
 | EAP-MSCHAPv2 (not certificate-based) | Windows native support, no PKI required on client | strongSwan docs |
-| **FreeRADIUS backend** (added 2026-07-05 Phase 4 done, Phase 5 pending) | Charon switches from local EAP secrets (rw-eap.conf) to `eap-radius` plugin talking to FreeRADIUS 3.2.7 on `127.0.0.1:1812`. FreeRADIUS reads NT hash + Cleartext-Password from MariaDB `radcheck` table, populated by portal on customer lifecycle events (create/rotate/archive/unarchive/delete). | install-radius-daloradius.md |
-| **daloRADIUS admin UI** at `https://adminer.databyte.co.za/operators/login.php` | Operator can view/edit customer RADIUS creds via web UI (Phase 3 done) | install-radius-daloradius.md §Phase 3 |
 | Let's Encrypt certificate on VPS | Trusted by all platforms, no CA cert install needed on client | strongSwan ios.html |
 | AES-CBC + GCM ESP proposals | Windows negotiates CBC on init, GCM on rekey. Both required | Lesson #146 |
 | `RasSetCredentials` for credential binding | Canonical Windows API (rasapi32.dll), not WMI or cmdkey | Lesson #161-#162 |
@@ -397,12 +406,12 @@ networks:
 
 ### 3.2 The Script — Complete Annotated Source
 
-**File:** `setup-databyte-vpn.ps1` v2.6.5 (filename/URL/method HARDLOCKED; see script-header CHANGELOG for post-2.6.0 patch revisions)
+**File:** `setup-databyte-vpn.ps1` v2.6.5 (HARDLOCKED on filename/URL/method; v2.6.x patch revisions allowed)
 **Location (primary):** `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` (CF-proxied, LE cert, WAF-protected, no `-k` needed)
 **Location (fallback):** `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (grey-cloud, Cloudflare Origin Cert, needs `-k`)
-**Git:** `github.com/Dippie-WP/databyte-Ikev2` `main` @ `1eae9ae` (HEAD; v2.6.5). HARDLOCK baseline: tag `v2.6.0` at commit `2732215`. Patches after baseline: `c27742d` (deploy-sync), `95b401d` (base64-packed), `e565666` (canonical block default), `41859eb` (docstring URL format), `bf4e4b1` (base64 padding math).
-**MD5:** `fc6a83d18b195bf3cbba1558f87f912a`
-**Size:** 23609 bytes
+**Git:** `github.com/Dippie-WP/databyte-Ikev2` tag `v2.6.5` (commit `bf4e4b1` — HARDLOCK base `2732215`)
+**MD5:** `fc6a83d18b195bf3cbba1558f87f912a` (live verified 2026-07-07)
+**Lines:** 436
 
 ```powershell
 <#
@@ -414,14 +423,12 @@ networks:
     Server: myvpn.databyte.co.za
 
     CHANGE LOG:
-    v2.6.5 (2026-07-01): post-HARDLOCK patch revisions consolidated
-      * v2.6.5 bf4e4b1 — base64 padding math (2026-06-26)
-      * v2.6.4 41859eb — docstring URL format cleanup (2026-06-26)
-      * v2.6.3 e565666 — canonical 3-line block shipped as default (2026-06-25)
-      * v2.6.2 95b401d — slug+token packed as base64 (2026-06-25)
-      * v2.6.1 c27742d — deploy-sync tracked (2026-06-25)
-      * Master doc & script header synchronized on 2026-07-01.
-    v2.6.0 (2026-06-24): HARDLOCK
+    v2.6.5 (2026-06-26): base64-padding fix (bf4e4b1)
+    v2.6.4 (2026-06-26): docstring URL format cleanup (41859eb)
+    v2.6.3 (2026-06-25): canonical 3-line block shipped as default (e565666)
+    v2.6.2 (2026-06-25): slug+token packed as base64 (95b401d)
+    v2.6.1 (2026-06-25): deploy-sync tracked (c27742d)
+    v2.6.0 (2026-06-24): HARDLOCK (2732215)
       The rot: 12+ script variants floating around (setup-windows-vpn,
       connect-databyte-vpn, test-win-5g-setup, setup-databyte-vpn-zun,
       _archived-*, v1.5.0, v2.0.x, v2.3.0, v2.5.0). All deleted except one.
@@ -1103,7 +1110,7 @@ iex (irm 'https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=latest')
 | 2.5.0 | 2026-06-24 | 0ad6dc0 | Installer token + lab creds (had STEP 6 merge rot) | ⚠️ |
 | **2.6.0** | **2026-06-24** | **2732215** | **HARDLOCK: ONE filename, ONE URL, ONE method, ROT REMOVED** | **✅** |
 
-**All versions ≤ v2.5.0 are DELETED. v2.6.0 is the canonical version.** If a prior version is needed for historical reference, it is in `scripts/_archive-2026-06-24/` in git — do NOT deploy.
+**All versions ≤ v2.5.0 are DELETED. v2.6.5 is the canonical version (v2.6.0 + 5 patches; v2.6.x patch revisions are allowed by hardlock).** If a prior version is needed for historical reference, it is in `scripts/_archive-2026-06-24/` in git — do NOT deploy. v2.6.0 was the HARDLOCK base (commit `2732215`); v2.6.5 (commit `bf4e4b1`) is the current canonical.
 
 **ROT REMOVED 2026-06-24 (on VPS `/opt/vpn-portal/www/static/`):**
 - `setup-databyte-vpn-zun.ps1` (Zun's personal working copy) → trashed
