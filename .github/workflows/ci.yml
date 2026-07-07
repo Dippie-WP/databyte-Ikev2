@@ -168,8 +168,22 @@ jobs:
           echo "=== TAIL of log if rc != 0 ==="
           if [ "$rc" != "0" ]; then
             tail -80 /tmp/pytest.log || true
+            echo "--- about to upload artifact with full log ---"
+          fi
+          # Always upload the pytest log so we can inspect it post-hoc
+          if [ -f /tmp/pytest.log ]; then
+            mkdir -p /tmp/artifacts
+            cp /tmp/pytest.log /tmp/artifacts/pytest.log
           fi
           exit $rc
+
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: /tmp/pytest.log
+          retention-days: 7
 
   # ---------- Layer 2: DB integrity check ----------
   # Catch silent DB drift that production users would hit but L1 pytest
