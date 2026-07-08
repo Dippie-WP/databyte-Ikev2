@@ -38,6 +38,11 @@ Config via env:
   ADMIN_USER     admin username (default admin)
   ADMIN_PASS_HASH  Argon2id hash of admin password (REQUIRED). Generate with:
                     python -c "import portal_auth; print(portal_auth.hash_operator_password('YOURPASS'))"
+  OPERATORS_JSON  Optional JSON object mapping username -> Argon2id hash. When set,
+                  REPLACES the single-operator ADMIN_USER/ADMIN_PASS_HASH flow for
+                  /api/login. The legacy single-operator path is preserved as a
+                  fallback when OPERATORS_JSON is unset or empty.
+                  Example: OPERATORS_JSON='{"admin":"$argon2id$...","misha":"$argon2id$..."}'
   COOKIE_SECURE   "true" / "1" to set Secure flag on cookies (REQUIRED when behind HTTPS)
 """
 import os
@@ -73,6 +78,28 @@ SSH_KEY         = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
 DB_PATH         = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
 ADMIN_USER      = os.environ.get("ADMIN_USER", "admin")
 ADMIN_PASS_HASH = os.environ.get("ADMIN_PASS_HASH", "")
+# Multi-operator support (added 2026-07-08 per Zun msg #24405).
+# When OPERATORS_JSON is set, /api/login iterates the dict instead of
+# using the single ADMIN_USER/ADMIN_PASS_HASH pair. Backwards compatible:
+# if OPERATORS_JSON is unset/empty, falls back to the legacy path.
+OPERATORS_JSON   = os.environ.get("OPERATORS_JSON", "")
+
+def _load_operators():
+    """Return ordered dict of operator username -> Argon2id hash.
+
+    Precedence: OPERATORS_JSON (if set and valid JSON) > ADMIN_USER/ADMIN_PASS_HASH.
+    """
+    if OPERATORS_JSON:
+        try:
+            ops = json.loads(OPERATORS_JSON)
+            if isinstance(ops, dict) and ops:
+                return {str(k): str(v) for k, v in ops.items() if v}
+        except (json.JSONDecodeError, ValueError) as e:
+            log.error("OPERATORS_JSON is set but not valid JSON: %s", e)
+    # Legacy fallback
+    if ADMIN_USER and ADMIN_PASS_HASH:
+        return {ADMIN_USER: ADMIN_PASS_HASH}
+    return {}
 RATE_LIMIT_PER_MIN = 5
 SSH_TIMEOUT     = 10
 
@@ -926,21 +953,33 @@ def login(req: LoginRequest, request: Request, response: Response):
         or "127.0.0.1"
     )
     rate_limit(ip)
-    if not ADMIN_PASS_HASH:
-        log.error("ADMIN_PASS_HASH not set — refusing login")
+    # Multi-operator support: load from OPERATORS_JSON if set, else fall back
+    # to the legacy single ADMIN_USER/ADMIN_PASS_HASH pair.
+    operators = _load_operators()
+    if not operators:
+        log.error("no operators configured (set OPERATORS_JSON or ADMIN_USER + ADMIN_PASS_HASH) — refusing login")
         raise HTTPException(503, "Server not configured")
-    # Constant-time username compare — avoid username enumeration
-    if not hmac.compare_digest(req.username.encode(), ADMIN_USER.encode()):
-        # Spend comparable time on the wrong-username path so attackers can't
-        # tell apart "user doesn't exist" from "wrong password" via timing.
-        # Argon2id verify on a dummy hash burns ~70ms.
+    # Constant-time username lookup across the operator set.
+    # Avoid leaking which usernames exist by always running Argon2 verify
+    # against a dummy hash when the username doesn't match, and against the
+    # real hash for the matched user.
+    matched_hash = None
+    matched_user = None
+    for op_user, op_hash in operators.items():
+        if hmac.compare_digest(req.username.encode(), op_user.encode()):
+            matched_user = op_user
+            matched_hash = op_hash
+            break
+    if matched_hash is None:
+        # No username matched — burn ~70ms on a dummy Argon2 verify to mask
+        # username-enumeration timing.
         portal_auth.verify_operator_password(
             "$argon2id$v=19$m=19456,t=2,p=1$YWFhYWFhYWFhYWFhYWFhYQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG",
             req.password or "x",
         )
         log.info("login FAIL (no user) ip=%s identity=%s", ip, req.username)
         raise HTTPException(401, "Invalid credentials")
-    pw_match = portal_auth.verify_operator_password(ADMIN_PASS_HASH, req.password)
+    pw_match = portal_auth.verify_operator_password(matched_hash, req.password)
     if not pw_match:
         log.info("login FAIL (bad password) ip=%s identity=%s", ip, req.username)
         raise HTTPException(401, "Invalid credentials")
