@@ -39,7 +39,12 @@ done
 AHEAD_BEHIND=$(git rev-list --left-right --count main...origin/main 2>/dev/null || echo "0 0")
 AHEAD=$(echo "$AHEAD_BEHIND" | awk '{print $1}')
 BEHIND=$(echo "$AHEAD_BEHIND" | awk '{print $2}')
-DIRTY=$(git status --short | wc -l)
+# Filter out files that are intentionally not tracked:
+#   - .last_deployed: deploy-script self-report (gitignored)
+#   - .bak.* / .rej / *.swp: backup/diff/editor scratch files (transient)
+#   - chatty runtime state files that aren't source
+DIRTY_RAW=$(git status --short)
+DIRTY=$(echo "$DIRTY_RAW" | grep -vE '\.last_deployed$|\.bak\.[0-9]{8}T|\.bak$|\.rej$|\.swp$' | wc -l)
 
 echo "=== GitHub parity check ($(date -u +%FT%TZ)) ==="
 echo "Local main ahead of origin/main: $AHEAD"
