@@ -43,8 +43,9 @@ BEHIND=$(echo "$AHEAD_BEHIND" | awk '{print $2}')
 #   - .last_deployed: deploy-script self-report (gitignored)
 #   - .bak.* / .rej / *.swp: backup/diff/editor scratch files (transient)
 #   - chatty runtime state files that aren't source
+# grep -vE returns 1 when no match; `|| true` keeps set -e + pipefail happy.
 DIRTY_RAW=$(git status --short)
-DIRTY=$(echo "$DIRTY_RAW" | grep -vE '\.last_deployed$|\.bak\.[0-9]{8}T|\.bak$|\.rej$|\.swp$' | wc -l)
+DIRTY=$(printf '%s\n' "$DIRTY_RAW" | grep -vE '\.last_deployed$|\.bak\.[0-9]{8}(T[0-9]{6}Z)?$|\.rej$|\.swp$' | wc -l || true)
 
 echo "=== GitHub parity check ($(date -u +%FT%TZ)) ==="
 echo "Local main ahead of origin/main: $AHEAD"
