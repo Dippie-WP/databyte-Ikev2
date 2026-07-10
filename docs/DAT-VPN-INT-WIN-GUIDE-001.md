@@ -352,7 +352,7 @@ Every failure mode below was observed live (date in section), with evidence in M
 
 ### 7.1 `curl.exe: SEC_E_UNTRUSTED_ROOT` on cert chain
 
-**Symptom (msg #24704 + memory/2026-07-10.md entry 3, 2026-07-10 06:56 SAST):** customer's Windows tried `curl.exe -k -o $env:TEMP\setup.ps1 https://myvpn.datatype.co.za/static/setup-databyte-vpn.ps1`. Downloaded **35,167 bytes** of HTML — not 23,609 bytes of script. The HTML contained `input[type=date]`, `table > tbody`, SonicWall-style re-evaluation text, and verbatim "To have the rating of this web page re-evaluated".
+**Symptom (msg #24704 + memory/2026-07-10.md entry 3, 2026-07-10 06:56 SAST):** customer's Windows tried `curl.exe -k -o $env:TEMP\setup.ps1 https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1`. Downloaded **35,167 bytes** of HTML — not 23,609 bytes of script. The HTML contained `input[type=date]`, `table > tbody`, SonicWall-style re-evaluation text, and verbatim "To have the rating of this web page re-evaluated".
 
 **Root cause (verified):** `myvpn.databyte.co.za` is flagged on Cloudflare's badware / SonicWall Content Filter Server (CFS) for Zun's network path (specific ISP/corporate firewall, not universal). OC host returns `200 23609` (clean) but Zun's network got the StopBadware HTML. The `vpn-portal.databyte.co.za` path was clean for Zun (different Cloudflare reputation profile — Google Trust Services WE1 vs LE).
 
