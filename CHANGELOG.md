@@ -1260,3 +1260,67 @@ Initial release. Bare IKEv2 + EAP-MSCHAPv2 server.
 - DNS pushed: 1.1.1.1, 8.8.8.8.
 - Certs persisted on LVM rootfs (`/home/zunaid/strongswan/swanctl/`).
 - iptables MASQUERADE for 10.99.0.0/24, FORWARD+DOCKER-USER ACCEPT.
+---
+
+### v1.0.0 (windows installer template) — 2026-07-10
+
+**Per-customer baked Windows installer template** (`setup-databyte-vpn-windows.ps1`).
+
+Co-exists with the v2.6.5 generic canonical installer (`setup-databyte-vpn.ps1`).
+Both share Steps 2–7 (profile + IPsec + Registry + RasSetCredentials + rasdial);
+the baked template differs in Steps 0–1 and in how credentials arrive on the
+client (baked at operator edit time, not prompted).
+
+**Added**
+
+- `scripts/setup-databyte-vpn-windows.ps1` — operator template, MD5
+  `5541343b9c5efe3b3b9257dbd3332805`, 22639 B / 476 lines.
+- `BAKED-IN CONFIG` block at the top of the template (operator edits
+  `$Username`, `$Password`, `$ServerCertSha256` per customer).
+- Step 0 self-bootstrap of **ISRG Root X2** via
+  `certutil.exe -addstore -f Root`. Handles Windows 10 <1903 + Win 11
+  builds where X2 isn't yet trusted.
+- Optional SHA-256 fingerprint pin in Step 1 (strict cert validation
+  when operator bakes `$ServerCertSha256` to a real value).
+- Deployed artifacts (public, kept on VPS):
+  - `https://vpn-portal.databyte.co.za/static/certs/isrg-root-x2.pem`
+  - `https://vpn-portal.databyte.co.za/static/certs/root-ye.pem`
+
+**Changed**
+
+- Canonical delivery path: **`vpn-portal.databyte.co.za`** for ALL
+  customer-facing installer downloads. Reason: `myvpn.databyte.co.za`
+  is flagged on Cloudflare's badware list for some customer network
+  paths (verified 2026-07-10 with verbatim StopBadware template HTML
+  in response body). The LE cert SAN already covers both hostnames,
+  so the VPN connection target stays `myvpn.databyte.co.za`.
+- All installer code paths now use `curl.exe`, not `Invoke-WebRequest`.
+  Reason: PS 5.1 `Invoke-WebRequest` has known TLS 1.3 + ISRG Root X2
+  chain issues. `curl.exe` (Win 10 1803+) handles it correctly.
+
+**Verified**
+
+- Live connection 2026-07-10 13:05 UTC, Zun's Windows 11 24H2 build 26200:
+  - strongSwan SA `rw-eap #22 ESTABLISHED, IKEv2,
+    AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048`,
+    remote `102.182.117.43[4500]`, EAP `zun-iphone`, virtual IP `10.99.0.2`
+  - 143,102 packets out, 177 MB transferred in 168 seconds
+  - All 8 script steps green (cert chain bootstrap, cert verify, profile
+    create, IPsec config, registry tweaks, RasSetCredentials, rasdial,
+    poll-to-connected verification)
+
+**Commits**
+
+- `070f59e` — feat(win-installer): baked-credential IKEv2+EAP-MSCHAPv2 (initial commit)
+- `a4ada5d` — feat(win-installer): re-commit under new canonical name
+- `1dea754` — refactor(win-installer): rename to `setup-databyte-vpn-windows.ps1`
+
+**Not changed**
+
+- `setup-databyte-vpn.ps1` v2.6.5 (MD5 `fc6a83d18b195bf3cbba1558f87f912a`) —
+  HARDLOCKED, no filename/URL/method changes.
+- VPS-side `swanctl` / `charon.conf` / `ipsec.secrets` / FreeRADIUS configs —
+  no changes.
+- `docs/DAT-VPN-INT-WIN-001.md` v1.1.0 + `DAT-VPN-INT-WIN-001-v1.1.0.docx` —
+  in-place doc refresh (no version bump), new § 12 added.
+

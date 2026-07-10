@@ -50,24 +50,28 @@ rasdial DatabyteVPN
 ```
 
 **Rules (do not deviate, ever):**
-- ONE filename: `setup-databyte-vpn.ps1`
-- TWO URLs serve the SAME file (md5 must match: `fc6a83d18b195bf3cbba1558f87f912a` — live verified 2026-07-07)
-- NO `-zun`, NO `-windows`, NO `-test`, NO `-v1.5.0`, NO `-v2.3.0` suffixes
+- TWO scripts cover the customer install flow:
+  - **`setup-databyte-vpn.ps1`** v2.6.5 — generic canonical. Customer supplies creds at install time via GUI prompt or token fetch. Used for self-serve portal flow.
+  - **`setup-databyte-vpn-windows.ps1`** (operator template, MD5 `5541343b9c5efe3b3b9257dbd3332805`) — operator template. Credentials are baked in per-customer. Saved as `setup-databyte-vpn-<customer>-<device>.ps1` and served from `/opt/vpn-portal/www/static/baked/`. Used when operator wants zero-prompt install.
+- v2.6.5 MD5 must match: `fc6a83d18b195bf3cbba1558f87f912a` — live verified 2026-07-07
+- v1.0.0 baked template MD5 must match: `5541343b9c5efe3b3b9257dbd3332805` — live verified 2026-07-10
+- NO `-zun`, NO `-test`, NO `-v1.5.0`, NO `-v2.3.0` suffixes (the baked variant uses `-<customer>-<device>` per onboarding — that's a customer identity, not rot)
 - NO archived script in /tmp or workspace
 - NO personal copies
 - If you find a script with a different name, it's rot. Delete it.
 
-| Property | Value |
-|---|---|
-| Canonical filename | `setup-databyte-vpn.ps1` |
-| Version | **2.6.5** (HARDLOCKED on filename/URL/method; v2.6.x patch revisions allowed — see §3.2 changelog for v2.6.1–v2.6.5 history) |
-| MD5 | `fc6a83d18b195bf3cbba1558f87f912a` (live verified 2026-07-07) |
-| Size | 23609 bytes |
-| Primary URL | `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` |
-| Fallback URL | `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (needs `-k`) |
-| Git tag | `v2.6.5` at commit `bf4e4b1` (HARDLOCK base: `2732215`) |
-| Connection name | `DatabyteVPN` |
-| Server | `myvpn.databyte.co.za` → 154.65.110.44 |
+| Property | Value (v2.6.5 generic canonical) | Value (v1.0.0 baked template) |
+|---|---|---|
+| Canonical filename | `setup-databyte-vpn.ps1` | `setup-databyte-vpn-windows.ps1` (template, baked per-customer as `setup-databyte-vpn-<customer>-<device>.ps1`) |
+| Version | **2.6.5** (HARDLOCKED on filename/URL/method; v2.6.x patch revisions allowed) | **1.0.0** (template, identity baked per customer at edit time) |
+| MD5 | `fc6a83d18b195bf3cbba1558f87f912a` | `5541343b9c5efe3b3b9257dbd3332805` (template only — per-customer MD5 differs) |
+| Size | 23609 bytes | 22639 bytes |
+| Primary URL | `https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1` | `https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1` |
+| Fallback URL | `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` (needs `-k`) | (none — vpn-portal only; `myvpn` blocked on Cloudflare badware) |
+| Git commit | `bf4e4b1` (v2.6.5 HARDLOCK base: `2732215`) | `1dea754` (rename commit; original `070f59e` → `a4ada5d`) |
+| Connection name | `DatabyteVPN` | `DatabyteVPN` |
+| Server | `myvpn.databyte.co.za` → 154.65.110.44 | `myvpn.databyte.co.za` → 154.65.110.44 |
+| Credentials source | Customer supplies via prompt or `installer_tokens.py` | Baked into file at operator edit time (`$Username`, `$Password`, `$ServerCertSha256`) |
 
 ---
 
@@ -103,7 +107,8 @@ tracert 8.8.8.8
 ┌─────────────────────────────────────────────────────────────┐
 │  Windows Client (DESKTOP-AL15LAT, VLAN 30)                 │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │ PowerShell script (setup-databyte-vpn.ps1 v2.6.5)    │   │
+│  │ PowerShell script (setup-databyte-vpn.ps1 v2.6.5 OR   │   │
+│  │  setup-databyte-vpn-windows.ps1 baked per-customer)  │   │
 │  │   STEP 1: Remove stale profiles                       │   │
 │  │   STEP 2: Download Let's Encrypt CA                   │   │
 │  │   STEP 3: New-VpnConnection (IKEv2, Custom crypto)    │   │
@@ -1109,6 +1114,8 @@ iex (irm 'https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=latest')
 | 2.4.0 | 2026-06-24 | 27ee293 | Switched portal URL to vpn-portal.databyte.co.za | ✅ |
 | 2.5.0 | 2026-06-24 | 0ad6dc0 | Installer token + lab creds (had STEP 6 merge rot) | ⚠️ |
 | **2.6.0** | **2026-06-24** | **2732215** | **HARDLOCK: ONE filename, ONE URL, ONE method, ROT REMOVED** | **✅** |
+| 2.6.5 | 2026-07-06 | `bf4e4b1` | v2.6.0 + 5 patches | ✅ |
+| **1.0.0 baked** | **2026-07-10** | **`1dea754`** | **NEW: per-customer baked template (`setup-databyte-vpn-windows.ps1`), credentials + SHA-256 cert pin embedded, served from `/static/baked/`. Validated live on Zun's Windows 11 24H2 (rw-eap #22 ESTABLISHED, EAP zun-iphone). Includes Step 0 self-bootstrap of ISRG Root X2 via `certutil -addstore -f Root` (handles Win 10 <1903 + Win 11 without X2).** | **✅** |
 
 **All versions ≤ v2.5.0 are DELETED. v2.6.5 is the canonical version (v2.6.0 + 5 patches; v2.6.x patch revisions are allowed by hardlock).** If a prior version is needed for historical reference, it is in `scripts/_archive-2026-06-24/` in git — do NOT deploy. v2.6.0 was the HARDLOCK base (commit `2732215`); v2.6.5 (commit `bf4e4b1`) is the current canonical.
 
@@ -1138,3 +1145,131 @@ iex (irm 'https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1?v=latest')
 ---
 
 **END OF DOCUMENT — DAT-VPN-INT-WIN-001 v1.1.0**
+
+---
+
+## 12. Per-Customer Baked Variant (`setup-databyte-vpn-windows.ps1`)
+
+**Added 2026-07-10** (commit `1dea754`, original `070f59e` / `a4ada5d`).
+
+This section documents the **operator-template, baked-credential** variant that ships credentials pre-baked per customer. Co-exists with the v2.6.5 generic canonical installer above. Both share the same Steps 2–7 (profile + IPsec + Registry + RasSetCredentials + rasdial); the baked variant differs in Steps 0–1 and in how credentials arrive on the client.
+
+### 12.1 When to use which
+
+| Scenario | Use v2.6.5 generic | Use v1.0.0 baked |
+|---|---|---|
+| Self-serve portal (customer downloads via token URL, prompts for creds at install) | ✅ | — |
+| Operator-assisted onboarding (operator edits template, ships one-line URL to customer) | — | ✅ |
+| Customer on a network that blocks `myvpn.databyte.co.za` on Cloudflare (badware flag for some ISP paths) | ⚠️ (`-k` required) | ✅ (vpn-portal only) |
+| Customer on a Windows build missing ISRG Root X2 (Win 10 <1903, some Win 11) | ❌ (will fail HTTPS chain validation) | ✅ (Step 0 bootstraps X2) |
+| Strict cert rotation enforcement | ✅ (script verifies server cert each run) | ✅ + SHA-256 fingerprint pin (baked at edit time) |
+| Customer needs to re-install on a new device | Re-fetch + re-run | Re-fetch their baked URL + re-run (creds already in file) |
+
+### 12.2 Template file
+
+| Property | Value |
+|---|---|
+| Filename | `setup-databyte-vpn-windows.ps1` (template, NOT customer-shipped name) |
+| Path in repo | `scripts/setup-databyte-vpn-windows.ps1` |
+| Git commit | `1dea754` |
+| MD5 (template) | `5541343b9c5efe3b3b9257dbd3332805` (changes if template is edited) |
+| Size | 22639 bytes / 476 lines |
+| Per-customer file (post-bake) | `setup-databyte-vpn-<customer>-<device>.ps1` (e.g., `setup-databyte-vpn-acme-corp-laptop01.ps1`) |
+| Per-customer URL | `https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1` |
+| Per-customer MD5 | Differs per customer (credentials + cert pin baked into file) |
+
+### 12.3 BAKED-IN CONFIG block (operator edits per customer)
+
+The top of `setup-databyte-vpn-windows.ps1` contains a `BAKED-IN CONFIG` block. Operator edits these four values per customer before shipping:
+
+```powershell
+# Per-customer credentials (BAKED — file is sensitive)
+$Username = "REPLACE-ME-customer-device-name"   # e.g. "zun-iphone"
+$Password = "REPLACE-ME-customer-password"        # from portal operator page
+
+# Server cert SHA-256 fingerprint (optional strict pin)
+$ServerCertSha256 = "REPLACE-ME-sha256-fingerprint"  # from openssl x509 -fingerprint -sha256
+
+# LE root cert URL (served from VPS portal static dir — public, no auth)
+$LERootUrl = "$PortalBase/static/certs/isrg-root-x2.pem"
+```
+
+The script **refuses to run** if any value still contains `REPLACE-ME` — sanity check at the top of the script exits with code 1 and a red error banner.
+
+### 12.4 Operator workflow (per customer onboarding)
+
+1. Copy template to working dir:
+   ```
+   cp /root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1 /tmp/bake-<customer>-<device>.ps1
+   ```
+2. Pull the customer's credentials from the portal operator page (`https://vpn-portal.databyte.co.za/admin` → customer → device).
+3. Pull the current LE cert SHA-256 fingerprint:
+   ```
+   ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ```
+4. Edit the file: replace the three `REPLACE-ME-*` values.
+5. Save as `setup-databyte-vpn-<customer>-<device>.ps1`.
+6. Deploy to VPS:
+   ```
+   scp setup-databyte-vpn-<customer>-<device>.ps1 root@vps-01:/opt/vpn-portal/www/static/baked/
+   ssh root@vps-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+   ```
+7. Verify the URL:
+   ```
+   curl -ksSL -o /dev/null -w "%{http_code} %{size_download}\n" https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+   ```
+8. Ship the URL to the customer via encrypted email / portal message / SFTP. **Never** email the .ps1 file itself (creds in plaintext).
+
+### 12.5 Customer invocation (the ONE-liner)
+
+Customer runs (PowerShell as Administrator):
+
+```
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+powershell -ExecutionPolicy Bypass -NoProfile -File $env:TEMP\setup.ps1
+```
+
+### 12.6 Why `vpn-portal.databyte.co.za` (not `myvpn.databyte.co.za`) for delivery
+
+`myvpn.databyte.co.za` is **flagged on Cloudflare's badware list** for some customer network paths (verified 2026-07-10 on Zun's network: returned StopBadware template HTML with verbatim "To have the rating of this web page re-evaluated" line). The VPN server itself is fine — only the Cloudflare reputation on the hostname is the problem.
+
+`vpn-portal.databyte.co.za` is **not flagged**. Different cert issuer (Google Trust Services WE1 vs LE), different hostname, different reputation profile. The LE cert on the backend covers BOTH hostnames in its SAN (`myvpn.databyte.co.za,vpn-portal.databyte.co.za`), so the connection target (`$ServerAddress = "myvpn.databyte.co.za"`) is unchanged. Only the delivery URL uses vpn-portal.
+
+**This is now the canonical delivery path for ALL customer-facing installer downloads** — both v2.6.5 generic and v1.0.0 baked. The `myvpn.*` URL is kept as a documented fallback for v2.6.5 only, with the `-k` note.
+
+### 12.7 Step 0 — ISRG Root X2 bootstrap (why this exists)
+
+The `myvpn.databyte.co.za` cert is signed by Let's Encrypt Root YE (intermediate), which chains to **ISRG Root X2** (ECDSA root). ISRG Root X2 has been in Windows since **1903 (May 2019)**. On any Windows where X2 is missing or not followed, HTTPS chain validation fails before the script can do anything useful.
+
+Step 0 of the v1.0.0 baked script installs X2 via `certutil.exe -addstore -f Root` before Steps 1–7. The root is downloaded from `https://vpn-portal.databyte.co.za/static/certs/isrg-root-x2.pem` (public, no auth required). The download uses `curl -k` because the chain isn't trusted yet (chicken-and-egg) — this is safe because the root is self-signed (no chain to verify).
+
+**Deployed artifacts (kept on VPS, public):**
+
+| Path | URL | Purpose |
+|---|---|---|
+| `/opt/vpn-portal/www/static/certs/isrg-root-x2.pem` | `https://vpn-portal.databyte.co.za/static/certs/isrg-root-x2.pem` | ISRG Root X2 (ECDSA, missing from Win 10 <1903 + some Win 11) |
+| `/opt/vpn-portal/www/static/certs/root-ye.pem` | `https://vpn-portal.databyte.co.za/static/certs/root-ye.pem` | Root YE (alternative chain, same purpose) |
+
+If a customer still fails Step 0 (e.g., their Windows blocks `certutil`), they need a manual install. See §6 Failure Modes Encyclopedia → "6.X Manual ISRG Root X2 install".
+
+### 12.8 Live verification (2026-07-10 13:05 UTC, Zun's Windows 11 24H2 build 26200)
+
+| Check | Result |
+|---|---|
+| Step 0 (ISRG Root X2 install) | `certutil: OK (ISRG Root X2 installed)` |
+| Step 1 (server cert verify) | `Subject CN=myvpn.databyte.co.za / Issuer CN=YE1, O=Let's Encrypt / Pin: SHA-256 match` |
+| Step 3 (profile create) | `Profile created: DatabyteVPN` |
+| Step 4 (IPsec crypto) | `AES128 / SHA256128 / Group14 / SHA256 / PFS2048` |
+| Step 6 (RasSetCredentials) | `RasSetCredentials P/Invoke: OK` |
+| Step 7 (rasdial) | `rasdial exit code: 703` (703 = normal for IKEv2+EAP); poll caught `Status: Connected` |
+| strongSwan SA | `rw-eap: #22, ESTABLISHED, IKEv2, AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048, remote '192.168.30.58' @ 102.182.117.43[4500] EAP: 'zun-iphone' [10.99.0.2]` |
+| Throughput | 143,102 packets out, 177 MB transferred in 168 seconds = real traffic, not just handshake |
+
+### 12.9 When `setup-databyte-vpn-windows.ps1` template changes
+
+When the template itself is edited (new bug fix, new feature), operator workflow for every customer with a baked file:
+
+1. Edit `scripts/setup-databyte-vpn-windows.ps1` in repo, commit, push.
+2. **Do NOT** mass-rebake existing customer files automatically — each customer MD5 changes when template changes, but their identity stays the same.
+3. For a customer to pick up the new template: re-bake their file at next onboarding touch (or proactively if the change is critical like a cert chain fix).
+

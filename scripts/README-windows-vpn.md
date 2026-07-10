@@ -3,56 +3,131 @@
 Self-contained PowerShell scripts that set up an IKEv2/EAP-MSCHAPv2 VPN
 connection to the Databyte VPN server on Windows 10/11.
 
-## What's included
+## What's in `scripts/`
 
-| File | Purpose |
-|------|---------|
-| `setup-windows-vpn.ps1` | Main script. Idempotent. Fetches CA cert from live URL with SHA256 pinning (falls back to bundled cert if offline). Sets crypto. Connects. |
-| `connect-databyte-vpn.ps1` | Convenience wrapper. Runs `setup-windows-vpn.ps1` first (so the cert is always fresh), then creates the EAP-MSCHAPv2 profile. |
-| `strongswan-ca.crt.pem` | Bundled CA cert (fallback only). The script prefers fetching from the live URL. |
+| File | Version | Purpose | MD5 | Status |
+|---|---|---|---|---|
+| `setup-databyte-vpn.ps1` | v2.6.5 | **Generic canonical installer.** Self-serve portal flow. Customer supplies creds at install time via GUI prompt or via an `installer_tokens.py` URL. | `fc6a83d18b195bf3cbba1558f87f912a` | HARDLOCKED (no filename/URL/method changes; v2.6.x patch revisions allowed) |
+| `setup-databyte-vpn-windows.ps1` | v1.0.0 | **Operator template for per-customer baked installers.** Operator edits `BAKED-IN CONFIG` block per customer, saves as `setup-databyte-vpn-<customer>-<device>.ps1`, ships URL. No prompt. | `5541343b9c5efe3b3b9257dbd3332805` (template) | Co-exists with v2.6.5; per-customer MD5 differs |
 
-## Run
+**Archived (DO NOT use, kept for git history only):**
 
-**Right-click PowerShell → "Run as Administrator"** (or use the `Run as administrator` option), then:
+- `setup-windows-vpn.ps1` — old pre-HARDLOCK script
+- `connect-databyte-vpn.ps1` — old convenience wrapper
+- `test-win-5g-setup.ps1` — old test variant
+- `setup-databyte-vpn-zun.ps1` — old personal copy
+- All `setup-databyte-vpn-baked-*.ps1` drafts
+
+These are in `scripts/_archive-2026-06-24/` (older) or removed entirely (newer).
+
+## Run (customer-facing flow)
+
+Both scripts follow the same customer invocation pattern. PowerShell as Administrator:
 
 ```powershell
-cd <path-to-folder>
-powershell -ExecutionPolicy Bypass -File .\setup-windows-vpn.ps1
+# v2.6.5 generic canonical
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1
+& $env:TEMP\setup.ps1
+
+# v1.0.0 baked per-customer
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+& $env:TEMP\setup.ps1
 ```
 
-The script will:
-1. Fetch the strongSwan CA cert from `https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem` (Cloudflare-cached 24h)
-2. **Verify SHA256 fingerprint** matches the pinned value `5C:10:B9:6A:97:06:10:29:7C:8D:8F:B3:6B:E3:5A:98:58:CF:F4:10:C8:1E:72:78:7E:25:08:43:B2:71:CE:06` before installing (defence against MITM)
-3. Fall back to `strongswan-ca.crt.pem` (bundled) if the live fetch fails — also SHA256-checked
-4. Skip re-install if the correct cert is already in `LocalMachine\Root`
-5. Create a `DatabyteVPN` IKEv2 connection with **no split tunneling**
-6. Set IPsec crypto to match the server (AES256/SHA256/Group14/ECP384)
-7. Connect with the operator credentials baked into the script
+**Why vpn-portal and not myvpn for the delivery URL:** `myvpn.databyte.co.za` is flagged on Cloudflare's badware list for some customer network paths. `vpn-portal.databyte.co.za` is clean. The VPN connection target stays `myvpn.databyte.co.za` regardless (the LE cert SAN covers both hostnames). See `docs/DAT-VPN-INT-WIN-001.md § 12.6` for the full finding.
+
+**Why `curl.exe` and not `Invoke-WebRequest`:** PowerShell 5.1's `Invoke-WebRequest` has known TLS 1.3 + ISRG Root X2 chain issues. `curl.exe` (Windows 10 1803+) handles it correctly. Both scripts use `curl.exe` internally for HTTPS fetches.
+
+## v2.6.5 — what the script does
+
+The `setup-databyte-vpn.ps1` v2.6.5 script:
+
+1. **STEP 1 — Remove stale profiles** (any prior `DatabyteVPN` + cmdkey entries)
+2. **STEP 2 — Download Let's Encrypt CA** (cert chain bootstrap)
+3. **STEP 3 — `New-VpnConnection`** (IKEv2, custom crypto)
+4. **STEP 4 — `New-EapConfiguration`** (EAP-MSCHAPv2 schema)
+5. **STEP 5 — Registry** (`AssumeUDPEncapsulationContextOnSendRule=2`, `NegotiateDH2048_AES256=2`)
+6. **STEP 6 — `RasSetCredentials`** (bind creds via Win32 P/Invoke; canonical method)
+7. **STEP 7 — Connect + poll** (rasdial, then poll `Get-VpnConnection` until `Connected`)
+
+After install, customer uses:
+
+```cmd
+rasdial DatabyteVPN                   # Connect
+rasdial DatabyteVPN /disconnect       # Disconnect
+```
+
+No GUI prompt after install. Credentials are saved in Windows Credential Manager via `RasSetCredentials`.
+
+## v1.0.0 baked — what the script does (DIFFERENCES from v2.6.5)
+
+The `setup-databyte-vpn-windows.ps1` template:
+
+- **STEP 0 — Self-bootstrap ISRG Root X2** (NEW). Downloads LE root from `https://vpn-portal.databyte.co.za/static/certs/isrg-root-x2.pem` and installs via `certutil -addstore -f Root`. Skips if X2 already trusted. Required for Win 10 <1903 + Win 11 builds missing X2.
+- **STEP 1 — Verify server cert** (issuer + optional SHA-256 fingerprint pin if `$ServerCertSha256` is baked to a real value).
+- **STEPS 2–7 — Same as v2.6.5** (cert verify, profile create, IPsec, registry, RasSetCredentials, rasdial). Crypto identical (AES128/SHA256128/Group14/SHA256/PFS2048).
+- **Credentials**: BAKED IN at operator edit time (no GUI prompt at install).
+- **Token fetch**: REMOVED (no portal token round-trip).
+
+Per-customer files served from `/opt/vpn-portal/www/static/baked/` on VPS.
+
+## Operator workflow — baking a per-customer file
+
+1. Copy the template:
+   ```bash
+   cp /root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1 /tmp/setup-databyte-vpn-acme-corp-laptop01.ps1
+   ```
+2. Pull the customer's credentials from the portal operator page.
+3. Pull the current LE cert SHA-256 fingerprint:
+   ```bash
+   ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ```
+4. Edit the file — replace the three `REPLACE-ME-*` values in the `BAKED-IN CONFIG` block.
+5. Save as `setup-databyte-vpn-<customer>-<device>.ps1`.
+6. Deploy to VPS:
+   ```bash
+   scp setup-databyte-vpn-<customer>-<device>.ps1 root@vps-01:/opt/vpn-portal/www/static/baked/
+   ssh root@vps-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+   ```
+7. Verify:
+   ```bash
+   curl -ksSL -o /dev/null -w "%{http_code} %{size_download}\n" https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+   ```
+8. Ship the URL to the customer (encrypted email, portal message, or SFTP). **Never email the .ps1 file itself** — it contains plaintext credentials.
 
 ## Security: cert pinning
 
-The script pins the SHA256 fingerprint of the CA cert, NOT just relying on the
-Windows cert chain validation. If a network attacker substitutes a different
-cert (e.g. via DNS poisoning or compromised intermediate CA), the script
-**refuses to install it** and exits with an error. The bundled fallback is
-also SHA256-checked — a stale bundle will not be silently accepted.
+Both scripts pin the server cert. v2.6.5 pins by **issuer** (Let's Encrypt expected). v1.0.0 baked additionally pins by **SHA-256 fingerprint** when `$ServerCertSha256` is set to a real value (not the `REPLACE-ME` placeholder).
 
-**If you rotate the CA cert on the server:**
-1. Update `$ExpectedCaSha256` in `setup-windows-vpn.ps1` to the new value
-2. Replace `strongswan-ca.crt.pem` with the new cert
-3. Push both changes to the repo (the script IS the truth)
-4. Customers re-run the script — old cert will be flagged as "fingerprint
-   mismatch" and the new one will be installed automatically
+If a network attacker substitutes a different cert (DNS poisoning, compromised intermediate CA), the script **refuses to install / connect** and exits with an error.
 
-## Verify
+**If you rotate the LE cert on the server:**
+
+1. certbot auto-renews every ~60 days via `dns-cloudflare` plugin.
+2. Update `$ServerCertSha256` in the v1.0.0 template (or just leave `REPLACE-ME` for issuer-only validation).
+3. Re-bake customer files at next onboarding touch.
+
+## Verify (after connect)
 
 ```cmd
 ipconfig /all
-:: Look for the DatabyteVPN section — Default Gateway should be the VPS IP
+:: Look for the DatabyteVPN section — Default Gateway should be 154.65.110.44
 
 tracert 8.8.8.8
 :: First hop should be the VPS, not your home router
+
+curl -s https://ifconfig.me
+:: Public IP should be 154.65.110.44
 ```
+
+## Disconnect / reconnect
+
+```cmd
+rasdial DatabyteVPN /disconnect
+rasdial DatabyteVPN
+```
+
+Idempotent — safe to re-run.
 
 ## Test bandwidth cap
 
@@ -61,35 +136,11 @@ iperf3 -c iperf.angolacables.co.ao -p 9200 -t 30
 iperf3 -c iperf.angolacables.co.ao -p 9200 -R -t 30
 ```
 
-Expected: ~17-20 Mbps (cap minus ~10% XFRM/TCP overhead).
+Expected: ~17–20 Mbps (cap minus ~10% XFRM/TCP overhead).
 
-## Reconnect
+## Master documentation
 
-Just re-run the script. It's safe to re-run.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\setup-windows-vpn.ps1
-```
-
-Or use the shorter wrapper:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\connect-databyte-vpn.ps1
-```
-
-## Disconnect
-
-```cmd
-rasdial DatabyteVPN /disconnect
-```
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| "Live cert SHA256 mismatch" | Server cert rotated OR MITM | Check `ExpectedCaSha256` against the value on the VPS |
-| "Live fetch failed" | No internet OR DNS issue OR portal down | Script falls back to bundled cert; investigate connectivity separately |
-| "Bundled cert SHA256 mismatch" | `strongswan-ca.crt.pem` is stale | Re-fetch from live URL or replace with correct cert |
-| "Cert already installed" message, but VPN still fails | Old cert pinned by subject, fingerprint might differ | Script now checks SHA256 — will detect mismatch and re-install |
-| "Set-VpnConnectionIPsecConfiguration failed" | PowerShell older than 5.1 or missing VPN cmdlets | Update Windows 10/11; PowerShell 5.1 ships in-box |
-| rasdial exit code non-zero | Credential wrong OR server unreachable | Verify `zun-operator` password; check `tracert myvpn.databyte.co.za` |
+- `docs/DAT-VPN-INT-WIN-001.md` — Internal build manual (server + client)
+- `reports/DAT-VPN-INT-WIN-001-v1.1.0.docx` — ISO 9001 formatted version
+- `reports/DAT-VPN-EXT-WIN-001-v1.0.0.docx` — Customer-facing quickstart (one-liner + troubleshooting)
+- `reports/DAT-VPN-WINDOWS-CLIENT-MASTER-001-archived-2026-07-07.md` — pre-master consolidated doc (archived)

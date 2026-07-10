@@ -187,20 +187,20 @@ ship in the repo to make it one-shot:
 
 | Script | Purpose |
 |---|---|
-| `scripts/setup-windows-vpn.ps1` | Full setup: install CA cert, create VPN connection, configure crypto, connect. **First-time use.** |
-| `scripts/connect-databyte-vpn.ps1` | Idempotent: recreate connection + reconnect. **Re-runs any time.** Profile XML pre-configures EAP-MSCHAPv2 (no dialog at first connect) and ForceTunnel (no split tunneling). |
-| `scripts/strongswan-ca.crt.pem` | Bundled CA cert (must be installed before first connect — see #43). |
+| `scripts/setup-databyte-vpn.ps1` (v2.6.5) | Full setup: install ISRG Root X2, create VPN connection, configure crypto, connect. **Self-serve portal flow** — customer supplies creds via prompt. |
+| `scripts/setup-databyte-vpn-windows.ps1` (v1.0.0) | Operator template for **per-customer baked** installers. Same Steps 2–7 + Step 0 ISRG Root X2 bootstrap. Credentials baked at operator edit time. Saved as `setup-databyte-vpn-<customer>-<device>.ps1`. |
+| `scripts/strongswan-ca.crt.pem` | Bundled fallback CA cert (kept in repo for offline operator setups; live script prefers downloading from `https://vpn-portal.databyte.co.za/static/certs/isrg-root-x2.pem`). |
 
-**One-shot operator setup (Windows PowerShell 5.1+, as Administrator):**
+**One-shot customer setup (Windows PowerShell 5.1+, as Administrator):**
 
 ```powershell
-# Pull the three files from the OC host (or copy them via your channel)
-Invoke-WebRequest http://OC_HOST:8888/connect-databyte-vpn.ps1 -OutFile connect-databyte-vpn.ps1
-Invoke-WebRequest http://OC_HOST:8888/strongswan-ca.crt.pem -OutFile strongswan-ca.crt.pem
-Invoke-WebRequest http://OC_HOST:8888/README-windows-vpn.md -OutFile README-windows-vpn.md
+# v2.6.5 generic canonical (self-serve portal flow):
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/setup-databyte-vpn.ps1
+& $env:TEMP\setup.ps1
 
-# Run the script (it installs the CA cert, creates the connection, configures crypto, and connects)
-.\connect-databyte-vpn.ps1
+# v1.0.0 baked per-customer (operator-shipped URL):
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+& $env:TEMP\setup.ps1
 ```
 
 The script bakes in operator credentials (`zun-operator` / EAP secret), the
@@ -215,7 +215,7 @@ connection and reconnects.
 Get-VpnConnection -Name 'Databyte VPN' | Select-Object Name, ConnectionStatus
 
 # 2. Public IP is the VPS, not your ISP
-(Invoke-WebRequest -Uri 'https://ifconfig.me' -UseBasicParsing).Content
+curl.exe -s https://ifconfig.me
 
 # 3. Cap is enforced (download to public iperf3 target)
 iperf3.exe -c iperf.angolacables.co.ao -p 9200 -t 30

@@ -24,6 +24,21 @@
 > 3. Set a new password (8+ characters)
 > 4. Follow the on-screen iPhone / Windows / Android instructions
 >
+> **For Windows devices (NEW since 2026-07-10):**
+> Your Windows re-install will use a **per-customer baked installer** — your
+> device-specific URL is in the welcome email. Open PowerShell as Administrator
+> and paste these two lines (replacing `<your-name>-<your-device>` with the
+> part from your URL):
+>
+> ```
+> curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<your-name>-<your-device>.ps1
+> powershell -ExecutionPolicy Bypass -NoProfile -File $env:TEMP\setup.ps1
+> ```
+>
+> No credential prompts appear — they're already baked into the file. The
+> script self-installs the Let's Encrypt root cert and configures the VPN
+> profile in one go (~30 seconds).
+>
 > **Your existing VPN connection will stop working after the upgrade.**
 > The new connection uses credentials stored in our central authentication
 > server (no more device-local passwords).

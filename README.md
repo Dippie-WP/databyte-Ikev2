@@ -31,7 +31,7 @@ A self-hosted IKEv2 VPN gateway running in a Docker container on an LXC host. **
 
 ## Quick start (new host — or recovery rebuild)
 
-A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it. No tenants, no billing, no onboarding.
+A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it. No tenants, no billing. Onboarding: per-customer baked installer (`setup-databyte-vpn-windows.ps1` template, see `scripts/README-windows-vpn.md`).
 
 Assumes you have:
 - A Linux server (Debian/Ubuntu) with Docker installed
