@@ -44,8 +44,12 @@ BEHIND=$(echo "$AHEAD_BEHIND" | awk '{print $2}')
 #   - .bak.* / .rej / *.swp: backup/diff/editor scratch files (transient)
 #   - chatty runtime state files that aren't source
 # grep -vE returns 1 when no match; `|| true` keeps set -e + pipefail happy.
+# Use `grep -c .` (count non-empty lines) instead of `wc -l` so that an empty
+# DIRTY_RAW from a clean tree doesn't get counted as 1 line. Regression
+# introduced in 76df27e (2026-07-09) and not caught — parity script has been
+# falsely reporting 1 dirty file on clean trees since.
 DIRTY_RAW=$(git status --short)
-DIRTY=$(printf '%s\n' "$DIRTY_RAW" | grep -vE '\.last_deployed$|\.bak\.[0-9]{8}(T[0-9]{6}Z)?$|\.rej$|\.swp$' | wc -l || true)
+DIRTY=$(printf '%s\n' "$DIRTY_RAW" | grep -vE '\.last_deployed$|\.bak\.[0-9]{8}(T[0-9]{6}Z)?$|\.rej$|\.swp$' | grep -c . || true)
 
 echo "=== GitHub parity check ($(date -u +%FT%TZ)) ==="
 echo "Local main ahead of origin/main: $AHEAD"
