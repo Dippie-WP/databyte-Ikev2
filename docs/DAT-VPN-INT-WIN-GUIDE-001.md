@@ -76,7 +76,7 @@ This document covers the **complete procedure**, every **variation** we've encou
 | Repo path | `/root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1` |
 | Git commit (HEAD) | `1dea754` (rename from `setup-databyte-vpn-baked-v1.0.0.ps1`) |
 | Template MD5 | `5541343b9c5efe3b3b9257dbd3332805` |
-| Template size | 22,639 bytes / 476 lines |
+| Template size | 22,644 bytes / 476 lines |
 | Syntax validator | `pwsh 7.x`: `[System.Management.Automation.Language.Parser]::ParseFile(...)` |
 | Test command | `pwsh -NoProfile -Command "& { $tokens=$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile('...setup-databyte-vpn-windows.ps1',[ref]$tokens,[ref]$errors) | Out-Null; if($errors.Count -eq 0){'SYNTAX OK'} else { $errors | %{ '  '+$_.Message } } }"` |
 
@@ -352,9 +352,11 @@ Every failure mode below was observed live (date in section), with evidence in M
 
 ### 7.1 `curl.exe: SEC_E_UNTRUSTED_ROOT` on cert chain
 
-**Symptom (msg #24704, 2026-07-10 12:48 UTC):** customer's Windows fails HTTPS validation of `myvpn.databyte.co.za`. `curl.exe -k` works (skips validation).
+**Symptom (msg #24704 + memory/2026-07-10.md entry 3, 2026-07-10 06:56 SAST):** customer's Windows tried `curl.exe -k -o $env:TEMP\setup.ps1 https://myvpn.datatype.co.za/static/setup-databyte-vpn.ps1`. Downloaded **35,167 bytes** of HTML — not 23,609 bytes of script. The HTML contained `input[type=date]`, `table > tbody`, SonicWall-style re-evaluation text, and verbatim "To have the rating of this web page re-evaluated".
 
-**Root cause (verified):** `myvpn.databyte.co.za` is flagged on Cloudflare's badware list for some customer network paths. The StopBadware template is returned verbatim ("To have the rating of this web page re-evaluated").
+**Root cause (verified):** `myvpn.databyte.co.za` is flagged on Cloudflare's badware / SonicWall Content Filter Server (CFS) for Zun's network path (specific ISP/corporate firewall, not universal). OC host returns `200 23609` (clean) but Zun's network got the StopBadware HTML. The `vpn-portal.databyte.co.za` path was clean for Zun (different Cloudflare reputation profile — Google Trust Services WE1 vs LE).
+
+> **Note:** Whether `myvpn.databyte.co.za` returns badware HTML depends on the customer's network. Test before assuming. From OC host it returned 200/23609 as of 2026-07-10 15:50 UTC. From Zun's network it returned StopBadware HTML. Always use `vpn-portal.databyte.co.za` for delivery.
 
 **Fix:**
 1. Use `vpn-portal.databyte.co.za` for delivery URL instead of `myvpn.*`. Live 2026-07-10: working from Zun's network.
@@ -446,14 +448,19 @@ If the poll NEVER catches `Connected`:
 
 **Symptom:** rasdial returns Error 13868 / 0x3634. IKEv2 phase 1 (cert) completes, but phase 1.5 (EAP) fails.
 
-**Root cause:** EAP identity or password wrong in MariaDB radcheck.
+**Root cause:** EAP identity or password wrong in MariaDB radcheck on VPS.
 
 **Fix:**
-1. Verify in MariaDB:
+1. Verify in MariaDB (MariaDB runs on VPS host directly, not in Docker):
    ```bash
-   ssh root@vps-01 'docker exec $(docker ps --filter ancestor=mariadb -q | head -1) mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
+   ssh root@vps-01 'mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
    ```
-   (or use the equivalent for your mariadb container)
+   Expected output for `zun-iphone`:
+   ```
+   UserName  Attribute          Value
+   zun-iphone Cleartext-Password lX7aAy21YSu5cYxdKufKgw
+   zun-iphone NT-Password        E579CDE7F5E74DF181F5A825BA58DA55
+   ```
 2. If password missing or `DISABLED-...` marker: customer is disabled. Re-enable:
    ```sql
    UPDATE radius.radcheck SET Value='<real-password>' WHERE UserName='<customer>' AND Attribute='Cleartext-Password';
@@ -518,14 +525,15 @@ If second attempt fails: Control Panel → Network Connections → right-click m
 **Symptom:** Step 1 fails with `TCP connect to myvpn.databyte.co.za:443 timed out after 10s` or similar.
 
 **Root cause:** Customer's network can't reach the VPS directly. Could be:
-1. Customer behind strict firewall (proxy required, blocks UDP 500/4500 BUT also blocks HTTPS to non-whitelisted hosts).
+1. Customer behind strict firewall (proxy required, blocks UDP 500/4500 AND also blocks HTTPS to non-whitelisted hosts).
 2. Customer's ISP blocks the VPS IP.
-3. Cloudflare-fronted hostname DNS not resolving correctly.
+3. `myvpn.databyte.co.za` DNS resolving to a blocked/intercepted IP on the customer's network path.
 
 **Fix:**
 1. Test from another network (phone hotspot).
-2. Verify DNS: `nslookup myvpn.databyte.co.za 8.8.8.8` → expect `154.65.110.44`.
-3. If customer can reach the URL but the script fails: check if HTTPS is being MITMed by corp proxy (corporate CA injected, breaks cert chain).
+2. Verify DNS: `nslookup myvpn.databyte.co.za 8.8.8.8` → expect `154.65.110.44`. Compare with `nslookup myvpn.databyte.co.za` (customer's default resolver) — different IPs mean DNS interception.
+3. If customer can reach the URL but the script fails: check if HTTPS is being MITMed by corp proxy (corporate CA injected, breaks cert chain). Check: `curl.exe -kv https://myvpn.databyte.co.za/ 2>&1 | grep -i "subject:|issuer:"` — if issuer isn't `Let's Encrypt`, there's a proxy in the path.
+4. Try `vpn-portal.databyte.co.za` instead — different Cloudflare IP range, may bypass the block.
 
 ---
 
