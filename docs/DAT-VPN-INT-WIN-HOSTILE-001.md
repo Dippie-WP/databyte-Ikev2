@@ -1,7 +1,7 @@
 # Databyte VPN — Windows Installer for Hostile Networks (Type H)
 
 **Document ID:** DAT-VPN-INT-WIN-HOSTILE-001
-**Version:** v1.0.0
+**Version:** v1.1.0
 **Date:** 2026-07-10
 **Status:** VALIDATED
 **Audience:** Operator (Zun + future assistants)
@@ -287,8 +287,8 @@ Add-Type -TypeDefinition $sig -Force
 $c = New-Object Cred+RASCREDENTIALS
 $c.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($c)
 $c.Mask = 0x87  # UserName | Password | Domain | Default
-$c.UserName = "zunaid-new-win11"
-$c.Password = "<EAP password>"
+$c.UserName = "zunaid-new-win11"   # operator inlined at the top as $EAP_USERNAME
+$c.Password = "uEvIPMPssS1Lh85MLTU5" # operator inlined at the top as $EAP_PASSWORD
 $c.Domain = ""
 $ret = [Cred]::RasSetCredentials("", "DatabyteVPN", [ref]$c, $false)
 Write-Host "RasSetCredentials returned: $ret (0=OK, 87=ERROR_INVALID_PARAMETER, 1162=ERROR_NOT_FOUND)"
@@ -509,4 +509,4 @@ This applies to BOTH the skill (`windows-vpn-hostile-network-setup`) AND this de
 - **strongSwan server config**: `aes128-sha256-modp2048-ecp256` proposals, eap-radius plugin
 - **Live SAs**: rw-eap #5 (zun-iphone), #14 (zunaid-new-win11), #19 (zunaid-test2-win11)
 - **Audit dirs**: `/root/audit-bk/2026-07-10-zunaid-new-win11-onboard/`, `/root/audit-bk/2026-07-10-zunaid-test2-onboard/`
-- **Tracker**: `/root/projects/strongswan-vpn-gateway/tracker/databyte-vpn-tracker.xlsx` rows 35-37
+- **Tracker**: `/root/projects/strongswan-vpn-gateway/tracker/databyte-vpn-tracker.xlsx` rows 33-39
