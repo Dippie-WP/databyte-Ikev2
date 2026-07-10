@@ -11,7 +11,7 @@
     What it does (8 steps):
       0. Bootstrap: install ISRG Root X2 to Windows trust store
          (Windows without X2 fails HTTPS chain validation against
-         myvpn.databyte.co.za, which is signed by LE Root YE → X2)
+         myvpn.databyte.co.za, which is signed by LE Root YE -> X2)
       1. Verify server cert (LE trust + optional fingerprint pin)
       2. Remove all stale Databyte-related VPN connections + cmdkey entries
       3. Create IKEv2 + EAP-MSCHAPv2 profile (New-EapConfiguration)
