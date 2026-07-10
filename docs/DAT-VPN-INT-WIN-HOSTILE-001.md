@@ -134,7 +134,97 @@ We realized: **any path that uses HTTPS will fail**. The Type N script uses HTTP
 
 ## 3. The 5-step manual entry (Type H)
 
-### Step 1 — Create VPN profile
+> **v1.1.0 design**: Because the customer must hand-type the PowerShell block on a FortiGate network (HTTPS is broken), we use a single ready-to-paste block with PowerShell variables at the top for the operator's credentials. The customer copy-pastes literally — no placeholder hunt, no missed `<EAP identity>`, no Access-Reject from stale creds.
+
+### Customer-ready block (operator fills 2 lines marked `# ⬇ FILL THIS ⬇`)
+
+```powershell
+# ============================================
+# DATABYTE VPN — MANUAL ENTRY (Type H)
+# Server: myvpn.databyte.co.za
+# Paste this entire block into PowerShell Admin
+# ============================================
+
+# ⬇ FILL THIS ⬇ (operator: insert the customer's EAP username)
+$EAP_USERNAME = "zunaid-new-win11"
+# ⬇ FILL THIS ⬇ (operator: insert the customer's EAP password)
+$EAP_PASSWORD = "uEvIPMPssS1Lh85MLTU5"
+
+# Step 1: Create VPN profile
+Add-VpnConnection -Name "DatabyteVPN" `
+  -ServerAddress "myvpn.databyte.co.za" `
+  -TunnelType "IKEv2" `
+  -AuthenticationMethod "EAP" `
+  -RememberCredential `
+  -PassThru
+
+# Step 2: Set IPsec crypto
+Set-VpnConnectionIPsecConfiguration -ConnectionName "DatabyteVPN" `
+  -AuthenticationTransformConstants "SHA256128" `
+  -CipherTransformConstants "AES128" `
+  -DHGroup "Group14" `
+  -EncryptionMethod "AES256" `
+  -IntegrityCheckMethod "SHA256" `
+  -PfsGroup "PFS2048"
+
+# Step 3: Force modp2048 for IKE
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters" `
+  -Name "NegotiateDH2048_AES256" -Value 2 -Type DWord
+
+# Step 4: Bind credentials via RasSetCredentials
+cmdkey /delete:ras\DatabyteVPN 2>$null
+cmdkey /delete:myvpn.databyte.co.za 2>$null
+cmdkey /delete:vpn-portal.databyte.co.za 2>$null
+cmdkey /delete:154.65.110.44 2>$null
+
+$sig = @"
+using System.Runtime.InteropServices;
+public class Cred {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct RASCREDENTIALS {
+        public uint Size; public uint Mask;
+        [MarshalAs(UnmanagedType.LPWStr)] public string UserName;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Password;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Domain;
+    }
+    [DllImport("rasapi32.dll", CharSet=CharSet.Unicode)]
+    public static extern uint RasSetCredentials(string phonebook, string entry, ref RASCREDENTIALS creds, bool fClear);
+}
+"@
+Add-Type -TypeDefinition $sig -Force
+$c = New-Object Cred+RASCREDENTIALS
+$c.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($c)
+$c.Mask = 0x87
+$c.UserName = $EAP_USERNAME
+$c.Password = $EAP_PASSWORD
+$c.Domain = ""
+$ret = [Cred]::RasSetCredentials("", "DatabyteVPN", [ref]$c, $false)
+Write-Host "RasSetCredentials returned: $ret (0=OK, 87=ERROR_INVALID_PARAMETER, 1162=ERROR_NOT_FOUND)"
+
+# Step 5: Connect
+rasdial.exe "DatabyteVPN"
+
+# Verify
+Get-VpnConnection -Name "DatabyteVPN"
+ipconfig /all | Select-String "10.99"
+ping 10.99.0.1
+```
+
+**Why this design is better than template+placeholder hunt**:
+
+| Aspect | Old design (template + `<placeholder>`) | New design (operator fills 2 lines) |
+|---|---|---|
+| Operator effort | Replace `<EAP identity>` and `<EAP password>` deep in Step 4 | Replace 2 clearly-marked lines at the top |
+| Customer effort | Find the placeholders, edit them | Copy-paste the whole block, variables are already set |
+| Error risk | Customer misses a placeholder → Access-Reject | Customer copy-pastes literally → correct creds |
+| Audit trail | Operator sends raw template, edits are off-channel | Operator edits 2 lines before sending, no post-edit |
+| Visual cue | None — placeholders are inline | Big `# ⬇ FILL THIS ⬇` markers |
+
+---
+
+### Step-by-step rationale
+
+**Step 1 — Create VPN profile**
 
 ```powershell
 Add-VpnConnection -Name "DatabyteVPN" `
@@ -321,6 +411,14 @@ rclone copy /root/projects/strongswan-vpn-gateway/tracker/databyte-vpn-tracker.x
 | Failure modes | 14 verified | 8 verified |
 | Multiple customers on one machine | One profile, swap creds | Multiple profiles (`DatabyteVPN`, `DatabyteVPN2`, ...), independent creds |
 | When to use | Default — clean network | FortiGate / corporate firewall / captive portal / any TLS-MITM network |
+
+---
+
+### v1.1.0 design decision (why we don't use `<placeholder>` anymore)
+
+In v1.0.0 the skill used `<EAP identity>` and `<EAP password>` inline. Zun's feedback (msg #24938): customer had to manually find and replace those placeholders, which is fragile and error-prone on a hostile network where the only safe action is "copy the block I sent you, paste, run". The v1.1.0 design uses PowerShell variables `$EAP_USERNAME` and `$EAP_PASSWORD` at the top of the block. Operator fills 2 lines before sending. Customer copy-pastes literally. No find/replace, no missed placeholder, no Access-Reject from stale creds.
+
+This applies to BOTH the skill (`windows-vpn-hostile-network-setup`) AND this design doc.
 
 ---
 
