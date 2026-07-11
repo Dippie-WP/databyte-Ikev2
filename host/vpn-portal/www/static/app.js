@@ -2636,41 +2636,29 @@
       ),
     );
 
-    // v1.6.0 — Windows: prefer PowerShell installer one-liner over manual steps.
-    // The one-liner downloads the CA cert + EAP profile + connects. Falls back
-    // to manual steps if installer-token generation failed.
+    // v2.0 — Windows: reuse showInstallerLinkModal so the new-client flow gets
+    // the SAME mode-selector UI as the per-customer Generate flow. Falls back to
+    // manual steps if the auto installer-token POST above failed (installerData null).
     const Windows = setupCard('Windows',
       installerData && installerData.powershell_cmd
         ? el('div', {},
             el('div', { cls: 'vp-setup-steps' },
               el('div', {},
-                el('strong', {}, 'Send these 3 lines to the customer. They paste them into '),
-                el('code', {}, 'Windows PowerShell (Admin)'),
-                el('strong', {}, '. The script downloads the CA cert, installs the EAP profile, and connects.'),
+                el('strong', {}, 'Open the installer link modal to pick Standard (N) or Hostile (H) mode, generate the artifact, and copy or download it.'),
               ),
               el('div', { cls: 'vp-row vp-mt-12' },
                 el('button', {
                   type: 'button',
                   cls: 'vp-btn vp-btn-primary',
                   onclick: () => {
-                    navigator.clipboard.writeText(installerData.powershell_cmd).then(() => {
-                      toast('Copied PowerShell one-liner', 'ok');
-                    }).catch(() => { showBanner('Copy failed', 'err'); });
+                    // Reconstruct a customer-shaped object that showInstallerLinkModal expects.
+                    // We have r.customer (full record from the create endpoint) + r.device +
+                    // installerData (token response). showInstallerLinkModal reads:
+                    //   c.id, c.display_name, c.name (and shows mode radio + Generate).
+                    showInstallerLinkModal(c, installerData, 'standard');
                   },
-                }, '⧉ Copy PowerShell one-liner'),
-                el('button', {
-                  type: 'button',
-                  cls: 'vp-btn vp-btn-ghost',
-                  onclick: () => {
-                    window.open(installerData.installer_url, '_blank').close();
-                    showBanner('⚠ Test fetch consumed the token', 'err');
-                  },
-                  title: 'WARNING: this consumes the token!',
-                }, '⚠ Test fetch (burns token)'),
+                }, '🔗 Open installer link modal (Standard / Hostile)'),
               ),
-              // v2.5.2 — Render the multi-line powershell_cmd in a <pre> so the
-              // operator can SEE the 3 lines before clicking Copy. Each line
-              // starts on its own row.
               el('pre', { cls: 'vp-cmd vp-mt-12' },
                 installerData.powershell_cmd),
               el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
