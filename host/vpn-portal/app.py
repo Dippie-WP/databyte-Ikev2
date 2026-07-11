@@ -138,7 +138,7 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 log = logging.getLogger("vpn-portal")
 
 # ---------- App ----------
-app = FastAPI(title="databyte vpn-portal", version="2.0.0")
+app = FastAPI(title="databyte vpn-portal", version="2.1.0")
 
 # Serve frontend (static assets + SPA index)
 WWW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "www")
@@ -2729,7 +2729,11 @@ def portal_login(req: PortalLoginRequest, request: Request, response: Response):
     portal_auth._portal_rate_limit(ip)
     ua = request.headers.get("user-agent", "")
 
-    user = portal_auth.lookup_user_and_customer(req.identity)
+    # CORR-2026-07-11-026: case-insensitive login. FreeRADIUS uses MariaDB default collation
+    # (utf8_general_ci) so VPN auth is case-insensitive, but charon SQLite lookup is
+    # exact-match. Normalize to lowercase so portal web login matches VPN auth behavior.
+    normalized_identity = req.identity.strip().lower()
+    user = portal_auth.lookup_user_and_customer(normalized_identity)
     if not user:
         log.info("portal login FAIL (no user) ip=%s identity=%s", ip, req.identity)
         raise HTTPException(401, "Invalid credentials")
@@ -2752,7 +2756,7 @@ def portal_login(req: PortalLoginRequest, request: Request, response: Response):
     # Issue session
     session_id = portal_auth.create_session(
         customer_id=user["customer_id"],
-        identity=req.identity,
+        identity=normalized_identity,
         user_agent=ua,
         ip_address=ip,
     )

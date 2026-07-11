@@ -6,6 +6,46 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v2.1.0 — 2026-07-11
+
+**CORR-2026-07-11-026: case-insensitive identity normalization (HOT bug, 3 instances)**
+
+A subtle but customer-visible bug bit Siraaj (iPhone customer, onboarded earlier today). Three sister files all did `WHERE u.name = ?` lookups against `users.name` in charon SQLite — which is case-**sensitive**. FreeRADIUS, by contrast, uses MariaDB with `utf8_general_ci` (case-insensitive) and accepted any case at IKE auth. So the VPN connected fine, but every downstream service that joined `users.name` to the lease identity quietly got zero rows, applied wrong defaults, or rejected the login.
+
+The bug is in the way: **default-fallback behavior can mask bugs.** `bandwidth-monitor` silently fell back to 20/20 mbit when the customer record wasn't found — which happened to match what Siraaj had requested, so the bug was invisible to her. It would have surfaced on the next non-20/20 customer.
+
+Root cause = the very common crypt-vs-XYZ mismatch:
+
+- Identity typed by human = "whatever case they typed"
+- Portal-created identity = lowercase (normalized on creation)
+- charon `users.name` = exact-match (case-sensitive)
+- FreeRADIUS `radcheck.username` = exact-match BUT MariaDB collation is case-insensitive
+
+#### 1. Files patched (3 + 1 cosmetic)
+
+- `host/vpn-portal/app.py:portal_login` — added `.strip().lower()` to `req.identity` before `lookup_user_and_customer`. Backup: `app.py.bak-2026-07-11-casfix`.
+- `host/vpn-portal/www/portal/index.html` — placeholder changed from `e.g. demo-phone` to `e.g. siraaj-iphone (lowercase)` so customers see the canonical format.
+- `quota/quota-monitor.py:lookup_customer_for_username` — added `.lower()` to the parameter binding. Backup: `quota-monitor.py.bak-2026-07-11-casfix`.
+- `quota/bandwidth-monitor.py:lookup_customer_bandwidth` (line 542) — same fix at the call site. Backup: `bandwidth-monitor.py.bak-2026-07-11-casfix`.
+
+Portal FastAPI metadata version bumped from `2.0.0` → `2.1.0` (`host/vpn-portal/app.py:141`).
+
+#### 2. CI drift detection added
+
+A new GitHub Actions workflow (`drift-detect.yml`) and a Bash tool (`tools/ci-drift-detect.sh`) verify, on every push, that the four high-risk files in this repo have matching MD5 sums on the LIVE VPS at `vps-01`. The companion script `tools/sync-from-live.sh` provides one-command recovery when drift is detected. Models after HOOP.dev "IaC Drift Detection in GitHub CI/CD" pattern (commit-SHA verification on every push).
+
+Required secrets/vars for the workflow:
+
+- `secrets.VPS_SSH_KEY` — private key for an SSH identity authorized on the VPS
+- `vars.VPS_HOST` (default: `vps-01`) — SSH target
+- `vars.VPS_USER` (default: `root`) — SSH user
+
+#### 3. Lessons reinforced (now in CHANGELOG + SOUL.md HOT layer)
+
+- **When fixing cross-system auth, audit ALL paths that touch the same lookup.** One fix is rarely enough. Today: 3 instances, 1 misguided first-pass verdict.
+- **Default-fallback behavior masks bugs.** A default that happens to match a common request value is the worst kind of bug — silent in prod.
+- **Pre-compaction flush is the right place to audit multi-instance fixes.** Zun's single-word "And?" prompt forced the third-instance discovery.
+
 ### v2.0.0 — 2026-07-06
 
 **Architectural boundary: charon authentication now flows through FreeRADIUS (`eap-radius`). DAE/Disconnect-Request (RFC 5176) wired for hard-cut enforcement. Reset flow restores radcheck from pre-cut backup. Phase 7 cleanup: vestigial eap-radius blocks removed, FR IPv6 secret realigned.**
