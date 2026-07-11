@@ -2402,7 +2402,8 @@
           ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device type'),
-            el('select', { id: 'vp-nc-devtype', cls: 'vp-inp', required: true },
+            el('select', { id: 'vp-nc-devtype', cls: 'vp-inp', required: true,
+                            onchange: onNcDeviceTypeChange },
               el('option', { value: 'iOS'     }, 'iOS'),
               el('option', { value: 'Android' }, 'Android'),
               el('option', { value: 'Windows' }, 'Windows'),
@@ -2410,6 +2411,35 @@
               el('option', { value: 'Linux'   }, 'Linux'),
               el('option', { value: 'Other'   }, 'Other'),
             ),
+          ),
+          // v2.2 — Windows installer-mode picker. Shows when device_type=Windows.
+          // Stores the operator's choice in hidden input #vp-nc-installer-mode
+          // which onNewClientSubmit reads to call installer-token?mode={value}.
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-installer-mode-wrap' },
+            el('label', { cls: 'vp-label' },
+              'Windows installer mode ',
+              el('span', { cls: 'vp-optional' }, '(Standard N — 3-line powershell via HTTPS  /  Hostile H — self-contained .ps1)')),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', { type: 'radio', name: 'vp-nc-installer-mode-radio', value: 'standard',
+                              checked: true, id: 'vp-nc-installer-mode-radio-std',
+                              onchange: () => { document.getElementById('vp-nc-installer-mode').value = 'standard'; } }),
+                el('strong', {}, 'Standard (N)'),
+                el('span', { cls: 'vp-fg-muted vp-fs-12 vp-ml-6' },
+                  'FROZEN 3-line powershell (curl + rasdial). Works everywhere; fails behind FortiGate / SonicWall HTTPS intercept.'),
+              ),
+            ),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', { type: 'radio', name: 'vp-nc-installer-mode-radio', value: 'hostile',
+                              id: 'vp-nc-installer-mode-radio-hostile',
+                              onchange: () => { document.getElementById('vp-nc-installer-mode').value = 'hostile'; } }),
+                el('strong', {}, 'Hostile (H)'),
+                el('span', { cls: 'vp-fg-muted vp-fs-12 vp-ml-6' },
+                  'Self-contained .ps1 with credentials baked in (RasSetCredentials via P/Invoke). Works on hostile networks. CWE-778-ish — single-use, single-target.'),
+              ),
+            ),
+            el('input', { type: 'hidden', id: 'vp-nc-installer-mode', value: 'standard' }),
           ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'OS version ', el('span', { cls: 'vp-optional' }, '(optional)')),
@@ -2545,17 +2575,22 @@
       body.bandwidth_up_mbps = null;
     }
 
+    // v2.2 — read the Windows installer mode (set by onNcDeviceTypeChange + radios).
+    // Defaults to 'standard' even if device_type !== Windows (harmless, unused).
+    const installerMode = (document.getElementById('vp-nc-installer-mode') || { value: 'standard' }).value || 'standard';
+
     try {
       const r = await post('/api/customers', body);
       // Refresh customers list in the background
       try { loadCustomers().then(render).catch(()=>{}); } catch {}
       // v1.6.0 — For Windows devices, also auto-generate the installer
       // one-liner so the operator can immediately send it to the customer.
+      // v2.2 — passes the operator's chosen mode (?mode=standard|hostile).
       // Token is one-shot, 7-day expiry, burned on first customer fetch.
       let installerData = null;
       if (body.device_type === 'Windows') {
         try {
-          installerData = await post(`/api/customers/${r.customer.id}/installer-token`);
+          installerData = await post(`/api/customers/${r.customer.id}/installer-token?mode=${encodeURIComponent(installerMode)}`);
         } catch (e) {
           // Non-fatal — Windows card will fall back to manual steps.
           console.warn('installer-token failed:', e.message || e);
@@ -2567,6 +2602,25 @@
       errEl.classList.remove('vp-hidden');
       submitBtn.disabled = false;
       submitBtn.textContent = 'Create client';
+    }
+  }
+
+  // v2.2 — show/hide the Windows installer-mode picker block when the
+  // operator changes device_type in the new-client form. Resets the hidden
+  // input to 'standard' when Windows is un-selected (so a subsequent
+  // Windows re-selection doesn't carry a stale 'hostile' choice).
+  function onNcDeviceTypeChange(ev) {
+    const wrap = document.getElementById('vp-nc-installer-mode-wrap');
+    const hidden = document.getElementById('vp-nc-installer-mode');
+    if (!wrap || !hidden) return;
+    const isWin = ev.target.value === 'Windows';
+    wrap.classList.toggle('vp-hidden', !isWin);
+    if (!isWin) {
+      hidden.value = 'standard';
+      const std = document.getElementById('vp-nc-installer-mode-radio-std');
+      const host = document.getElementById('vp-nc-installer-mode-radio-hostile');
+      if (std) std.checked = true;
+      if (host) host.checked = false;
     }
   }
 
@@ -2636,45 +2690,55 @@
       ),
     );
 
-    // v2.1 — Windows: ALWAYS show the mode-selector button, regardless of whether
-    // the auto-after-create POST succeeded. The button opens the same modal as
-    // the per-customer Generate button. If installerData is null, the modal opens
-    // empty and the operator clicks Generate inside the modal to fetch fresh.
-    // If installerData is set, the modal opens pre-populated with the 3-line
-    // FROZEN powershell and the operator can switch to Hostile via the radio.
+    // v2.2 — Windows: show the operator-picked artifact inline (3-line FROZEN
+    // powershell OR full hostile .ps1), with a button to open the mode-selector
+    // modal as a fallback if they want to switch modes or re-generate.
+    // Mode was chosen at create time (v2.2 picker in the form), so we know it.
+    const windowsMode = (installerData && installerData.mode) || 'standard';
+    const isHostile = windowsMode === 'hostile';
+
+    // Pick the artifact body to display
+    //   standard: powershell_cmd = the 3-line FROZEN block
+    //   hostile:  content         = the full .ps1; powershell_cmd = run command
+    const artifactBody = installerData
+      ? (isHostile ? installerData.content : installerData.powershell_cmd)
+      : null;
+
     const Windows = setupCard('Windows',
       el('div', {},
         el('div', { cls: 'vp-setup-steps' },
           el('div', {},
-            el('strong', {}, 'Click to open the installer link modal and pick Standard (N) or Hostile (H) mode, generate the artifact, and copy or download it.'),
+            el('strong', {},
+              isHostile ? 'Hostile mode installer (baked .ps1):' : 'Standard mode installer (3-line powershell):'),
           ),
+          // Inline artifact
+          artifactBody
+            ? el('pre', { cls: 'vp-cmd vp-mt-12' }, artifactBody)
+            : el('div', { cls: 'vp-info vp-fs-12 vp-fg-muted' },
+                'Auto-generation did not run for this device. ',
+                'Click the button below to generate.'),
+          // Mode badge + token info
+          installerData
+            ? el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+                'Mode: ', el('strong', {}, windowsMode.toUpperCase()),
+                isHostile
+                  ? el('span', {}, ' · File: ', el('code', {}, installerData.filename || '(unnamed)'),
+                        ' · Single-use; treat as sensitive customer material.')
+                  : el('span', {}, ' · Token ', el('code', {}, installerData.token_prefix),
+                        ' · expires in ', String(installerData.expires_in_days), ' day(s). ',
+                        'Single-use: burns when the customer runs the one-liner.'),
+              )
+            : null,
+          // Fallback button — opens modal if operator wants to switch modes
           el('div', { cls: 'vp-row vp-mt-12' },
             el('button', {
               type: 'button',
-              cls: 'vp-btn vp-btn-primary',
-              id: 'vp-new-client-open-installer-modal',
+              cls: 'vp-btn vp-btn-ghost',
               onclick: () => {
-                showInstallerLinkModal(c, installerData || null, 'standard');
+                showInstallerLinkModal(c, installerData || null, windowsMode);
               },
-            }, '🔗 Open installer link modal (Standard / Hostile)'),
+            }, isHostile ? '🔁 Switch to Standard / re-generate' : '🔁 Switch to Hostile / re-generate'),
           ),
-          // If the auto-after-create POST succeeded, also show the 3-line
-          // FROZEN powershell block inline as a fallback for quick copy-paste.
-          installerData && installerData.powershell_cmd
-            ? el('div', {},
-                el('pre', { cls: 'vp-cmd vp-mt-12' },
-                  installerData.powershell_cmd),
-                el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
-                  'Auto-generated (standard mode) — expires in ',
-                  String(installerData.expires_in_days), ' day(s). ',
-                  'Single-use: burns when the customer runs the one-liner. ',
-                  'Click the button above to switch to Hostile mode or re-generate.',
-                ),
-              )
-            : el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
-                'Auto-generation did not run for this device. ',
-                'Click the button above to generate an installer link.',
-              ),
         ),
       ),
     );

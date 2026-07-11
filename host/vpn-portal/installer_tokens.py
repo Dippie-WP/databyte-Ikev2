@@ -335,6 +335,7 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
         )
 
         return {
+            "mode":            "standard",
             "customer_name":   cust["name"],
             "customer_display": cust.get("display_name"),
             "device_name":     dev["device_name"],
