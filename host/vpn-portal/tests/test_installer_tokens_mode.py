@@ -130,7 +130,7 @@ def test_explicit_standard_returns_same_shape_as_default():
     finally:
         _restore(captured2)
 
-    assert "mode" not in out_default
+    assert out_default.get("mode") == "standard"
     assert "installer_kind" not in out_default
     lines1 = out_default["powershell_cmd"].split("\n")
     lines2 = out_explicit["powershell_cmd"].split("\n")
