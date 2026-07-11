@@ -227,7 +227,12 @@ def lookup_customer_for_username(db: sqlite3.Connection, username: str) -> dict 
     customer mapping). This is the case for legacy EAP users (zun, etc.)
     that pre-date the 5B customer schema.
     """
-    cur = db.execute(CUSTOMER_LOOKUP_SQL, (username,))
+    # CORR-2026-07-11-026 (companion fix): charon reports lease identity
+    # with whatever case the client sent. FreeRADIUS is case-insensitive
+    # (MariaDB utf8_general_ci) so VPN auth succeeds, but charon SQLite
+    # users.name is exact-match. Normalize to lowercase so quota accounting
+    # matches what FreeRADIUS accepted. Companion fix to app.py:portal_login.
+    cur = db.execute(CUSTOMER_LOOKUP_SQL, (username.lower(),))
     r = cur.fetchone()
     return dict(r) if r else None
 

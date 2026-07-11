@@ -1,0 +1,45 @@
+name: drift-detect
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Every 6 hours — catches drift from manual LIVE edits
+    - cron: "0 */6 * * *"
+
+# Cancel previous runs on new push
+concurrency:
+  group: drift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift-detect:
+    name: LIVE vs git HEAD drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up SSH to VPS
+        uses: webfactory/ssh-agent@v0.7.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Add VPS to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Run drift detector
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST || 'vps-01' }}
+          VPS_USER: ${{ vars.VPS_USER || 'root' }}
+        run: |
+          ./tools/ci-drift-detect.sh
