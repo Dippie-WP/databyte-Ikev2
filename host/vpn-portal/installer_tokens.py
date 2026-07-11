@@ -432,12 +432,24 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
         eap_identity = user["name"]
         # users.password stores NTLM hash (X'...'). We need plaintext for RasSetCredentials.
         # Look it up from rw-eap.conf instead (it's the source of truth for charon).
-        plain_password = _read_eap_secret_from_conf(eap_identity)
+        # CORR-2026-07-11-027 (HOT, sibling to CORR-026): _read_eap_secret_from_conf was
+        # changed from returning Optional[str] to returning Tuple[Optional[str], Optional[str]]
+        # (added the conf fingerprint for diagnostics). The original caller here never unpacked
+        # the tuple, so `plain_password` ended up as a 2-element list — which JSON-serialized to
+        # `["efEW0p9z...","a668c..."]` (test_installer_tokens.py::test_consume_returns_credentials_first_time
+        # caught it: `len(body["password"]) == 2`, expected string >= 16 chars).
+        conf_lookup = _read_eap_secret_from_conf(eap_identity)
+        if isinstance(conf_lookup, tuple):
+            plain_password = conf_lookup[0]
+            conf_fingerprint = conf_lookup[1]
+        else:
+            plain_password = conf_lookup
+            conf_fingerprint = None
         if not plain_password:
             raise HTTPException(
                 500,
                 "could not retrieve EAP secret from rw-eap.conf "
-                "(charon config drift — re-create the customer)",
+                f"(charon config drift \u2014 re-create the customer, fingerprint={conf_fingerprint!r})",
             )
 
         # Tier info
