@@ -1559,23 +1559,29 @@
   // v1.5.0 — Generate one-time installer link for customer onboarding
   async function generateInstallerLink(c) {
     try {
-      const r = await post(`/api/customers/${c.id}/installer-token`);
-      showInstallerLinkModal(c, r);
+      const r = await post(`/api/customers/${c.id}/installer-token?mode=standard`);
+      showInstallerLinkModal(c, r, 'standard');
     } catch (e) {
       toast('Failed to generate installer link: ' + (e.message || e), 'err');
     }
   }
 
-  function showInstallerLinkModal(c, data) {
+  // v2.0 — Windows installer mode selector.
+  //   * defaultMode  = 'standard' | 'hostile'
+  //   * data is null on first open (will be generated when user clicks Generate);
+  //     if caller already has data (e.g. legacy callers passing a non-null data),
+  //     we just show it.
+  function showInstallerLinkModal(c, data, defaultMode = 'standard') {
     // v1.7.2 — Defensive cleanup: drain any stale modal stack before opening
     // the installer modal. Replaces the prior `querySelectorAll('.vp-modal-bg')
     // .forEach(m => m.remove())` which removed DOM nodes but left the stack
     // (and its keydown listener) out of sync.
     closeAllModals();
 
-    const psCmd = data.powershell_cmd;
-    const url = data.installer_url;
-    const expires = data.expires_in_days + ' days';
+    // We hold the result + selected mode in closure-scoped variables so the
+    // Generate / Copy buttons (created below) can read them when clicked.
+    let currentMode = defaultMode;
+    let currentData = data;     // null on first open until user clicks Generate
 
     const modal = el('div', {
       cls: 'vp-modal-bg',
@@ -1585,10 +1591,154 @@
         el('div', { cls: 'vp-modal-title' }, '🔗 Installer link — ' + (c.display_name || c.name)),
         el('div', { cls: 'vp-modal-body' },
           el('p', {},
+            'Pick the installer mode and click ',
+            el('strong', {}, 'Generate'),
+            '. Then send the PowerShell block to the customer. Standard uses an HTTPS ',
+            'download (FortiGate / SonicWall intercept this). Hostile bakes the credentials ',
+            'directly into a local .ps1 file (no HTTPS). The link expires in ',
+            el('strong', {}, '7 days'),
+            ' and is single-use (burned on first fetch).',
+          ),
+          // ── Mode radio ──────────────────────────────────────────────
+          el('div', { cls: 'vp-field vp-mt-8', id: 'vp-mode-radio-row' },
+            el('label', {}, 'Installer mode:'),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', {
+                  type: 'radio', name: 'vp-installer-mode', value: 'standard',
+                  checked: defaultMode === 'standard',
+                  onchange: () => { currentMode = 'standard'; },
+                }),
+                ' ', el('strong', {}, 'Standard (N)'),
+                ' — customer runs curl from HTTPS, profile + creds fetched. ',
+                el('span', { cls: 'vp-fg-muted vp-fs-12' }, 'Default. Use unless on a hostile network.'),
+              ),
+            ),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', {
+                  type: 'radio', name: 'vp-installer-mode', value: 'hostile',
+                  checked: defaultMode === 'hostile',
+                  onchange: () => { currentMode = 'hostile'; },
+                }),
+                ' ', el('strong', {}, 'Hostile (H)'),
+                ' — operator bakes a self-contained .ps1 with credentials inlined. ',
+                el('span', { cls: 'vp-fg-muted vp-fs-12' }, 'Use when FortiGate/SonicWall intercept TLS.'),
+              ),
+            ),
+          ),
+          // ── Generate / status row ──────────────────────────────────
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              id: 'vp-installer-generate',
+              onclick: async () => {
+                const btn = modal.querySelector('#vp-installer-generate');
+                btn.disabled = true; btn.textContent = '⏳ Generating…';
+                try {
+                  const r = await post(`/api/customers/${c.id}/installer-token?mode=${currentMode}`);
+                  currentData = r;
+                  renderResult(r, currentMode);
+                } catch (e) {
+                  toast('Generate failed: ' + (e.message || e), 'err');
+                } finally {
+                  btn.disabled = false;
+                  btn.textContent = '🔄 Generate ' + (currentMode === 'hostile' ? 'hostile .ps1' : 'installer link');
+                }
+              },
+            }, '🔄 Generate installer link'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              id: 'vp-installer-verify',
+              style: 'display:none;',
+              onclick: async () => {
+                const vbtn = modal.querySelector('#vp-installer-verify');
+                const vout = modal.querySelector('#vp-installer-verify-out');
+                vbtn.disabled = true; vbtn.textContent = '⏳ Verifying…';
+                vout.style.display = 'block'; vout.textContent = '';
+                try {
+                  // When Polish #3 is live: currentData.bake_id will be set
+                  // and we look up by id. When Polish #3 is deferred (current
+                  // state on vps-01), the server returns 503 with a clear
+                  // 'use swanctl --list-sas' guidance.
+                  const bakeId = (currentData && currentData.bake_id) || 0;
+                  const r = await get(`/api/installer/bake/${bakeId}/verify`);
+                  vout.textContent = '✓ Verified\n' + JSON.stringify(r, null, 2);
+                } catch (e) {
+                  vout.textContent = 'Verify error:\n' + (e.message || e);
+                } finally {
+                  vbtn.disabled = false;
+                  vbtn.textContent = '🔒 Re-verify SA on server';
+                }
+              },
+            }, '🔒 Verify SA on server'),
+          ),
+          // ── Result region (textarea + copies) ──────────────────────
+          el('div', { id: 'vp-installer-result', cls: 'vp-field vp-mt-12' }),
+          // ── Verify output region ───────────────────────────────────
+          el('pre', {
+            id: 'vp-installer-verify-out',
+            cls: 'vp-mt-8 vp-fs-12 vp-fg-muted',
+            style: 'max-height:160px; overflow:auto; background:rgba(255,255,255,0.04); padding:8px; border-radius:4px; display:none; white-space:pre-wrap;',
+          }),
+        ),
+        el('div', { cls: 'vp-modal-foot' },
+          el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => closeModal() }, 'Close'),
+        ),
+      ),
+    );
+    openModal(modal);
+
+    // Helper: render the result region for the chosen mode.
+    function renderResult(data, mode) {
+      const target = modal.querySelector('#vp-installer-result');
+      const vbtn = modal.querySelector('#vp-installer-verify');
+      const vout = modal.querySelector('#vp-installer-verify-out');
+      vout.style.display = 'none'; vout.textContent = '';
+
+      // Hostile mode = full .ps1 content (NOT a one-liner). Show in a wider
+      // textarea + a "Save as .ps1" button.
+      if (mode === 'hostile') {
+        const filename = data.filename || ('setup-databyte-vpn-' + c.name + '-' + (data.device_name || 'device') + '-hostile.ps1');
+        const psContent = data.content || data.powershell_cmd || '';
+        target.replaceChildren(
+          el('div', { cls: 'vp-field' },
+            el('label', {},
+              '⚠️ Hostile-baked file (', el('code', {}, filename), ') — contains plaintext EAP credentials. ',
+              'Send via encrypted DM only. NEVER email the .ps1 itself.',
+            ),
+            el('textarea', {
+              readonly: true,
+              rows: 14,
+              cls: 'vp-installer-cmd',
+              onclick: (e) => e.target.select(),
+              id: 'vp-installer-cmd',
+            }, psContent),
+          ),
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: () => copyToClipboard(psContent, '.ps1 contents'),
+            }, '📋 Copy .ps1 contents'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => downloadAsFile(psContent, filename),
+            }, '💾 Save as ' + filename),
+          ),
+        );
+        // Verify button only meaningful for hostile (no bake record on standard
+        // until Polish #3 ships).
+        vbtn.style.display = 'inline-block';
+      } else {
+        // Standard mode = 3-line powershell_cmd one-liner (preserved FROZEN shape)
+        const psCmd = data.powershell_cmd || '';
+        const url = data.installer_url || '';
+        const expires = (data.expires_in_days || 7) + ' days';
+        target.replaceChildren(
+          el('p', {},
             'Send this PowerShell one-liner to the customer. They run it in ',
             el('code', {}, 'Windows PowerShell (Admin)'),
-            ' and the script will fetch their credentials, bind to the VPN profile, ',
-            'and connect. The link expires in ', el('strong', {}, expires),
+            '. The link expires in ', el('strong', {}, expires),
             ' and is single-use (burned on first fetch).',
           ),
           el('div', { cls: 'vp-field' },
@@ -1612,26 +1762,40 @@
             }, '📋 Copy URL'),
             el('button', {
               cls: 'vp-btn vp-btn-ghost',
-              onclick: () => window.open(url, '_blank').close(),  // test fetch (burns token!)
+              onclick: () => window.open(url, '_blank').close(),
               title: 'WARNING: this consumes the token!',
             }, '⚠ Test fetch (burns token)'),
           ),
           el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
-            'Details: device=', el('code', {}, data.device_name),
-            ' (' + data.device_type + '), tier=', el('code', {}, data.tier || 'none'),
-            ', token prefix=', el('code', {}, data.token_prefix),
-            ', expires ', new Date(data.expires_at * 1000).toISOString(),
+            'Details: device=', el('code', {}, data.device_name || '?'),
+            ' (' + (data.device_type || '?') + '), tier=', el('code', {}, data.tier || 'none'),
+            ', token prefix=', el('code', {}, data.token_prefix || '?'),
+            ', expires ', new Date((data.expires_at || 0) * 1000).toISOString(),
           ),
-        ),
-        el('div', { cls: 'vp-modal-foot' },
-          el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => closeModal() }, 'Close'),
-        ),
-      ),
-    );
-    openModal(modal);
-    // Auto-select the textarea content for easy keyboard copy
-    const ta = modal.querySelector('#vp-installer-cmd');
-    if (ta) { ta.focus(); ta.select(); }
+        );
+        vbtn.style.display = 'none';
+      }
+      // Auto-select the textarea for keyboard copy
+      const ta = modal.querySelector('#vp-installer-cmd');
+      if (ta) { ta.focus(); ta.select(); }
+    }
+
+    // Helper: download a string as a file (used by the Save as .ps1 button)
+    function downloadAsFile(content, filename) {
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('Saved as ' + filename, 'ok');
+    }
+
+    // First-open path: data already provided → render immediately
+    if (currentData) renderResult(currentData, currentMode);
   }
 
   async function copyToClipboard(text, label) {
