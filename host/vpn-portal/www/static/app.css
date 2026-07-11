@@ -938,3 +938,20 @@ tr:last-child td { border-bottom: none; }
   background: var(--vp-s2);
   color: var(--vp-text3);
 }
+
+/* v2.1 — Windows installer mode selector additions */
+/* Margin-top helpers (vp-mt-N) for the radio row + result region */
+.vp-mt-4  { margin-top: 4px  !important; }
+.vp-mt-8  { margin-top: 8px  !important; }
+
+/* Radio label layout (inline radio + label + hint, no bullets) */
+.vp-radio-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.vp-radio-label input[type="radio"] {
+  margin: 0 4px 0 0;
+}

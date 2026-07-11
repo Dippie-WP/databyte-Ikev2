@@ -2636,50 +2636,47 @@
       ),
     );
 
-    // v2.0 — Windows: reuse showInstallerLinkModal so the new-client flow gets
-    // the SAME mode-selector UI as the per-customer Generate flow. Falls back to
-    // manual steps if the auto installer-token POST above failed (installerData null).
+    // v2.1 — Windows: ALWAYS show the mode-selector button, regardless of whether
+    // the auto-after-create POST succeeded. The button opens the same modal as
+    // the per-customer Generate button. If installerData is null, the modal opens
+    // empty and the operator clicks Generate inside the modal to fetch fresh.
+    // If installerData is set, the modal opens pre-populated with the 3-line
+    // FROZEN powershell and the operator can switch to Hostile via the radio.
     const Windows = setupCard('Windows',
-      installerData && installerData.powershell_cmd
-        ? el('div', {},
-            el('div', { cls: 'vp-setup-steps' },
-              el('div', {},
-                el('strong', {}, 'Open the installer link modal to pick Standard (N) or Hostile (H) mode, generate the artifact, and copy or download it.'),
+      el('div', {},
+        el('div', { cls: 'vp-setup-steps' },
+          el('div', {},
+            el('strong', {}, 'Click to open the installer link modal and pick Standard (N) or Hostile (H) mode, generate the artifact, and copy or download it.'),
+          ),
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              type: 'button',
+              cls: 'vp-btn vp-btn-primary',
+              id: 'vp-new-client-open-installer-modal',
+              onclick: () => {
+                showInstallerLinkModal(c, installerData || null, 'standard');
+              },
+            }, '🔗 Open installer link modal (Standard / Hostile)'),
+          ),
+          // If the auto-after-create POST succeeded, also show the 3-line
+          // FROZEN powershell block inline as a fallback for quick copy-paste.
+          installerData && installerData.powershell_cmd
+            ? el('div', {},
+                el('pre', { cls: 'vp-cmd vp-mt-12' },
+                  installerData.powershell_cmd),
+                el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+                  'Auto-generated (standard mode) — expires in ',
+                  String(installerData.expires_in_days), ' day(s). ',
+                  'Single-use: burns when the customer runs the one-liner. ',
+                  'Click the button above to switch to Hostile mode or re-generate.',
+                ),
+              )
+            : el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+                'Auto-generation did not run for this device. ',
+                'Click the button above to generate an installer link.',
               ),
-              el('div', { cls: 'vp-row vp-mt-12' },
-                el('button', {
-                  type: 'button',
-                  cls: 'vp-btn vp-btn-primary',
-                  onclick: () => {
-                    // Reconstruct a customer-shaped object that showInstallerLinkModal expects.
-                    // We have r.customer (full record from the create endpoint) + r.device +
-                    // installerData (token response). showInstallerLinkModal reads:
-                    //   c.id, c.display_name, c.name (and shows mode radio + Generate).
-                    showInstallerLinkModal(c, installerData, 'standard');
-                  },
-                }, '🔗 Open installer link modal (Standard / Hostile)'),
-              ),
-              el('pre', { cls: 'vp-cmd vp-mt-12' },
-                installerData.powershell_cmd),
-              el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
-                'Token: ', el('code', {}, installerData.token_prefix),
-                ' — expires in ', String(installerData.expires_in_days), ' day(s). ',
-                'Single-use: burns when the customer runs the one-liner.',
-              ),
-            ),
-          )
-        : el('ol', { cls: 'vp-setup-steps' },
-            el('li', {}, 'Settings → Network & internet → VPN → Add a VPN connection'),
-            el('li', {}, 'VPN provider: Windows (built-in)'),
-            el('li', {}, 'Connection name: any (e.g. "databyte VPN")'),
-            el('li', {}, 'Server name or address: ', el('span', { cls: 'vp-mono' }, server)),
-            el('li', {}, 'VPN type: IKEv2'),
-            el('li', {}, 'Type of sign-in info: User name and password'),
-            el('li', {}, 'User name: ', el('span', { cls: 'vp-mono' }, eapId)),
-            el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
-            el('li', {}, 'Save → connect from network flyout'),
-            el('li', {}, 'If asked for "Remember my sign-in info": NO'),
-          )
+        ),
+      ),
     );
 
     const macOS = setupCard('macOS',
