@@ -65,3 +65,4 @@ __pycache__/
 
 # Test customer credentials (per-test ephemeral, NOT for git)
 host/vpn-portal/test-credentials/
+.git-info/
