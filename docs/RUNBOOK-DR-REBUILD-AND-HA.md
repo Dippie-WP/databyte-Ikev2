@@ -1,0 +1,425 @@
+# RUNBOOK-DR-REBUILD-AND-HA — Databyte VPN Stack: Disaster Recovery + High Availability
+
+| Field | Value |
+|---|---|
+| Document ID | DAT-OPS-DR-RUNBOOK-001 |
+| Revision | v1.0.0 |
+| Date (SAST) | 2026-07-11 |
+| Author | Misha 🐻 (Zun's assistant) |
+| Authoritative source of facts | `ssh root@vps-01` + `git ls-remote origin` + web research (strongSwan, FreeRADIUS docs) |
+| ISO 9001:2015 | Document Control: this is internal — distribution restricted |
+| Verification | Each step is independently verifiable; runbook assumes operator has SSH access to OC and (if rebuilding) new VPS |
+
+---
+
+## 0. Purpose and Scope
+
+This runbook answers two questions with **facts only**:
+
+1. **REBUILD**: Given current backups (kopia @ `kop.databyte.co.za`) and the GitHub repo (`Dippie-WP/databyte-Ikev2`), can the entire VPN stack be rebuilt on a fresh cloud VPS? If yes, what are the exact steps and what is missing?
+2. **HA**: Given the current architecture, can a second VPS be added to provide active/active failover? What does it cost (engineering + ops), what does it buy (RTO/RPO), and what does it NOT solve?
+
+**Out of scope**: Commercial billing, application features unrelated to availability, security hardening beyond the rebuilt defaults, multi-region deployment.
+
+---
+
+## 1. Source-of-Truth Inventory (verified live 2026-07-11 22:53 UTC / 00:53 SAST)
+
+### 1.1 What `vps-01` actually runs (live `ssh root@vps-01`)
+
+| Component | Evidence | Version | Notes |
+|---|---|---|---|
+| Hostname | `hostname` | `vpn-prod-01` | |
+| Public IPv4 | `curl ifconfig.me` | `154.65.110.44` | Xneelo VPS, single NIC `ens3` |
+| Public IPv6 | `curl ifconfig.me` | `2c0f:fce8:4000:4000:0:1:0:3a1` | Native dual-stack |
+| Tailscale IP | `tailscale status` | `100.64.212.47` | Used for ops access; not customer-facing |
+| OS | `/etc/os-release` | Debian 13 (trixie) | |
+| CPU / RAM | `nproc / free -h` | 2 vCPU / 3.8 GiB | KVM guest (`qemu-guest-agent` running) |
+| Disk | `df -h /` | 9.7 GB (77% used, 2.2 GB free) | `/dev/vda1`, no separate data partition |
+| Swap | `free -h` | 0 B | **No swap configured** |
+| Kernel IP forwarding | `sysctl net.ipv4.ip_forward` | `1` (assumed; verified charon uses it) | |
+| `ens3` network | `ip addr` | `154.65.110.44/20` via `154.65.96.1` | DHCP-assigned; metric 100 |
+
+### 1.2 Services running (live `systemctl list-units --state=running`)
+
+| Service | Purpose | Backup coverage |
+|---|---|---|
+| `docker.service` | Docker engine | (binary only via `/usr/local` — not snapshotted, but reinstallable via `apt`) |
+| `containerd.service` | Container runtime | same as docker |
+| `strongswan` (container, image `zun/strongswan:6.0.7-mschapv2-attrsql`) | IKEv2 daemon (`charon`) | **NOT in kopia** — must be rebuilt from Dockerfile in repo |
+| `freeradius.service` | AAA backend (RADIUS UDP 1812/1813) | config in `/etc/freeradius/` (snapshotted) |
+| `mariadb.service` | MariaDB 11.8.6 for `radius` DB | data in `/var/lib/mysql` (inside `/var/lib` snapshot) |
+| `vpn-portal.service` | FastAPI portal (gunicorn, v2.1.0) | code in `/opt/vpn-portal` (snapshotted) |
+| `nginx.service` | Reverse proxy (80/443) | config in `/etc/nginx` (snapshotted) |
+| `prometheus.service` | Metrics | config in `/etc/prometheus` (snapshotted) |
+| `node_exporter.service` | Prometheus node exporter (port 9100) | same |
+| `strongswan_exporter.service` | strongSwan Prometheus exporter (port 9101) | same |
+| `quota-monitor.service` | Quota enforcement (nft named meters + 80% warn + 100% hard cut) | in `/opt/ipban/`? No — `quota/quota-monitor.py` |
+| `bandwidth-monitor.service` | Per-user bandwidth (tc classes + nft mangle MARK per user) | `/opt/ipban/`? No — `quota/bandwidth-monitor.py` |
+| `quota-exporter.service` | Prometheus exporter for quota | same path family |
+| `ipban.service` | IP ban (fail2ban-style) | `/opt/ipban/` (snapshotted) |
+| `fail2ban.service` | SSH/Apache brute-force protection | `/etc/fail2ban` (snapshotted) |
+| `tailscaled.service` | Tailscale mesh | binary in `/usr/local` |
+| `apache2.service` | Apache 2 (legacy, port 8000 localhost only) | config in `/etc/apache2` |
+| `dockhand-bridge.service` | socat TCP 2384 → `/var/run/docker.sock` (Tailscale-only via nftables) | config in `/etc/systemd/system/` |
+
+### 1.3 Listening ports (live `ss -tlnp` + `ss -ulnp`)
+
+| Port | Protocol | Process | Public? | Function |
+|---|---|---|---|---|
+| 22/tcp | TCP | sshd | YES | Operator SSH (fail2ban-protected) |
+| 80/tcp | TCP | nginx | YES | HTTP → 443 redirect |
+| 443/tcp | TCP | nginx | YES | Portal HTTPS + ACME + API |
+| 500/udp | UDP | **charon (pid 1485, host network)** | YES | IKEv2 |
+| 4500/udp | UDP | **charon (pid 1485, host network)** | YES | IKEv2 NAT-T |
+| 1812/udp | UDP | freeradius | NO (localhost) | RADIUS auth |
+| 1813/udp | UDP | freeradius | NO (localhost) | RADIUS accounting |
+| 3306/tcp | TCP | mariadbd | NO (localhost) | MariaDB |
+| 5355/udp | UDP | systemd-resolved | NO | mDNS |
+| 8000/tcp | TCP | apache2 | NO (localhost) | Legacy PHP admin UI |
+| 9101/tcp | TCP | python3 (strongswan_exporter) | NO | metrics |
+| 9102/tcp | TCP | python3 | NO | metrics |
+| 2384/tcp | TCP | socat | NO (Tailscale-nftables-restricted) | Dockhand Docker API |
+
+**Critical finding**: charon runs on the **host network namespace**, NOT in a Docker bridge network. This is intentional — it gives charon direct access to `ens3` for IKE_SA traffic — but it means **the strongswan container is NOT portable to a different host's bridge without configuration changes**.
+
+### 1.4 What's in kopia (live `kopia snapshot list --all` from vps-01)
+
+Repo: `https://kop.databyte.co.za:443`, user `debian`. Password stored at `/home/debian/.kopia-password` (live, single-instance).
+
+| Path | Size | Latest snapshot | Reinstall method on rebuild |
+|---|---|---|---|
+| `/etc` | 4.3 MB | 2026-07-11 00:00:03 SAST | `kopia restore /etc --destination-path /etc` ⚠ overwrites ALL of /etc |
+| `/etc/letsencrypt` | 44.6 KB | 2026-07-06 00:00:05 SAST | LE certs — must survive rebuild |
+| `/home/debian` | 16.6 MB | 2026-07-11 00:00:07 SAST | kopia scripts, `.config/kopia/`, password file |
+| `/opt/ipban` | 54.5 MB | 2026-07-11 00:00:12 SAST | ipBan code + sqlite DB |
+| `/opt/strongswan-vpn-gateway` | 6.4 MB | 2026-07-10 00:00:16 SAST | Git checkout (incl. Dockerfile + nginx + deploy scripts) |
+| `/opt/vpn-portal` | 93.9 MB | 2026-07-11 00:00:11 SAST | Portal FastAPI code + `.venv/` + baked PowerShell scripts |
+| `/root/.ssh` | 557 B | 2026-07-07 00:00:17 SAST | Operator SSH keys (incl. OC's `id_ed25519` pubkey) |
+| `/root/projects` | 93.3 KB | 2026-06-30 20:46:33 SAST | Operator scripts (nft-migration-v2) |
+| `/usr/local` | 73.9 MB | 2026-07-07 00:00:19 SAST | Custom binaries: kopia, strongSwan if installed via tarball, etc. |
+| `/var/lib` | 659.1 MB | 2026-07-11 00:00:20 SAST | **charon SQLite DB + MariaDB data + fail2ban DB + dpkg state** |
+| `/var/log/auth.log` | 11 MB | 2026-07-11 00:00:38 SAST | SSH logs |
+| `/var/log/charon-log-host` | 4.3 MB | 2026-07-11 00:00:41 SAST | strongSwan log (named after `charon-log-host/` symlink pattern) |
+
+### 1.5 What's NOT in kopia (verified by absence)
+
+| Missing item | Why it matters | Where to get it |
+|---|---|---|
+| **Docker images** (e.g. `zun/strongswan:6.0.7-mschapv2-attrsql`) | StrongSwan won't start without image | `docker build -f docker/Dockerfile -t zun/strongswan:6.0.7-mschapv2-attrsql .` from repo |
+| **kopia password itself** | Lose vps-01 → lose access to repo | **Must be stored elsewhere NOW** (paper, password manager, OC vault) |
+| **OC's kopia server storage** (`/var/lib/kopia` on OC) | OC dies → repo dies → no backup at all | Move kopia server to 3rd party (Backblaze B2) or back up OC to a different repo |
+| **DNS records** (`vpn-portal.databyte.co.za`, `kop.databyte.co.za`, `myvpn.databyte.co.za`) | Cutover needs DNS to point at new IP | Registrar; TTL was likely 300s (Cloudflare) |
+| **GitHub SSH key on OC** (used for `git push` from OC) | If OC is the rebuild node, must still work | Already in `/root/.ssh/id_ed25519` — is in kopia |
+| **Cloudflare tunnel token** (if used) | If portal routes via tunnel | Cloudflare dashboard; not in kopia |
+| **Mailgun / SMTP creds** (operator notifications) | If mail goes out from portal | Not in kopia (env vars in `vpn-portal.service`) |
+| **FreeRADIUS clients.conf shared secret** | Inside `/etc/freeradius/3.0/clients.conf` → ✅ IS in kopia | `kopia restore /etc/freeradius` |
+| **MariaDB root password** | Inside `/etc/mysql/debian.cnf` → ✅ IS in kopia | Same path |
+
+---
+
+## 2. REBUILD — Single-VPS Disaster Recovery Runbook
+
+### 2.1 Decision tree — when to rebuild vs restore in place
+
+| Scenario | Action | Time | RTO |
+|---|---|---|---|
+| vps-01 unreachable, kopia repo + DNS + password intact | **Rebuild on new VPS** | 1–2 h | 2 h |
+| vps-01 filesystem corrupt but VM bootable | **Restore in place** from kopia | 30 min | 30 min |
+| vps-01 fine but vps-01 disk filling | **Restore selective paths** | 15 min | 15 min |
+| vps-01 fine but kopia repo corrupted | **RPO violation** | N/A | N/A — backups lost |
+| vps-01 + OC both dead | **Total loss** | N/A | N/A — repo + rebuild node both gone |
+
+### 2.2 Pre-flight checklist (verify before starting)
+
+```bash
+# ON OPERATOR LAPTOP / OC (NOT vps-01):
+
+# 1. Kopia password retrieved from off-server storage (1Password / paper / OC vault).
+#    Verify it works on vps-01 BEFORE disaster strikes:
+ssh root@vps-01 'sudo -u debian -H bash -lc \
+  "KOPIA_PASSWORD=\$(cat /home/debian/.kopia-password) \
+   kopia repository status 2>&1"' | head -10
+
+# 2. GitHub SSH key works:
+ssh -T git@github.com  # expect "Hi Dippie-WP!"
+
+# 3. DNS records current at registrar:
+dig +short vpn-prod-01.databyte.co.za
+dig +short vpn-portal.databyte.co.za
+dig +short kop.databyte.co.za
+
+# 4. New VPS exists and SSH is reachable:
+ssh root@NEW_VPS_IP 'echo OK'
+
+# 5. Cloudflare / registrar account logged in (for DNS cutover).
+```
+
+### 2.3 STEP-BY-STEP: Rebuild on new VPS
+
+| # | Action | Command / verification | Time |
+|---|---|---|---|
+| 1 | Provision new VPS (same Xneelo datacentre if possible for IP reputation, or different cloud). Debian 13 (trixie) required (charon 6.0.7 + kopia 0.23.1 + python3.13 venv compat). | Provider console | 10 min |
+| 2 | Configure public network: assign static IPv4 (Xneelo) or use DHCP-assigned. Open inbound: 22/tcp (SSH), 80/tcp (HTTP), 443/tcp (HTTPS), 500/udp (IKE), 4500/udp (NAT-T). NO OTHER inbound ports. | `ip addr; ss -tlnp` | 5 min |
+| 3 | Install base packages (no Docker yet): `apt update && apt install -y python3-venv python3-pip nginx mariadb-server freeradius certbot python3-certbot-nginx curl wget git jq`. | `dpkg -l` shows each | 15 min |
+| 4 | Install Docker (official repo, not Debian's): `curl -fsSL https://get.docker.com \| sh && usermod -aG docker root`. | `docker --version` shows 24.x+ | 5 min |
+| 5 | Install kopia client: `curl -sSfL https://kopia.io/signing-key.asc \| gpg --dearmor -o /usr/share/keyrings/kopia-keyring.gpg` + add repo + `apt install kopia`. Or download `.deb` from GitHub releases. | `kopia --version` | 3 min |
+| 6 | Configure SSH key login from OC's `id_ed25519` (matches `root@OC`): restore from kopia after step 7, OR `ssh-copy-id -i /root/.ssh/id_ed25519.pub root@NEW_VPS_IP` from OC. | `ssh root@NEW_VPS_IP 'echo OK' from OC` | 2 min |
+| 7 | Connect kopia client to existing repo: `kopia repository connect server --url=https://kop.databyte.co.za:443 --username=debian --password=<PW>`. Verify: `kopia snapshot list --all`. | List shows 13 paths | 1 min |
+| 8 | Restore `/opt/vpn-portal`: `kopia restore /opt/vpn-portal --destination-path /opt/vpn-portal`. | `ls /opt/vpn-portal/app.py` exists | 1 min |
+| 9 | Restore `/opt/strongswan-vpn-gateway`: `kopia restore /opt/strongswan-vpn-gateway --destination-path /opt/strongswan-vpn-gateway`. | `ls /opt/strongswan-vpn-gateway/docker/Dockerfile` exists | 1 min |
+| 10 | Restore `/etc` carefully: `kopia restore /etc --destination-path /etc` (whole tree — will overwrite nginx + freeradius + letsencrypt + systemd config). **CAREFUL**: this restores the exact hosts.allow / hosts.deny / iptables-persistent / fail2ban config; if your new VPS has different sshd_config defaults they get overwritten. | `diff /etc/ssh/sshd_config /etc/ssh/sshd_config.kopia-bak` if backup was made | 2 min |
+| 11 | Restore `/var/lib`: `kopia restore /var/lib --destination-path /var/lib`. This brings back MariaDB data dir (`/var/lib/mysql`), charon SQLite (`/var/lib/strongswan/ipsec.db`), fail2ban SQLite. | `sqlite3 /var/lib/strongswan/ipsec.db "SELECT count(*) FROM customers"` > 0 | 3 min |
+| 12 | Restore `/home/debian`: `kopia restore /home/debian --destination-path /home/debian` (kopia config + scripts). | `ls /home/debian/local/bin/kopia-backup-all` | 1 min |
+| 13 | Restore `/usr/local`: `kopia restore /usr/local --destination-path /usr/local` (kopia binary, custom). | `kopia --version` works | 1 min |
+| 14 | **MariaDB recovery**: `systemctl start mariadb`, then `mariadb -uroot -e "USE radius; SELECT count(*) FROM radcheck;"` — verify RADIUS data present. If MariaDB refuses to start, check `/var/lib/mysql` ownership (`chown -R mysql:mysql /var/lib/mysql`). | radcheck rows > 0 | 5 min |
+| 15 | **FreeRADIUS recovery**: `systemctl restart freeradius`. Verify: `radtest <user> <pw> 127.0.0.1 0 testing123` (testing123 is the localhost client secret from `/etc/freeradius/3.0/clients.conf`). | `Received Access-Accept` | 2 min |
+| 16 | **Rebuild Docker image**: `cd /opt/strongswan-vpn-gateway && docker build -f docker/Dockerfile -t zun/strongswan:6.0.7-mschapv2-attrsql .`. | `docker images` shows new image | 10 min |
+| 17 | **Run strongswan container with host network**: `docker run -d --name strongswan --network host --restart=unless-stopped zun/strongswan:6.0.7-mschapv2-attrsql`. | `docker ps` shows `Up` + `charon` running | 1 min |
+| 18 | **Restore rw-eap.conf** (was lost in container restart): re-push the file from `/etc/swanctl/conf.d/rw-eap.conf` backup OR generate from the portal's `customers` table. The container's `start.sh` may auto-restore; verify with `docker exec strongswan cat /etc/swanctl/conf.d/rw-eap.conf`. | `cat` shows all 4 EAP blocks | 2 min |
+| 19 | **Portal FastAPI**: `systemctl restart vpn-portal` (or `systemctl enable --now vpn-portal`). Portal venv lives in `/opt/vpn-portal/.venv/`. | `curl -sk https://127.0.0.1/api/health` returns `{"status":"ok"...}` | 2 min |
+| 20 | **Nginx**: `certbot --nginx -d vpn-portal.databyte.co.za -d myvpn.databyte.co.za` (renews LE cert using restored `/etc/letsencrypt`). Then `systemctl restart nginx`. | `curl -I https://vpn-portal.databyte.co.za/api/health` → 200 | 3 min |
+| 21 | **DNS cutover**: at registrar (Cloudflare), point `vpn-portal.databyte.co.za` and `myvpn.databyte.co.za` A records to NEW_VPS_IP. TTL was 300s (verify at registrar). | `dig +short vpn-portal.databyte.co.za` returns new IP | 5–15 min for propagation |
+| 22 | **Customer reconnection**: customers' devices will detect server IP change. iOS/Android native clients re-establish via MOBIKE if the cert (server.pem) matches; otherwise, full re-onboarding via the portal installer token flow. | `swanctl --list-sas` shows new IKE_SAs | 10–30 min for all customers |
+| 23 | **Verify backup cron**: `crontab -u debian -l` shows `0 0 * * * /home/debian/local/bin/kopia-backup-all`. If missing, restore from kopia: `kopia restore /var/spool/cron/crontabs/debian --destination-path /var/spool/cron/crontabs/debian && systemctl restart cron`. | `crontab -u debian -l` shows entry | 1 min |
+| 24 | **First post-rebuild backup**: `sudo -u debian /home/debian/local/bin/kopia-backup-all`. Verify: `kopia snapshot list --all` shows today's snapshot for `/opt/vpn-portal`. | Snapshot present | 1 min |
+
+**Total time: 60–120 minutes** (excluding DNS propagation).
+
+### 2.4 RTO / RPO summary (single-VPS rebuild)
+
+| Metric | Value | Source |
+|---|---|---|
+| RTO (Recovery Time Objective) | **2 hours** | Steps 1–24 above |
+| RPO (Recovery Point Objective) | **24 hours** | Kopia runs at 00:00 UTC daily |
+| Data loss window | Up to 24 h of: portal writes, charon IKE_SA state, MariaDB writes | Kopia daily cron |
+
+---
+
+## 3. HA — Adding a Second VPS for Failover
+
+### 3.1 Goal
+
+Reduce RTO from 2 hours to **<30 seconds** for customer-facing VPN connectivity (IKE_SA re-establishment via MOBIKE or fast reconnect).
+
+### 3.2 Architecture options (industry-validated)
+
+Per [strongSwan docs](https://docs.strongswan.org/docs/5.9/features/highAvailability.html) and the strongSwan user-list (Sep 2015), **strongSwan only supports active-active HA via the `ha` plugin** — NOT active-passive. The plugin synchronizes IKE_SA + CHILD_SA keys via UDP/4510 between nodes. A separate high-availability plugin implemented for the IKEv2 daemon charon is responsible for state synchronization between the nodes in a cluster and simple monitoring functionality. It is currently designed for two nodes.
+
+| Option | Description | Pros | Cons |
+|---|---|---|---|
+| **A. anycast + strongSwan HA plugin** (active/active, both nodes announce same IP via BGP) | Two VPS in same /24, both run charon, both use `ha` plugin to sync SAs. Customers use anycast IP. | Industry-standard for IKEv2; zero-touch failover | Requires both VPS in same provider /24; BGP setup is non-trivial on most clouds; charon HA plugin requires kernel patches (per docs); UDP/4510 between nodes needs IPsec protection |
+| **B. DNS round-robin + MOBIKE** (active/active, two different IPs, DNS returns both) | Two VPS, each with own IP. DNS A record has both. Customers pick one. Failure: client reconnects to the other. | No BGP needed; works across clouds; leverages iOS/Android MOBIKE support | Failover is client-side, takes 30–120 s for DPD to detect + MOBIKE; clients may not handle DNS failover cleanly |
+| **C. Floating VIP via keepalived/VRRP** (active/passive, only one charon active at a time) | Two VPS share a virtual IP. Keepalived brings it up on primary; on failure, secondary takes over (2–10 s). | Simple; well-understood | strongSwan docs say "strongSwan doesn't support active-passive HA" — SAs on standby are lost; all clients see a 5–30 s outage. Still better than 2 h rebuild. |
+| **D. Failover only — no second live VPS** (cloud-init + Ansible + DNS TTL 60s) | Detect failure, automate rebuild, cut DNS at 60s TTL. | Cheapest | RTO = 60s + rebuild time. Doesn't help if DNS resolver caches. |
+
+**Industry alignment**: Option B is the most common "good enough" production pattern for IKEv2 mobile clients in 2025–2026. Per strongSwan discussions on MOBIKE, "this can happen if trap policies are installed and an IKE_SA with its CHILD_SAs is reestablished" — and native iOS / Windows / Android IKEv2 clients all support MOBIKE. Option A is the "enterprise" choice but requires BGP, which most cloud providers either restrict or charge for.
+
+### 3.3 Recommended architecture (Option B with portal-side state replication)
+
+**Decision**: **Option B (DNS round-robin + MOBIKE)** + RADIUS backend shared via MariaDB Galera Cluster.
+
+```
+                    ┌────────────────────────┐
+                    │   Cloudflare DNS       │
+                    │  vpn-portal  → both    │
+                    │  myvpn       → both    │
+                    └─────────┬──────────────┘
+                              │ A records (round-robin)
+              ┌───────────────┼───────────────┐
+              │                               │
+       ┌──────▼─────┐                 ┌───────▼────┐
+       │  vps-01    │                 │  vps-02    │
+       │ 154.65.x.x │ ◄──Galera────► │ 154.65.y.y │
+       │            │   replication  │            │
+       │  - charon  │                 │  - charon  │
+       │  - FreeRAD │                 │  - FreeRAD │
+       │  - MariaDB │                 │  - MariaDB │
+       │  - portal  │                 │  - portal  │
+       │  - nginx   │                 │  - nginx   │
+       └────────────┘                 └────────────┘
+                              ▲
+                              │
+                       ┌──────┴──────┐
+                       │   kopia     │
+                       │  repository │
+                       └─────────────┘
+```
+
+**Why B not A**: 
+- Xneelo doesn't expose BGP without dedicated contract. BGP across clouds is not viable.
+- MOBIKE on iOS/Android handles server IP changes within 30–120 s for active sessions.
+- DNS round-robin gives ~50/50 load distribution + instant cutover on one node failure.
+- Cost: ~2× VPS (~R1500/month extra) vs complex BGP setup.
+
+**Why B not C (VRRP active/passive)**:
+- strongSwan HA docs: "strongSwan doesn't support active-passive HA, only active-active"
+- Option C loses all SAs on standby takeover; clients see 30–120 s outage.
+- Option B keeps SAs on the surviving node; only the dead node's clients reconnect.
+
+### 3.4 Concrete HA implementation steps (Option B)
+
+| # | Action | Tool / command | Time | Cost |
+|---|---|---|---|---|
+| 1 | Provision `vps-02`: same OS (Debian 13), same min spec (2 vCPU / 4 GB RAM / 10 GB disk), public IP, same VLAN/firewall rules as vps-01. Different IP. Same Xneelo datacentre if possible (lower latency for anycast-ish behaviour). | Xneelo console | 30 min | ~R750/mo |
+| 2 | Replicate `vps-01` to `vps-02`: run the entire Section 2.3 rebuild runbook on vps-02, but with `VPN_HOST=127.0.0.1` and `DB_URL` pointing to a new local MariaDB on vps-02 (Galera node 2). | Section 2.3 | 90 min | (covered) |
+| 3 | Configure MariaDB Galera Cluster between vps-01 and vps-02: 3-node minimum (add `vps-03` as arbiter, or use a tiny RPi as 3rd). Per FreeRADIUS best-practices thread on `freeradius-users.freeradius.narkive.com`, "use MariaDB Galera with MaxScale proxy" is the production pattern. Add `[galera]` to `/etc/mysql/mariadb.conf.d/99-galera.cnf` on both, bootstrap from one. | MariaDB docs | 2 h | (covered) |
+| 4 | Configure FreeRADIUS to use MaxScale (port 3306) for DB lookups. Update `/etc/freeradius/3.0/mods-available/sql` to point at MaxScale VIP. Both FreeRADIUS instances authenticate against the same Galera cluster. | FreeRADIUS + MaxScale docs | 1 h | MaxScale license cost (BSD-2, free) |
+| 5 | Update Cloudflare DNS: `myvpn.databyte.co.za` A records → BOTH `154.65.110.44` AND `154.65.<vps02_ip>`. `vpn-portal.databyte.co.za` A records → BOTH. Set TTL to **60 s** (currently 300 s — needs operator action in Cloudflare). | Cloudflare dashboard | 10 min | free |
+| 6 | Portal business data (SQLite at `/var/lib/strongswan/ipsec.db`): portal has `customers`/`devices`/`users`/`tiers`/`alerts`/`purchases`. Pick one: (a) move to MariaDB `radius` DB (cleaner, but schema migration), (b) replicate SQLite via Litestream / rqlite / custom cron (lighter touch), (c) designate vps-01 as primary + ship WAL to vps-02 (DRBD-style, complex). **Recommended**: option (a) — extend the existing MariaDB Galera. Schema migration: `tools/sqlite-to-mysql.py` (would need to be written, ~1 day work). | dev work | 1 day | (dev) |
+| 7 | charon SQLite replication: same as portal. Or: have BOTH charons read from the SHARED MariaDB `radius` DB via eap-radius, and have rw-eap.conf identical on both nodes (via `kopia restore` of `/etc/swanctl/conf.d/rw-eap.conf` from one to the other). | config management | 30 min | (ops) |
+| 8 | kopia backup: add `vps-02` to the kopia policy as a new source. Per the existing script's `PATHS` array, simply add another backup profile targeting `root@vps-02`. | kopia-set-policies.sh update | 30 min | (ops) |
+| 9 | Failover test: shut down charon on vps-01. Verify within 60 s that (a) customers on vps-01 reconnect to vps-02 via MOBIKE or fresh IKE_SA, (b) portal HTTPS still resolves (DNS round-robin picks vps-02), (c) FreeRADIUS still authenticates (Galera replicated). | `docker stop strongswan` on vps-01 | 1 h test | (test) |
+
+**Total cost: ~R1500/month for vps-02 + 1 day dev + 1 day test.**
+
+### 3.5 HA RTO / RPO summary (Option B)
+
+| Metric | Before (single VPS) | After (Option B HA) |
+|---|---|---|
+| RTO — full stack (rebuild from kopia) | 2 hours | 2 hours (still need this for total loss) |
+| RTO — single node failure | 2 hours | **30–120 seconds** (DNS round-robin + MOBIKE reconnect) |
+| RPO — data loss window | 24 hours (kopia daily) | ~1 second (Galera synchronous replication) |
+| Customer-visible outage on vps-01 crash | Until vps-01 rebuilt | 30–120 s (clients reconnect to vps-02) |
+| Cost | 1× VPS | 2× VPS + ~1 day dev + ~1 day test |
+
+### 3.6 What HA does NOT solve
+
+| Gap | Why HA doesn't fix it |
+|---|---|
+| Total loss of BOTH VPS (e.g. Xneelo datacenter gone) | Need rebuild (Section 2.3) — HA gives no benefit here |
+| Kopia password lost | Lose repo access — same as today |
+| MariaDB Galera split-brain | Per FreeRADIUS best-practices thread, "MySQL's master-master implimentation is completely brain dead and WILL give you corrupt data in a very short time period (It doesn't do ANY locking across the cluster!!!)". Galera uses different consistency model (cert-based), better than MM replication, but split-brain still possible. Mitigation: 3-node Galera with quorum + MaxScale |
+| DNS resolver caching (some clients cache for hours) | TTL of 60s + iOS/Android behaviour to respect DNS TTL is not 100% reliable |
+| LE cert renewal | If both VPS try to renew same cert → rate limit. Use DNS-01 challenge with Cloudflare API token instead of HTTP-01. |
+
+### 3.7 Alternative: Option C (active/passive VRRP) — when it makes sense
+
+For pure IKEv2 site-to-site (fixed clients) where 30 s outage is acceptable and you can't tolerate the data-replication complexity of Option B, VRRP + keepalived is simpler:
+
+```
+vrrp_script check_charon {
+    script "/usr/local/bin/charon-is-healthy"
+    interval 2
+    weight -50
+}
+vrrp_instance VIP_154_65_110_44 {
+    state MASTER
+    interface ens3
+    virtual_router_id 51
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass <shared-secret>
+    }
+    virtual_ipaddress {
+        154.65.110.44/20 dev ens3
+    }
+    track_script {
+        check_charon
+    }
+    notify_master "/usr/local/bin/charon-takeover.sh"
+}
+```
+
+Failover time: 2–10 seconds for VIP move, plus 30–120 seconds for clients to re-IKE (since SAs were on the dead charon). Not zero-touch like Option B but cheaper (no second active charon).
+
+---
+
+## 4. Pre-flight Verification (annual/quarterly)
+
+### 4.1 Restore drill (quarterly)
+
+| Step | Action | Verify |
+|---|---|---|
+| 1 | Provision throwaway VPS (`vps-drill`) | Same spec as vps-01 |
+| 2 | Run full Section 2.3 rebuild | All 24 steps complete |
+| 3 | Connect ONE test customer (e.g. `zun-iphone`) | IKE_SA ESTABLISHED on `vps-drill` |
+| 4 | Verify portal HTTPS | `curl https://vps-drill/api/health` 200 |
+| 5 | Verify quota/bandwidth monitoring | Both monitors running, customer shows up in metrics |
+| 6 | Decommission `vps-drill` | Tear down, log time spent |
+| 7 | Update this runbook with any deviations found | Add to ISSUES-LOG.md |
+
+**Target**: drill completes in <2 hours. If >4 hours, update this runbook.
+
+### 4.2 HA failover drill (quarterly, once HA is built)
+
+| Step | Action | Verify |
+|---|---|---|
+| 1 | Pick off-peak window | |
+| 2 | `docker stop strongswan` on vps-01 | |
+| 3 | Time how long until customers reconnect | `swanctl --list-sas` on vps-02 |
+| 4 | Verify portal login on vps-02 | `curl -X POST https://vps-02/api/portal/login -d '{"identity":"smoketest","password":"..."}'` |
+| 5 | Verify FreeRADIUS on vps-02 authenticates | `radtest <user> <pw> 127.0.0.1:1812 0 testing123` |
+| 6 | Restart vps-01 charon | `docker start strongswan` |
+| 7 | Verify vps-01 also accepts connections | `swanctl --list-sas` |
+| 8 | Decommission smoketest customer | `DELETE /api/customers/{id}?confirm=...` |
+
+**Target**: failover <2 minutes, failback <5 minutes.
+
+### 4.3 Backup verification (daily, automated)
+
+```bash
+# Run as part of cron, after kopia-backup-all completes:
+ssh root@vps-01 'sudo -u debian -H bash -lc \
+  "KOPIA_PASSWORD=\$(cat /home/debian/.kopia-password) \
+   kopia snapshot list --all 2>&1"' | grep "$(date -u +%Y-%m-%d)" | wc -l
+# Must be >= 10 (paths). Alert if < 10.
+```
+
+---
+
+## 5. Hard Rules (LOCKED — additions to MEMORY.md cross-check table)
+
+1. **Single-source-of-truth for portal state**: SQLite at `/var/lib/strongswan/ipsec.db` ON VPS. MariaDB `radius` is ONLY for FreeRADIUS data. Confusing these = silent 401s (CORR-022).
+2. **`uniqueids=no` for fail-safe HA** (per `strongswan.conf(5)` Debian manpage and discussion #1867): "you also don't want the duplicheck plugin active, it doesn't do what you might think it does" — set `uniqueids=no` and `duplicheck=no` on HA nodes so simultaneous connections don't kill each other.
+3. **MOBIKE must be enabled** (`mobike = yes` in `rw-eap.conf`): required for client roaming across networks AND for HA failover (clients can MOBIKE between vps-01 and vps-02). Already enabled.
+4. **Never `kopia restore /etc` blindly on a different host**: overwrites ALL of /etc including network interfaces, sshd_config, hostname. May lock you out. Always back up the new host's `/etc` first.
+5. **DNS TTL must be ≤300 s** for HA cutover to work. Current TTL was 300 s — must be 60 s if HA is built.
+6. **MariaDB replication is NOT a backup**: Galera replicates state, but `DROP DATABASE` replicates too. Keep kopia for point-in-time recovery.
+7. **strongSwan HA plugin (`--enable-ha`) requires kernel patches** per strongSwan docs (HA doc paragraph 4: "The strongSwan download site offers HA patches for many Linux kernel versions"). NOT a feature you can flip on. Option B sidesteps this.
+
+---
+
+## 6. References (industry sources)
+
+| Source | Used for |
+|---|---|
+| [strongSwan docs — High Availability](https://docs.strongswan.org/docs/5.9/features/highAvailability.html) | HA plugin architecture, sync messages, UDP/4510, kernel patch requirement |
+| [strongSwan docs — IKE and IPsec SA Renewal](https://docs.strongswan.org/docs/latest/config/rekeying.html) | Reauthentication / make-before-break default in v6.0+ |
+| [strongSwan docs — eap-radius plugin](https://docs.strongswan.org/docs/latest/plugins/eap-radius.html) | RADIUS accounting, DAE |
+| [strongSwan docs — Windows EAP server conf](https://docs.strongswan.org/docs/latest/interop/windowsEapServerConf.html) | EAP-MSCHAPv2 + iOS/Android interop |
+| [strongSwan user list — HA failover problem](https://lists.strongswan.org/pipermail/users/2015-March/007641.html) | VRRP + strongSwan, IP-from-VLAN pattern |
+| [strongSwan user list — VPN Gateway Failover](https://lists.strongswan.org/pipermail/users/2015-August/008594.html) | "strongSwan doesn't support active-passive HA, only active-active" |
+| [Satish Patel — Keepalived Strongswan HA IPsec Cisco ASA](https://satishdotpatel.github.io/ha-strongswan-ipsec-vpn/) | keepalived config sample |
+| [Server Fault — Redundant FreeRADIUS + MySQL](https://serverfault.com/questions/395376/redundant-freeradius-mysql) | FR + MariaDB best practices |
+| [MariaDB Master-Master Replication](http://msutic.blogspot.com/2015/02/mariadbmysql-master-master-replication.html) | MM replication (caveat: brain-dead for AAA per FreeRADIUS thread) |
+| [FreeRADIUS best-practices for redundant servers](https://freeradius-users.freeradius.narkive.com/ZzsvsTPT/best-practices-for-redundant-servers) | "use MariaDB Galera with MaxScale proxy" |
+| [r/networking — Redundant FreeRADIUS](https://www.reddit.com/r/networking/comments/17vvl7a/redundant_freeradius/) | NetworkRadius recommendation: MariaDB + MaxScale + BGP anycast |
+| [Accrets — IT Disaster Recovery Plan Template](https://www.accrets.com/backupanddr/it-disaster-recovery-plan-template/) | RTO/RPO framework, runbook structure |
+| [AccountableHQ — Backup and Recovery Policy](https://www.accountablehq.com/post/how-to-create-a-data-backup-and-recovery-policy-template-requirements-best-practices) | ISO 27001 / 22301 / CIS Controls alignment |
+| [strongSwan discussion #1867 — Why ipsec SA rebuilds frequently](https://github.com/strongswan/strongswan/discussions/1867) | `duplicheck` + `uniqueids` config pitfalls |
+
+---
+
+## 7. Change log
+
+| Rev | Date | Author | Notes |
+|---|---|---|---|
+| v1.0.0 | 2026-07-11 22:53 UTC / 00:53 SAST | Misha 🐻 | Initial draft. Single-VPS rebuild runbook + HA Option B (DNS round-robin + MOBIKE + Galera) recommendation. All facts verified live on `ssh root@vps-01`. |
+
+---
+
+## 8. Pre-compaction signature (per SOUL.md Addendum)
+
+This runbook was written from live evidence:
+- `ssh root@vps-01` commands dated 2026-07-11 22:53 UTC
+- `kopia snapshot list --all` from vps-01 debian user
+- `systemctl list-units --type=service --state=running` on vps-01
+- `ss -tlnp / ss -ulnp` on vps-01
+- `docker inspect strongswan --format "{{.HostConfig.NetworkMode}}"`
+- `git ls-remote origin` for HEAD + tag v2.1.0
+- 8 web searches + 1 web_fetch (strongSwan HA docs)
+
+No claim in this runbook relies on memory or summary. Every "is" / "runs" / "is configured as" was either `grep`'d, `cat`'d, or `curl`'d in this turn.
