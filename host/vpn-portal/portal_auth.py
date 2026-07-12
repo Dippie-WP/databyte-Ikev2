@@ -31,7 +31,6 @@ import os
 import secrets
 import subprocess
 import time
-import json
 from contextlib import contextmanager
 from typing import Optional
 
@@ -53,50 +52,6 @@ PORTAL_COOKIE = "portal_session"
 # Operator session cookie name. Distinct from portal_session for the same
 # reason (separation of concerns, defense in depth).
 OPERATOR_COOKIE = "session"
-
-# ---------------------------------------------------------------------------
-# Customer/users/devices SQLite path (portal-local data, not RADIUS data)
-# ---------------------------------------------------------------------------
-# The customer create flow writes customers/users/devices to a local SQLite
-# file at DB_PATH on the VPN gateway (via app.db_exec). RADIUS data (radcheck,
-# radusergroup) lives in MariaDB via _db() below.
-#
-# For portal login (lookup_user_and_customer), we MUST read the user row from
-# the same DB it was written to — otherwise we look in MariaDB and find nothing.
-# This mirrors app.py's db_query() helper. Cannot import db_query directly
-# (circular import: app.py imports portal_auth).
-_VPN_HOST_SQLITE = os.environ.get("VPN_HOST", "127.0.0.1")
-_SSH_KEY_SQLITE  = os.environ.get("SSH_KEY", "/root/.ssh/id_ed25519_vpn")
-_DB_PATH_SQLITE  = os.environ.get("DB_PATH", "/var/lib/strongswan/ipsec.db")
-_SSH_TIMEOUT_SQLITE = 10
-
-
-def _sqlite_query(sql: str) -> list:
-    """Query the portal's local SQLite DB (where customers/users/devices live).
-    Mirrors app.db_query() — returns list of dicts, NULLs preserved correctly.
-    """
-    def _shq(s: str) -> str:
-        return "'" + s.replace("'", "'\\''") + "'"
-    remote = "sqlite3 -json " + _shq(_DB_PATH_SQLITE) + " " + _shq(sql)
-    full = [
-        "ssh", "-i", _SSH_KEY_SQLITE,
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=accept-new",
-        f"root@{_VPN_HOST_SQLITE}",
-        remote,
-    ]
-    r = subprocess.run(full, capture_output=True, text=True, timeout=_SSH_TIMEOUT_SQLITE)
-    if r.returncode != 0:
-        raise HTTPException(502, f"portal sqlite error: {r.stderr.strip()[:200]}")
-    rows = json.loads(r.stdout) if r.stdout.strip() else []
-    # sqlite3 -json quirk: NULL serializes as the literal string "None".
-    # Convert back to None so the rest of the code sees proper nulls.
-    for row in rows:
-        for k, v in row.items():
-            if v == "None":
-                row[k] = None
-    return rows
 
 # 1h sliding expiry for the customer portal.
 #

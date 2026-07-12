@@ -654,7 +654,8 @@ def _ensure_table():
 
 # ── Polish Item #3 (installer_bakes history table) — DEFERRED ────────
 # Disabled for vps-01 deploy on 2026-07-11 per Option Y:
-# - vps-01 portal runs SQLite (DB engine = sqlite3, per app.py line 264)
+# - At that time, vps-01 portal ran SQLite (DB engine = sqlite3, per app.py line 264).
+#   As of Phase 4E (2026-07-12) the portal DB engine is MariaDB. Reassess.
 # - The Polish #3 CREATE TABLE used MariaDB syntax (AUTO_INCREMENT,
 #   ENGINE=InnoDB, CHARACTER SET utf8mb4, COLLATE utf8mb4_unicode_ci,
 #   VARBINARY(32) with 0x... literal) which SQLite rejects at boot.
