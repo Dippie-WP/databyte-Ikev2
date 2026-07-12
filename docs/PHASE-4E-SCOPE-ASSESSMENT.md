@@ -117,3 +117,15 @@ Plus: needs a 4-hour maintenance window for the cutover (data migration + restar
 - ✅ Scope assessment written
 - ⏸️ Migration NOT started — awaiting Zun's explicit go-ahead + maintenance window
 - 📝 If approved: ~12 hours over Friday 18:00 + Saturday morning window
+---
+
+## SUPERSEDED 2026-07-12 by Phase 4E live execution
+
+This scope assessment was DEFERRED on 2026-07-06. On 2026-07-12 Zun approved execution per msg #25454. The migration was carried out and is now LIVE.
+
+See:
+- `docs/PHASE-4E-EXECUTION-PLAN.md` (fact-grounded plan)
+- `docs/PHASE-4E-DEPLOYMENT-NOTES.md` (post-cutover receipts)
+- Commit `cb9bf69` on origin/main
+
+Key discovery: daloRADIUS-prefixed tables ALREADY EXIST in MariaDB (not mentioned in this scope doc — they were empty leftovers). Migration reused them, didn't create new ones.
