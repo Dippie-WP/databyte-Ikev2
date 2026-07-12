@@ -301,6 +301,9 @@ class _DictRow:
     def __getitem__(self, k):
         return self._m[k]
 
+    def get(self, k, default=None):
+        return self._m.get(k, default) if hasattr(self._m, "get") else (self._m[k] if k in self._m else default)
+
     def __contains__(self, k):
         return k in self._m
 
@@ -384,41 +387,36 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
     customer_status, customer_is_operator, customer_data_*, devices info.
     Returns None if user not found or device not found.
 
-    v1.9.2 — read from portal-local SQLite (where customer_create wrote it).
-    Previously used MariaDB _db() which never matched because Phase 4 migration
-    only put RADIUS data in MariaDB; portal-local rows stayed in SQLite. Any new
-    customer since 2026-07-05 (Phase 4) would silently fail portal login.
-
-    RADIUS data (Cleartext-Password, NT-Password, radusergroup) stays in MariaDB
-    via _db() — that part is correct. We only need to read user/customer/device
-    from SQLite to match where the customer_create flow wrote them.
+    Phase 4E: reads from MariaDB `radius` DB (post-unification). Previously read
+    from portal-local SQLite (per CORR-022 fix v1.9.2). After Phase 4E migration
+    the data lives in MariaDB alongside the RADIUS tables, so we use _db() now.
     """
     # 1. Find the user row (EAP identity = users.name)
-    # Use hex(password) — sqlite3 -json encodes BLOB columns as garbage text
-    # like "ufffffdeu0019u001eufffffc2..." that can't be reversed. hex() gives
-    # us a clean 32-char hex string that _stored_hash_bytes handles correctly.
-    user_rows = _sqlite_query(
-        f"SELECT id, name, hex(password) AS password FROM users "
-        f"WHERE name = '{identity.replace(chr(39), chr(39)+chr(92)+chr(39))}' "
-        f"AND password IS NOT NULL AND length(password) > 0"
-    )
+    with _db() as conn:
+        user_rows = conn.execute(
+            "SELECT id, name, HEX(password) AS password FROM users "
+            "WHERE name = ? AND password IS NOT NULL AND LENGTH(password) > 0",
+            (identity,)
+        ).fetchall()
     if not user_rows:
         return None
     user_row = user_rows[0]
 
     # 2. Find the device row that links user -> customer
-    device_rows = _sqlite_query(
-        f"SELECT d.id AS device_id, d.device_name, d.customer_id, d.device_type, d.os_version, d.is_active, "
-        f"c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
-        f"c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
-        f"FROM devices d JOIN customers c ON c.id = d.customer_id "
-        f"WHERE d.strongswan_user_id = {int(user_row['id'])}"
-    )
+    with _db() as conn:
+        device_rows = conn.execute(
+            "SELECT d.id AS device_id, d.device_name, d.customer_id, d.device_type, d.os_version, d.is_active, "
+            "c.name AS customer_name, c.status AS customer_status, c.is_operator AS customer_is_operator, "
+            "c.tier_id, c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.email, c.display_name "
+            "FROM devices d JOIN customers c ON c.id = d.customer_id "
+            "WHERE d.strongswan_user_id = ?",
+            (int(user_row["id"]),)
+        ).fetchall()
     if not device_rows:
         return None
     device_row = device_rows[0]
 
-    return {
+    return _row_to_dict({
         "user_id": user_row["id"],
         "identity": user_row["name"],
         "password_hash": user_row["password"],
@@ -436,36 +434,50 @@ def lookup_user_and_customer(identity: str) -> Optional[dict]:
         "customer_data_used_bytes": device_row["data_used_bytes"] or 0,
         "customer_data_limit_bytes": device_row["data_limit_bytes"] or 0,
         "customer_over_quota": bool(device_row["over_quota"]),
-    }
+    })
+
+
+def _row_to_dict(row):
+    """Convert a row (dict, sqlite3.Row, _DictRow, or _mapping) to a real dict."""
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, "_mapping"):
+        return dict(row._mapping)
+    return dict(row)
 
 
 def lookup_customer_full(customer_id: int) -> Optional[dict]:
     """Look up customer + tier info for the portal usage endpoint. Scoped to customer_id.
 
-    v1.9.3 — read from portal-local SQLite (where customer_create wrote it).
-    See lookup_user_and_customer for full rationale.
+    Phase 4E: reads from MariaDB (post-unification). See lookup_user_and_customer.
     """
-    rows = _sqlite_query(
-        f"SELECT c.id, c.name, c.display_name, c.email, c.status, c.is_operator, c.is_active, "
-        f"c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, "
-        f"t.name AS tier_name, t.display_name AS tier_display "
-        f"FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
-        f"WHERE c.id = {int(customer_id)}"
-    )
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT c.id, c.name, c.display_name, c.email, c.status, c.is_operator, c.is_active, "
+            "c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, "
+            "t.name AS tier_name, t.display_name AS tier_display "
+            "FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
+            "WHERE c.id = ?",
+            (int(customer_id),)
+        ).fetchall()
     if not rows:
         return None
-    return rows[0]
+    return _row_to_dict(rows[0])
 
 
 def list_customer_devices(customer_id: int) -> list:
     """List devices for a customer. Scoped to customer_id — caller can only see their own devices.
 
-    v1.9.3 — read from portal-local SQLite (where customer_create wrote it).
+    Phase 4E: reads from MariaDB (post-unification).
     """
-    return _sqlite_query(
-        f"SELECT id, device_name, device_type, os_version, hostname, is_active, last_seen_at, created_at "
-        f"FROM devices WHERE customer_id = {int(customer_id)} ORDER BY id"
-    )
+    with _db() as conn:
+        return conn.execute(
+            "SELECT id, device_name, device_type, os_version, hostname, is_active, last_seen_at, created_at "
+            "FROM devices WHERE customer_id = ? ORDER BY id",
+            (int(customer_id),)
+        ).fetchall()
 
 
 # ---------- Session helpers ----------
