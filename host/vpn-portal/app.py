@@ -1005,7 +1005,7 @@ def login(req: LoginRequest, request: Request, response: Response):
     try:
         payload = _json.dumps({"ip": ip, "ua": ua, "session_id_prefix": session_id[:8]})
         db_exec(f"""INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
-                    VALUES ('admin', 'operator_login', 'user', 0, '{payload.replace("'", "''")}', strftime('%s','now'));""")
+                    VALUES ('admin', 'operator_login', 'user', 0, '{payload.replace("'", "''")}', UNIX_TIMESTAMP());""")
     except Exception as e:
         log.warning("audit_log write failed for login: %s", e)
     return {"ok": True, "user": req.username}
@@ -1664,7 +1664,7 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     steps = []
 
     # 1. DB reset
-    db_exec(f"UPDATE customers SET data_used_bytes = 0, over_quota = 0, updated_at = strftime('%s','now') WHERE id = {int(customer_id)};")
+    db_exec(f"UPDATE customers SET data_used_bytes = 0, over_quota = 0, updated_at = UNIX_TIMESTAMP() WHERE id = {int(customer_id)};")
     db_reset_from = cu.get("data_used_bytes", 0)
     steps.append({"step": "db_reset", "ok": True, "reset_from_bytes": db_reset_from})
 
@@ -1773,7 +1773,7 @@ def reset_quota(customer_id: int, _: dict = Depends(require_session)):
     })
     payload_escaped = payload.replace("'", "''")
     db_exec(f"""INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at)
-                VALUES ('portal', 'reset_quota', 'customer', {int(customer_id)}, '{payload_escaped}', strftime('%s','now'));""")
+                VALUES ('portal', 'reset_quota', 'customer', {int(customer_id)}, '{payload_escaped}', UNIX_TIMESTAMP());""")
     log.info("quota reset customer=%s id=%s from=%s steps=%d", cu["name"], customer_id, cu["data_used_bytes"], len(steps))
 
     return {
@@ -1915,7 +1915,7 @@ def update_device(device_id: int, req: DeviceUpdate,
         fields.append(f"is_active = {int(req.is_active)}")
     if not fields:
         raise HTTPException(400, "no fields to update")
-    fields.append("updated_at = strftime('%s','now')")
+    fields.append("updated_at = UNIX_TIMESTAMP()")
     sql = f"UPDATE devices SET {', '.join(fields)} WHERE id = {int(device_id)};"
     try:
         db_exec(sql)
@@ -1951,7 +1951,7 @@ def _audit(actor: str, action: str, payload: dict) -> None:
         f"VALUES ({_q(actor)}, {_q(action)}, "
         f"{_q(target_type) if target_type is not None else 'NULL'}, "
         f"{int(target_id) if target_id is not None else 'NULL'}, "
-        f"{_q(raw)}, strftime('%s','now'));"
+        f"{_q(raw)}, UNIX_TIMESTAMP());"
     )
     try:
         db_exec(sql)
