@@ -33,7 +33,14 @@ RADCLIENT_BIN = vpn_disconnect.RADCLIENT_BIN
 
 # Skip integration tests if radclient missing (CI on hosts w/o FreeRADIUS utils)
 HAS_RADCLIENT = shutil.which("radclient") is not None
-HAS_SECRET = DAE_SECRET_FILE.exists()
+# Wrap in try/except because Path.exists() propagates PermissionError if the
+# parent dir (e.g. /root/) is mode 0700 and the test process can't traverse it.
+# CI runner user 'runner' cannot read /root/, so without this guard the test
+# module fails to collect on first import.
+try:
+    HAS_SECRET = DAE_SECRET_FILE.exists()
+except (PermissionError, OSError):
+    HAS_SECRET = False
 
 
 def test_returns_string_for_each_path(monkeypatch):
