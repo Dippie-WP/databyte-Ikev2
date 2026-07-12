@@ -108,9 +108,10 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
     # Ensure table exists (idempotent)
     _ensure_table()
     # Polish Item #3 (installer_bakes table) — DEFERRED for vps-01 deploy.
-    # vps-01 portal runs SQLite (not MariaDB); the cross-engine-safe schema
-    # is a separate Polish #3 follow-up deploy. Re-enable here once the
-    # SQLite-correct version exists. See CORR-2026-07-11-020.
+    # At that time, vps-01 portal ran SQLite (not MariaDB); the cross-engine-safe
+    # schema was a separate Polish #3 follow-up deploy. As of Phase 4E (2026-07-12)
+    # the portal DB engine is MariaDB. Re-enable here once the cross-engine-safe
+    # rewrite exists. See CORR-2026-07-11-020.
 
     # POST /api/customers/{customer_id}/installer-token  (operator)
     @app.post("/api/customers/{customer_id}/installer-token")
