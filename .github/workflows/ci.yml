@@ -126,9 +126,29 @@ jobs:
   portal-tests:
     name: Portal API integration tests (pytest)
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     env:
       VPN_HOST: 127.0.0.1  # app.py:73 raises if VPN_HOST is unset. Local-only here.
+      # Phase 4E: portal imports trigger installer_tokens.register() →
+      # _ensure_table() → portal_auth._db() → MariaDB connect. So we MUST
+      # have MariaDB up at import time, before pytest conftest can patch
+      # anything. Service block below handles this.
+      DB_URL: mysql+pymysql://portal:portal@127.0.0.1:3306/radius
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_DATABASE: radius
+          MARIADB_USER: portal
+          MARIADB_PASSWORD: portal
+          MARIADB_RANDOM_ROOT_PASSWORD: 'yes'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -150,6 +170,18 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r host/vpn-portal/requirements.txt
+          # mysql client for health-checks and grants
+          sudo apt-get update -qq && sudo apt-get install -y -qq default-mysql-client
+
+      - name: Wait for MariaDB
+        run: |
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -uportal -pportal --connect-timeout=2 2>/dev/null; then
+              echo "MariaDB up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
 
       - name: Run portal API tests
         run: |
