@@ -127,6 +127,8 @@ jobs:
     name: Portal API integration tests (pytest)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      VPN_HOST: 127.0.0.1  # app.py:73 raises if VPN_HOST is unset. Local-only here.
     steps:
       - name: Checkout
         uses: actions/checkout@v5
