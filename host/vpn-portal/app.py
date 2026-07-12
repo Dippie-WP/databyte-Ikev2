@@ -1054,7 +1054,11 @@ def list_customers(
     if sort_dir not in ("asc", "desc"):
         raise HTTPException(400, "sort_dir must be 'asc' or 'desc'")
     sort_col, sort_type = sort_col_map[sort_by]
-    nulls = "NULLS LAST" if sort_dir == "asc" else "NULLS FIRST"
+    # MariaDB doesn't support NULLS LAST/FIRST. Emulate by sorting NULLs-first via
+    # (col IS NULL) then the actual column.  (col IS NULL) returns 1 for NULL, 0
+    # for non-NULL.  ASC + (IS NULL DESC) = NULLs last.  DESC + (IS NULL DESC)
+    # = NULLs last.
+    _nulls_first = "ASC" if sort_dir == "asc" else "DESC"  # NULL first = same dir as sort
 
     rows = db_query(f"""
         SELECT c.id, c.name, c.display_name, c.telegram_username, c.is_operator,
@@ -1066,7 +1070,10 @@ def list_customers(
         FROM customers c
         LEFT JOIN tiers t ON c.tier_id = t.id
         {where}
-        ORDER BY c.is_operator DESC, {sort_col} {sort_dir.upper()} {nulls}, c.name;
+        ORDER BY c.is_operator DESC,
+                 ({sort_col} IS NULL) {_nulls_first},
+                 {sort_col} {sort_dir.upper()},
+                 c.name ASC;
     """)
     out = []
     for r in rows:
@@ -1383,7 +1390,7 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
         SELECT id, device_name, device_type, os_version, hostname,
                is_active, last_seen_v4, last_seen_at, notes
         FROM devices WHERE customer_id = {int(customer_id)}
-        ORDER BY last_seen_at DESC NULLS LAST, device_name;
+        ORDER BY (last_seen_at IS NULL) ASC, last_seen_at DESC, device_name;
     """)
     alerts = db_query(f"""
         SELECT id, threshold, sent_at, customer_notified, data_used_bytes_at_alert
