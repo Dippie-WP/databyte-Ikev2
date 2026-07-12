@@ -238,30 +238,34 @@ def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") ->
     return r.stdout
 
 
-def db_query(sql: str) -> list:
-    """Query SQLite on the VPN gateway, return list of dicts.
+def db_query(sql: str, params=None) -> list:
+    """Phase 4E: query MariaDB `radius` DB directly via portal_auth._db().
 
-    sqlite3 -json serializes NULL as the literal string "None" (sqlite3 CLI
-    quirk, not real JSON null). That breaks the customer-edit modal — the
-    form pre-fills with the text "None" instead of an empty input, and
-    Save then sends the string "None" to the backend, which fails email
-    validation. Caught 2026-06-25 by Zun. Fix: convert any "None" string
-    back to None at the boundary so the rest of the code sees proper nulls.
-    Tests use Python's json.dumps which already produces real null, so this
-    only affects the live sqlite3 CLI path.
+    Phase 4E unified portal-local state (customers, devices, users, etc.) into
+    MariaDB. db_query/db_exec now run against localhost MariaDB, no SSH hop.
+    Returns list of dicts.
+
+    sqlite3 -json used to serialize NULL as the literal string "None". MariaDB
+    returns proper NULL, so the post-process null-coercion is now a defensive
+    no-op kept for legacy callers that fed sqlite3 output downstream.
     """
-    out = ssh_903(["sqlite3", "-json", DB_PATH, sql])
-    rows = json.loads(out) if out.strip() else []
-    for r in rows:
-        for k, v in r.items():
-            if v == "None":
-                r[k] = None
-    return rows
+    with portal_auth._db() as conn:
+        result = conn.execute(sql, params or ())
+        rows = []
+        for r in result.fetchall():
+            d = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
+            for k, v in d.items():
+                if v == "None":
+                    d[k] = None
+            rows.append(d)
+        return rows
 
 
-def db_exec(sql: str) -> None:
-    """Execute non-SELECT SQL on the VPN gateway."""
-    ssh_903(["sqlite3", DB_PATH, sql])
+def db_exec(sql: str, params=None) -> None:
+    """Phase 4E: execute non-SELECT SQL on MariaDB `radius` DB."""
+    with portal_auth._db() as conn:
+        conn.execute(sql, params or ())
+        conn.commit()
 
 
 # ---------- charon / ipBan / firewalld wrappers ----------

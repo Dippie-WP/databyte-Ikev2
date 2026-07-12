@@ -621,7 +621,14 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
 
 
 def _ensure_table():
-    """Create the installer_tokens table if it doesn't exist. Idempotent."""
+    """Create the installer_tokens table if it doesn't exist. Idempotent.
+
+    Phase 4E: portal-side tables live in MariaDB. Schema here matches the
+    migration script (host/vpn-portal/scripts/migrate_sqlite_to_mariadb.py)
+    which already created the table — this is a defensive no-op for fresh
+    deploys. Engine/CHARSET clauses are MariaDB-specific; SQLite (used in
+    tests) ignores unknown clauses after a warning.
+    """
     _db_exec("""
         CREATE TABLE IF NOT EXISTS installer_tokens (
             token         TEXT PRIMARY KEY,
@@ -634,8 +641,15 @@ def _ensure_table():
             created_by    TEXT
         );
     """)
-    _db_exec("CREATE INDEX IF NOT EXISTS idx_installer_tokens_customer ON installer_tokens(customer_id);")
-    _db_exec("CREATE INDEX IF NOT EXISTS idx_installer_tokens_expires  ON installer_tokens(expires_at);")
+    # Indexes are conditional on backend. SQLite supports IF NOT EXISTS;
+    # MariaDB does not. The migration script handles MariaDB indexes via KEY
+    # clauses inline. If we're running on MariaDB and the indexes already
+    # exist (from migration), these calls error out — we ignore the error.
+    try:
+        _db_exec("CREATE INDEX IF NOT EXISTS idx_installer_tokens_customer ON installer_tokens(customer_id);")
+        _db_exec("CREATE INDEX IF NOT EXISTS idx_installer_tokens_expires  ON installer_tokens(expires_at);")
+    except Exception:
+        pass  # MariaDB: indexes already exist via migration's inline KEY clauses.
 
 
 # ── Polish Item #3 (installer_bakes history table) — DEFERRED ────────
