@@ -6,6 +6,23 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v2.1.1 — 2026-07-12
+
+**CORR-035: dead-code cleanup after Phase 4E unification**
+
+Phase 4E (`cb9bf69`) moved portal business data from SQLite to MariaDB but left behind two portal-side SQLite references as dead code. This release removes them so the next reader doesn't waste time wondering why portal_auth reads `/var/lib/strongswan/ipsec.db`.
+
+Removed:
+- `host/vpn-portal/portal_auth.py`: `_sqlite_query()` function + `_VPN_HOST_SQLITE`/`_SSH_KEY_SQLITE`/`_DB_PATH_SQLITE`/`_SSH_TIMEOUT_SQLITE` env vars + the "Customer/users/devices SQLite path" comment block + `import json` (45 lines). Zero callers post-4E.
+- `tests/conftest.py`: `patch_portal_auth_db` no longer intercepts `subprocess.run` for `_sqlite_query` (70 lines). Docstring updated to explain Phase 4E removed the need.
+- `host/vpn-portal/installer_tokens.py`: stale "vps-01 portal runs SQLite" comment updated to reflect Phase 4E MariaDB engine (1 line).
+
+Kept (intentionally):
+- `host/vpn-portal/scripts/bulk_action.py`: it's called from `app.py:2644` via `ssh_903` for LXC 903 admin operations (archive/unarchive/change_tier/delete on Zun's personal VPN stack), not prod. Out of scope.
+- `strongswan`'s `/var/lib/strongswan/ipsec.db`: charon's VICI config DB (ike_configs, peer_configs, certs, pools). Unavoidable — that's how charon persists IKE state. Not portal data.
+
+Tests: 162 passed, 1 skipped, 0 failed. `/api/health` confirmed post-deploy.
+
 ### v2.1.0 — 2026-07-11
 
 **CORR-2026-07-11-026: case-insensitive identity normalization (HOT bug, 3 instances)**
