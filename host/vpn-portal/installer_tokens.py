@@ -631,7 +631,7 @@ def _ensure_table():
     """
     _db_exec("""
         CREATE TABLE IF NOT EXISTS installer_tokens (
-            token         TEXT PRIMARY KEY,
+            token         VARCHAR(64) NOT NULL PRIMARY KEY,
             customer_id   INTEGER NOT NULL,
             device_id     INTEGER,
             created_at    INTEGER NOT NULL,
