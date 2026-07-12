@@ -1,129 +1,84 @@
 # strongswan-vpn-gateway
 
-Databyte VPN stack — strongSwan 6.0.7 EAP-MSCHAPv2 gateway + FreeRADIUS/MariaDB identity store + FastAPI customer/operator portal. **Latest release `v2.1.1` (2026-07-12) — Phase 4E single-source-of-truth cutover shipped, Phase 5 eap-radius cutover live on prod, DR runbook v1.0.7 published, 10 ISO-9001 docs in Paperless.**
+Databyte VPN stack — strongSwan 6.0.7 EAP-MSCHAPv2 gateway + FreeRADIUS/MariaDB identity store + FastAPI customer/operator portal. **Latest release `v2.1.1` (2026-07-12).**
 
 [![CI](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml) [![drift-detect](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/drift-detect.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/drift-detect.yml) [![portal-smoke](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/portal-smoke.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/portal-smoke.yml) [![Release](https://img.shields.io/github/v/release/Dippie-WP/databyte-Ikev2)](https://github.com/Dippie-WP/databyte-Ikev2/releases)
 
 ## What this is (v2.1.1)
 
-A self-hosted IKEv2 VPN stack running on a single Xneelo Johannesburg VPS (`vps-01`, 154.65.110.44). StrongSwan handles the IPsec; **FreeRADIUS + MariaDB hold all customer identities**; the FastAPI `vpn-portal` does customer self-service + operator admin. Customers connect from anywhere over 5G/WiFi, authenticate via EAP-MSCHAPv2 against FreeRADIUS (which proxies the `radcheck` rows in MariaDB), and get a per-user sticky VIP out of `10.99.0.0/24`. Quota enforcement cuts at 100% by **disabling the `radcheck` row + sending a signed RFC 5176 Disconnect-Request to charon's `eap-radius.dae` socket** — hard kill, no grace period.
+A self-hosted IKEv2 VPN stack. StrongSwan handles the IPsec; **FreeRADIUS + MariaDB hold all customer identities**; the FastAPI `vpn-portal` does customer self-service + operator admin. Customers connect from anywhere over 5G/WiFi, authenticate via EAP-MSCHAPv2 against FreeRADIUS, and get a per-user sticky VIP out of `10.99.0.0/24`. Quota enforcement cuts at 100% by **disabling the RADIUS identity row + sending a signed RFC 5176 Disconnect-Request to charon's `eap-radius.dae` socket** — hard kill, no grace period.
 
 - **Image:** `zun/strongswan:6.0.7-mschapv2-attrsql` (custom build, CVE-2026-47895 patched)
 - **Source:** [Dippie-WP/databyte-Ikev2](https://github.com/Dippie-WP/databyte-Ikev2) — `main` branch is canonical
 - **strongSwan version:** 6.0.7
-- **Auth:** Server-cert (RSA-2048 + PKCS#1 v1.5) + EAP-MSCHAPv2, **resolved at runtime by FreeRADIUS** (charon uses `eap-radius {}` since Phase 5 cutover 2026-07-06 — see `CHANGELOG.md`)
-- **Identity store:** MariaDB `radius` database — `radcheck`/`radusergroup` (RADIUS) + portal business tables `customers`/`users`/`devices`/`installer_tokens`/`audit_log`/`tiers`/`operator_sessions`/`customer_portal_sessions`/`alerts`/`purchases` (unified in Phase 4E commit `cb9bf69`)
+- **Auth:** Server-cert (RSA-2048 + PKCS#1 v1.5) + EAP-MSCHAPv2, resolved at runtime by FreeRADIUS
+- **Identity store:** MariaDB — RADIUS tables (`radcheck`/`radusergroup`) + portal business tables (customers, users, devices, tiers, etc.) in the same database
 - **Pool:** 10.99.0.0/24 with per-user sticky VIPs via `attr-sql` + `charon.ipsec.sqlite`
-- **Lab LXC:** 903 (`vpn-gateway`, 192.168.10.98, on pve2 in Cape Town homelab) — Zun's personal/dev stack, not customer-facing
-- **Production VPS:** Xneelo Johannesburg, `vps-01` (154.65.110.44)
+- **Production:**
   - VPN endpoint: `myvpn.databyte.co.za` (IKEv2, Cloudflare DNS grey cloud)
-  - Portal: `vpn-portal.databyte.co.za` (customer self-service + operator admin, nginx + certbot)
-- **Backups:** kopia → `kop.databyte.co.za`; daily + ISO-week slots; **DR runbook v1.0.7 verified** at [`docs/RUNBOOK-DR-REBUILD-AND-HA.md`](docs/RUNBOOK-DR-REBUILD-AND-HA.md)
+  - Portal: `vpn-portal.databyte.co.za` (customer self-service + operator admin)
 
-## Production state (verified 2026-07-12, v2.1.1)
-
-| Item | Verified value | Source |
-|---|---|---|
-| Portal `/api/health` | `{"status":"ok","db_ok":true,"db_customers":5,"charon_ok":true}` | `https://vpn-portal.databyte.co.za/api/health` |
-| StrongSwan container | `healthy \| running` | `docker ps` on vps-01 |
-| radpostauth growth post-4E | 323 → 324 with new Access-Accept at 07:22:58 SAST | `SELECT COUNT(*) FROM radpostauth` (proof: migrated NTLM hashes still authenticate) |
-| Test suite | 162 passed, 1 skipped, 0 failed | `pytest` locally + `ci.yml` |
-| CI workflows | 3/3 green (`ci`, `drift-detect`, `portal-smoke`); 4th (`release`) tag-triggered | GitHub Actions |
-| Live customers | 3 (zun-operator, zun-100mb-test DISABLED, zun-customer-demo at 101.6%) | `SELECT username FROM radcheck WHERE value IS NOT NULL` |
-| HEAD on `origin/main` | `a3c1adc` (DR runbook v1.0.7) | `git ls-remote origin` |
-| Latest tag | `v2.1.1` | `git tag -l` |
-| Last deploy | 2026-07-12 08:17 SAST / 06:17 UTC | `docs/PHASE-4E-DEPLOYMENT-NOTES.md` |
-
-## Phase status
+## Release status
 
 | Phase | Description | Status |
 |---|---|---|
-| **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, MSS clamp, server cert, monitoring, backup | ✅ **GREEN** (signed off 2026-06-18) |
-| **5B** | Quota layer (iptables-legacy per-VIP byte counters + 60s monitor daemon + 80% warn + 100% hard cut) | ✅ **GREEN** (v1.1.0, 2026-06-19) |
-| **5C.1+5C.2** | Self-service portal (FastAPI + vanilla JS) — customer + operator | ✅ **GREEN** (v1.2 → v1.3.0) |
-| **5C.3** | Grafana `strongswan-quota` dashboard | ✅ **GREEN** (v1.2.2) |
-| **5C.4** | ~~RustFS daily backup verify~~ | ⛔ **CANCELLED** — replaced by PBS full-LXC |
-| **5C.5/5C.6** | ~~Self-service / multi-device~~ | ⛔ **SHELVED** — strongSwan 1-identity-1-VIP blocks per-device under EAP-MSCHAPv2; per-device would require EAP-TLS |
-| **5D / Phase 4** | Portal ↔ MariaDB split-brain unification (portal business data in MariaDB `radius`) | ✅ **GREEN** (Phase 4E `cb9bf69`, 2026-07-12) |
-| **5D / Phase 5** | Charon `eap-radius` cutover (charon proxies auth to FreeRADIUS) | ✅ **GREEN / LIVE** (v2.0.0, 2026-07-06) |
-| **5D / Phase 5+** | RFC 5176 DAE Disconnect-Request hard-cut at 100% quota | ✅ **GREEN** (`3b00b8e`) |
-| **5D / Phase 6** | Customer re-registration via portal (radcheck is now the source of truth) | ✅ **GREEN** (v2.0.0) |
-| **5D / Phase 7** | Cleanup: vestigial eap-* blocks removed, FR IPv6 secret realigned, dead SQLite refs deleted | ✅ **GREEN** (v2.0.0 + v2.1.1) |
-| **5H** | HA + LB (2x VPS + keepalived VRRP + shared DB) | ⏳ **NOT STARTED** — plan at `docs/PLAN-5H-HA-LB.md`; RTO/RPO numbers in DR runbook |
-
-## Documentation set (validated, ISO 9001:2015 compliant)
-
-All docs are stored in Paperless NGX (doc IDs 79–88) and mirrored to `rustfs:/open-claw-push/Validated docs/`. The DR runbook covers end-to-end rebuild on a fresh VPS from off-server secrets + kopia backups + this repo.
-
-| Doc ID | Title | Audience |
-|---|---|---|
-| `DAT-OPS-DR-RUNBOOK-001` v1.0.7 | VPN Stack DR + HA — fact-grounded rebuild procedure | Internal ops |
-| `DAT-VPN-INT-ARCH-001` v1.0.1 | Internal Architecture (this stack) | Internal |
-| `DAT-VPN-INT-SEC-001` v1.0.0 | Internal Security Stack | Internal |
-| `DAT-VPN-INT-SOP-001` v1.0.0 | Internal SOP (operator runbook) | Internal |
-| `DAT-VPN-INT-WIN-001` v1.1.0 | Windows Client Setup — operators | Internal |
-| `DAT-VPN-EXT-ARCH-001` v1.0.0 | External Architecture Overview | Customer-facing |
-| `DAT-VPN-EXT-PP-001` v1.0.0 | Privacy Policy | Customer-facing |
-| `DAT-VPN-EXT-SOP-001` v1.0.0 | Client Onboarding & Offboarding SOP | Customer-facing |
-| `DAT-VPN-EXT-TOS-001` v1.0.0 | Terms of Service | Customer-facing |
-| `DAT-VPN-EXT-WIN-001` v1.0.0 | Windows Client Setup — customers | Customer-facing |
-
-DR runbook source of truth: [`docs/RUNBOOK-DR-REBUILD-AND-HA.md`](docs/RUNBOOK-DR-REBUILD-AND-HA.md).
+| **5A** | Foundation: conn config, user+pool+VIP pin, public-path test, MSS clamp, server cert, monitoring, backup | ✅ **GREEN** |
+| **5B** | Quota layer (per-VIP byte counters + 60s monitor daemon + 80% warn + 100% hard cut) | ✅ **GREEN** (v1.1.0) |
+| **5C** | Self-service portal (FastAPI + vanilla JS) — customer + operator | ✅ **GREEN** |
+| **5D / Phase 4** | Portal business data unified into MariaDB | ✅ **GREEN** |
+| **5D / Phase 5** | Charon `eap-radius` cutover (charon proxies auth to FreeRADIUS) | ✅ **GREEN** (v2.0.0) |
+| **5D / Phase 5+** | RFC 5176 DAE Disconnect-Request hard-cut at 100% quota | ✅ **GREEN** |
+| **5D / Phase 7** | Cleanup: vestigial eap-* blocks removed, FR IPv6 secret realigned, dead refs deleted | ✅ **GREEN** |
+| **5H** | HA + LB (2x VPS + keepalived VRRP + shared DB) | ⏳ **NOT STARTED** |
 
 ## What's where
 
 | Path | What's in it |
 |---|---|
-| `docker/` | The strongSwan container: Dockerfile, docker-compose, swanctl configs, `10-eap-radius.conf` (Phase 5), in-image `start.sh` |
-| `host/strongswan/` | Charon-side ops: `swanctl/conf.d/10-eap-radius.conf`, `swanctl/conf.d/rw-eap.conf` (EAP fallback only), iptables-legacy per-VIP rules, `quota-monitor.py` + systemd unit |
-| `host/vpn-portal/` | FastAPI customer/operator portal: `app.py` (v2.1.1), `portal_auth.py`, `installer_tokens.py`, `tests/`, `www/` |
-| `host/scripts/` | Operate-time: `deploy-portal-vps.sh`, `vpn-disconnect.py` (RFC 5176 DAE sender), cert gen, DB seed, image build, daily backup, `reset_quota` |
-| `tools/` | `ci-drift-detect.sh`, `sync-from-live.sh`, `check-portal-deployed.sh`, `check_github_parity.sh` |
-| `docs/` | All `DAT-*` validated docs, `ROADMAP`, `ARCHITECTURE`, `DEPLOYMENT`, `ISSUES-LOG`, `SESSION-HISTORY`, `VPS-XNEELO-DEPLOY`, `CLOUDFLARE-DNS`, **`RUNBOOK-DR-REBUILD-AND-HA`**, `PHASE-4E-*` |
+| `docker/` | The strongSwan container: Dockerfile, docker-compose, swanctl configs, in-image `start.sh` |
+| `host/strongswan/` | Charon-side ops: swanctl config (incl. `eap-radius` connection), iptables per-VIP rules, quota monitor + systemd unit |
+| `host/vpn-portal/` | FastAPI customer/operator portal: `app.py`, auth helpers, installer token API, tests, web assets |
+| `host/scripts/` | Operate-time: deploy, cert gen, DB seed, image build, daily backup, quota reset, DAE disconnect sender |
+| `tools/` | CI drift-detect + live-sync + deployed-SHA parity scripts |
+| `docs/` | Architecture, deployment, runbooks, phase notes, customer + operator setup guides |
 | `examples/` | Client profiles: Android `.sswan`, iOS `.mobileconfig` template (iOS path broken; use strongSwan app for EAP-MSCHAPv2) |
 
 ## CI
 
 Four workflows in `.github/workflows/`:
 
-- **`ci.yml`** — runs on every push to `main` and every PR. Spins up a MariaDB service, runs `pytest` (162 tests), smoke-tests the portal. Bumps every GitHub Action to current Node.js (no deprecation warnings).
-- **`drift-detect.yml`** — runs on push + every 6h. SSHs to `vps-01` and MD5-checks four high-risk files (portal code + swanctl config) against the repo HEAD. Catches manual LIVE edits before they cause deploy drift. Companion: `tools/ci-drift-detect.sh`, `tools/sync-from-live.sh`. Requires GitHub secret `VPSSSH` (private key authorized on VPS) + var `VPS_HOST=154.65.110.44`.
-- **`portal-smoke.yml`** — runs `node tools/portal-smoke.js` (headless-browser UI test, 8 checks). Screenshots upload as artifacts (3-day retention).
+- **`ci.yml`** — runs on every push to `main` and every PR. Spins up a MariaDB service, runs `pytest` (test suite), smoke-tests the portal. GitHub Actions pinned to current Node.js.
+- **`drift-detect.yml`** — runs on push + every 6h. SSHs to the production VPS and MD5-checks high-risk files (portal code + swanctl config) against the repo HEAD. Catches manual LIVE edits before they cause deploy drift. Companion scripts: `tools/ci-drift-detect.sh`, `tools/sync-from-live.sh`. Requires a configured SSH secret + host variable.
+- **`portal-smoke.yml`** — runs a headless-browser UI test against the portal (8 checks). Screenshots upload as artifacts.
 - **`release.yml`** — tag-triggered. Builds the strongSwan image, pushes to `ghcr.io/dippie-wp/databyte-ikev2:<tag>` + `:latest`, creates GitHub release with auto-generated notes.
 
 ## Versions
 
-Latest release line is **v2.x** (Phase 5 eap-radius cutover). v1.x is historical — kept for reference only; do not build v1.x tags into prod images.
+Latest release line is **v2.x** (post Phase 5 eap-radius cutover). v1.x is historical — kept for reference only; do not build v1.x tags into prod images.
 
-### v2.1.1 (2026-07-12) — "dead-code cleanup post-Phase-4E"
+### v2.1.1 (2026-07-12) — dead-code cleanup post-Phase-4E
 
-Phase 4E moved portal business data from SQLite to MariaDB but left behind two portal-side SQLite references as dead code. Removed:
-- `host/vpn-portal/portal_auth.py`: `_sqlite_query()` + 4 env vars + dead comment block + `import json` (45 lines, zero callers post-4E)
-- `tests/conftest.py`: `patch_portal_auth_db` no longer intercepts `subprocess.run` (70 lines)
-- `host/vpn-portal/installer_tokens.py`: stale "vps-01 portal runs SQLite" comment (1 line)
+Phase 4E moved portal business data from SQLite to MariaDB but left behind a few portal-side SQLite references as dead code. Removed: `_sqlite_query()` helper + 4 env vars + dead comment block in `host/vpn-portal/portal_auth.py`; the `subprocess.run` interception block in `tests/conftest.py`; a stale comment in the installer-tokens helper. All tests still pass.
 
-Kept (intentionally): strongSwan's `/var/lib/strongswan/ipsec.db` (charon's VICI config DB, not portal data); `bulk_action.py` (ssh-to-LXC-903 ops, out of scope). 162 tests pass.
+### v2.1.0 (2026-07-11) — case-insensitive identity normalization + CI drift detection
 
-### v2.1.0 (2026-07-11) — "case-insensitive identity normalization + CI drift detection"
+Three lookups against `users.name` in charon SQLite were case-**sensitive**, but FreeRADIUS's MariaDB collation is case-insensitive. So VPN auth succeeded while downstream services (e.g. bandwidth-monitor) silently fell back to defaults — invisible bug. Fixed at all 3 call sites with `.strip().lower()` normalization.
 
-Three sister files did `WHERE u.name = ?` against `users.name` in charon SQLite — case-**sensitive**. FreeRADIUS MariaDB is case-insensitive. So VPN connected fine but downstream services silently got wrong defaults (e.g. Siraaj hit a 20/20 mbit fallback that happened to match her requested plan — invisible bug). Fixed at all 3 call sites with `.strip().lower()` normalization.
+Also added: GitHub Actions `drift-detect.yml` workflow + companion Bash tools. Models after HOOP.dev "IaC Drift Detection in GitHub CI/CD".
 
-Also added: GitHub Actions `drift-detect.yml` workflow + `tools/ci-drift-detect.sh` + `tools/sync-from-live.sh`. Models after HOOP.dev "IaC Drift Detection in GitHub CI/CD".
+### v2.0.0 (2026-07-06) — Phase 5 cutover: charon → FreeRADIUS
 
-### v2.0.0 (2026-07-06) — "Phase 5 cutover: charon → FreeRADIUS"
-
-**Architectural boundary.** First v2 baseline. Customer EAP identities now live in MariaDB `radcheck`/`radusergroup`, not in `rw-eap.conf`. Quota hard-cut = disable radcheck + send signed Disconnect-Request, not rewrite local EAP secret.
+**Architectural boundary.** First v2 baseline. Customer EAP identities now live in MariaDB, not in `rw-eap.conf`. Quota hard-cut = disable radcheck + send signed Disconnect-Request, not rewrite local EAP secret.
 
 Includes:
-- **Phase 5 cutover** — `rw-eap` connection uses `eap-radius {}` (`5891d45`)
-- **RFC 5176 DAE** — `host/scripts/vpn-disconnect.py` opens UDP 3799, sends signed Disconnect-Request to `charon eap-radius.dae` (`3b00b8e`)
-- **Reset bug fix** — `reset_quota` restores radcheck from pre-cut backup (`fe60527`)
-- **Pool-LEASE attribution sync** — quota-monitor reads `swanctl --list-pools --leases` for live VIP→identity mapping (`9a93832`)
-- **Portal SQLite/MariaDB split-brain fix** — `lookup_user_and_customer` + 2 siblings now read portal-local SQLite (later unified into MariaDB in Phase 4E)
-- **DAE unit + integration tests** — 5 packet-shape + 1 live-charon test (`ffd6c5d`)
-- **30s dashboard auto-refresh** — operator no longer misses quota cuts (`d6bd0e2`)
-- **Phase 7 cleanup 1** — vestigial `eap-*` blocks removed (`rw-eap.conf` 71 → 59 lines)
-- **Phase 7 cleanup 3** — FR `clients.conf` IPv6 secret realigned (root cause of 15+ "Invalid Message-Authenticator" bursts across charon reloads)
+- **Phase 5 cutover** — `rw-eap` connection uses `eap-radius {}`
+- **RFC 5176 DAE** — sender script opens UDP 3799 and sends a signed Disconnect-Request to `charon eap-radius.dae`
+- **Reset bug fix** — `reset_quota` restores radcheck from pre-cut backup
+- **Pool-LEASE attribution sync** — quota-monitor reads `swanctl --list-pools --leases` for live VIP→identity mapping
+- **Portal SQLite/MariaDB split-brain fix** — `lookup_user_and_customer` + 2 siblings now read from the unified MariaDB store
+- **DAE unit + integration tests** — packet-shape + live-charon test
+- **30s dashboard auto-refresh** — operator no longer misses quota cuts while watching stale data
+- **Phase 7 cleanup** — vestigial `eap-*` blocks removed; FR `clients.conf` IPv6 secret realigned (root cause of "Invalid Message-Authenticator" bursts across charon reloads)
 
 ### v2.0.0 → v2.1.1 highlights
 
@@ -139,15 +94,13 @@ Includes:
 - **v1.1.0 (2026-06-19):** Quota layer (5B). 3 end-to-end runs with real iOS traffic, all cut correctly.
 - **v1.2.x → v1.2.14 (2026-06-20 → 21):** Device-info UI, VICI parser hardening, reboot fixes, self-service portal polish, operator client onboarding, customer portal at `/portal/`
 - **v1.3.0 → v1.4.6 (2026-06-21 → 23):** Production portal at `vpn-portal.databyte.co.za`, `customers.user_id` FK, strict-CSP refactor
-- **v1.5.0 → v1.7.5 (2026-06-23 → 28):** `speed_plan` per-customer, Windows PowerShell auto-installer (HARDLOCKED at v2.6.5 — see CHANGELOG note on v2.x numbering), SSE-replace-polling for live data. Release tag for this baseline: **`v1.7.0-recovered`** (recovery from 2026-06-27 incident).
-
-**Note on v2.x numbering:** The `v2.3.0`/`v2.6.0`/`v2.7.x` references in `tracker/generate_tracker.py` are **Windows installer version labels** for `setup-databyte-vpn.ps1` (HARDLOCKED at v2.6.5), not git tags. The `v2.0.0` git tag (2026-07-06) is the **first v2 baseline** — the architectural boundary at Phase 5 eap-radius cutover.
+- **v1.5.0 → v1.7.5 (2026-06-23 → 28):** `speed_plan` per-customer, Windows PowerShell auto-installer, SSE-replace-polling for live data. Recovery tag for this baseline: **`v1.7.0-recovered`** (recovery from 2026-06-27 incident).
 
 ## Quick start (per-host / customer self-host)
 
-A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it. Onboarding: per-customer baked installer (`setup-databyte-vpn-windows.ps1` template, see `scripts/README-windows-vpn.md`).
+A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it.
 
-> **For the Xneelo VPS production deployment (`vps-01`, `myvpn.databyte.co.za`):** see [`docs/VPS-XNEELO-DEPLOY.md`](docs/VPS-XNEELO-DEPLOY.md) and the DR runbook at [`docs/RUNBOOK-DR-REBUILD-AND-HA.md`](docs/RUNBOOK-DR-REBUILD-AND-HA.md). The production stack uses FreeRADIUS + MariaDB (the architecture this repo is currently on) — the per-host setup below is the **gateway-only** path without RADIUS.
+> **For the Databyte production deployment (the architecture this repo currently runs on — FreeRADIUS + MariaDB):** see [`docs/VPS-XNEELO-DEPLOY.md`](docs/VPS-XNEELO-DEPLOY.md). The per-host setup below is the **gateway-only** path without RADIUS — useful for learning, prototyping, or running your own personal VPN.
 
 Assumes you have:
 - A Linux server (Debian/Ubuntu) with Docker installed
@@ -297,8 +250,8 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --load-creds
 Setup:
 1. Install **strongSwan VPN Client** from the App Store (free)
 2. Open the app → tap **+** to add a profile
-3. **Server:** your public IP or hostname (e.g. `vpn.example.com` or `102.182.117.43`)
-4. **Username:** the strongSwan user you seeded (lowercase — e.g. `yourname` or `demo-phone`)
+3. **Server:** your public IP or hostname (e.g. `vpn.example.com`)
+4. **Username:** the strongSwan user you seeded (lowercase — e.g. `yourname`)
 5. **Password:** the secret you set in `docker/swanctl/conf.d/rw-eap.conf`
 6. **CA certificate:** import the `strongswan-ca.crt.pem` (e.g. air-drop it, or download from a URL you host)
 7. **Server identity (advanced / settings cog):** must match the server cert CN/SAN, e.g. `vpn.example.com`. If the app auto-fills the IP, **change it** — charon matches on IDr.
@@ -323,7 +276,7 @@ If the app says "trust this CA": enable it. If "no proposal chosen": the server 
    ```
 3. Network & Internet settings → VPN → MyVPN → Connect
 
-> **For Databyte customers:** the canonical Windows installer is `setup-databyte-vpn-<customer>-<device>.ps1` (baked by operator from the customer portal, see `DAT-VPN-EXT-WIN-001`). Hardlocked at v2.6.5; mirrors at `vpn-portal.databyte.co.za/static/baked/`.
+> **For Databyte customers:** the canonical Windows installer is `setup-databyte-vpn-<customer>-<device>.ps1` (baked by operator from the customer portal). See `docs/DAT-VPN-EXT-WIN-001.md`.
 
 #### Linux
 Use NetworkManager-strongswan-gnome, or charon-cmd for CLI testing.
@@ -375,7 +328,7 @@ docker tag zun/strongswan:6.0.7-mschapv2-attrsql.previous zun/strongswan:6.0.7-m
 cd docker && docker compose --profile vpn up -d --force-recreate
 ```
 
-For HA rollback (multiple instances + LB), see `docs/PLAN-5H-HA-LB.md` and the DR runbook.
+For HA rollback (multiple instances + LB), see `docs/PLAN-5H-HA-LB.md`.
 
 ## Critical known limitations
 
@@ -385,9 +338,8 @@ For HA rollback (multiple instances + LB), see `docs/PLAN-5H-HA-LB.md` and the D
 4. **EAP creds in plaintext** in `swanctl.conf` `secrets` block (per-host quick-start only; production uses FreeRADIUS `radcheck` which is also plaintext in MariaDB — TLS-side hardening deferred).
 5. **No CRL/OCSP.** Server cert has 1-year validity, manual rotation. Bleichenbacher mitigation deferred.
 6. **charon-log** lives inside container — must bind-mount to host for log shipping.
-7. **DAE secret** must be copied off-server for DR rebuild — see `RUNBOOK-DR-REBUILD-AND-HA.md` §0.5 secret checklist (item 5).
-8. **Multi-device per customer** is blocked by strongSwan's 1-identity-1-VIP design under EAP-MSCHAPv2. Per-device would require EAP-TLS (5C.5/5C.6 SHELVED — see `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md`).
-9. **Case sensitivity of customer identity** — `users.name` lookups in charon's VICI sqlite are case-sensitive. The portal normalizes on input (`.strip().lower()`), but if you bypass the portal you MUST send lowercase identities (CORR-2026-07-11-026).
+7. **Multi-device per customer** is blocked by strongSwan's 1-identity-1-VIP design under EAP-MSCHAPv2. Per-device would require EAP-TLS (5C.5/5C.6 SHELVED — see `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md`).
+8. **Case sensitivity of customer identity** — `users.name` lookups in charon's VICI sqlite are case-sensitive. The portal normalizes on input (`.strip().lower()`), but if you bypass the portal you MUST send lowercase identities (CORR-2026-07-11-026).
 
 ## License
 
