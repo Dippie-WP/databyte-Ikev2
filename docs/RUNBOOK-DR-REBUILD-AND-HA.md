@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Document ID | DAT-OPS-DR-RUNBOOK-001 |
-| Revision | v1.0.6 |
+| Revision | v1.0.7 |
 | Date (SAST) | 2026-07-12 |
 | Author | Misha 🐻 (Zun's assistant) |
 | Authoritative source of facts | `ssh root@vps-01` + `git ls-remote origin` + web research (strongSwan, FreeRADIUS docs) |
@@ -20,6 +20,29 @@ This runbook answers two questions with **facts only**:
 2. **HA**: Given the current architecture, can a second VPS be added to provide active/active failover? What does it cost (engineering + ops), what does it buy (RTO/RPO), and what does it NOT solve?
 
 **Out of scope**: Commercial billing, application features unrelated to availability, security hardening beyond the rebuilt defaults, multi-region deployment.
+
+---
+
+## 0.5 Off-server secret capture checklist (verify BEFORE disaster)
+
+These secrets are **NOT in kopia** (kopia only backs up the file system, not credentials for other systems). Without them, the rebuild cannot complete past §2.3 step 7. Capture them now and store in at least 2 of: 1Password vault (Databyte vault), paper in safe, OC `~/.secrets/` (encrypted). **Verify access every quarter as part of §4.3 backup verification.**
+
+| # | Secret | Where stored currently | Where to copy off-server | Verify accessible? |
+|---|---|---|---|---|
+| 1 | **Kopia repository password** | `/home/debian/.kopia-password` on vps-01 (13 B, mode 600). Used by `kopia repository connect` | 1Password "Databyte → VPS kopia" + paper backup | ☐ verified |
+| 2 | **Cloudflare DNS API token** (for `myvpn.databyte.co.za` LE DNS-01 renewal) | `/root/.cloudflare.ini` on vps-01 (194 B, mode 600) | 1Password "Databyte → Cloudflare" + paper backup | ☐ verified |
+| 3 | **Cloudflare account login** (for DNS A-record cutover to new VPS IP) | 1Password only (operator credential) | 1Password + backup operator with own access | ☐ verified |
+| 4 | **GitHub PAT or SSH key** with `Dippie-WP/databyte-Ikev2` access | OC `/root/.ssh/id_ed25519` (pubkey on GitHub) | 1Password stores the SSH private key backup; GitHub web UI shows deploy keys | ☐ verified |
+| 5 | **Tailscale auth key** (reusable, for new VPS node identity) | Tailscale admin console (`https://login.tailscale.com/admin/settings/keys`) | 1Password "Databyte → Tailscale" | ☐ verified |
+| 6 | **Xneelo / cloud provider login** (provision new VPS) | 1Password | 1Password + backup operator | ☐ verified |
+| 7 | **MariaDB root password** (post-rebuild fallback per §1.6 gap #9) | `/etc/mysql/debian.cnf` on vps-01 (in kopia via `/etc`) | Same as #1 (kopia restore covers this; if kopia fails, operator needs to know what root pw was) | ☐ verified |
+| 8 | **FreeRADIUS clients.conf shared secret** (for `radtest testing123` checks) | `/etc/freeradius/3.0/clients.conf` on vps-01 (in kopia via `/etc`) | Same as #7 (kopia covers this) | ☐ verified |
+| 9 | **`/var/spool/cron/crontabs/debian`** content | Live on vps-01, NOT in any kopia snapshot | Operator should capture NOW: `ssh root@vps-01 'crontab -u debian -l > /home/debian/.kopia-cron.tab'` and copy off-server (paper or 1Password note) | ☐ verified |
+| 10 | **Off-server snapshot of `/etc/letsencrypt/live/*` private keys** | In kopia via `/etc/letsencrypt` (snap 2026-07-06) | NOT strictly needed if kopia password is preserved (kopia can decrypt it). Listed for completeness. | ☐ verified |
+
+**If ANY of items 1–6 are inaccessible**: Rebuild stops at §2.3 step 7 (kopia connect) or step 20 (LE cert renewal). Treat these as load-bearing — losing them turns a 2-hour rebuild into a multi-day recovery or worse.
+
+**Quarterly drill (§4.3)**: As part of automated backup verification, also attempt `ssh root@vps-01 'sudo -u debian kopia repository status 2>&1 | head -3'` to confirm the kopia password file is still readable + repo is reachable.
 
 ---
 
@@ -252,6 +275,44 @@ ssh root@NEW_VPS_IP 'echo OK'
 | RPO (Recovery Point Objective) | **24 hours** | Kopia runs at 00:00 UTC daily |
 | Data loss window | Up to 24 h of: portal writes, charon IKE_SA state, MariaDB writes | Kopia daily cron |
 
+### 2.5 Acceptance test (Definition of Done)
+
+Run **all 10 checks** in this order. **Rebuild is officially successful only when all 10 pass.** If any fail, do NOT cut production traffic — see §2.6 for rollback hints.
+
+| # | Check | Command | Expected |
+|---|---|---|---|
+| 1 | Portal HTTP health | `curl -sk https://127.0.0.1/api/health` | `{status:"ok", db_ok:true, db_customers:5, charon_ok:true}` |
+| 2 | Portal via public DNS | `curl -sk https://vpn-portal.databyte.co.za/api/health` | same as #1 (proves DNS + nginx + LE cert all working) |
+| 3 | MariaDB customers count | `mariadb -uroot radius -e 'SELECT COUNT(*) FROM customers;'` | 5 (matches pre-rebuild count) |
+| 4 | MariaDB radpostauth accessible | `mariadb -uroot radius -e 'SELECT COUNT(*) FROM radpostauth;'` | >0 (proves eap-radius auth chain intact) |
+| 5 | FreeRADIUS local test | `radtest testing 127.0.0.1:18120 0 testing123` | `Received Access-Accept` (uses Status-Server port per §1.3) |
+| 6 | strongswan container healthy | `docker ps --filter name=strongswan --format '{{.Status}}'` | `Up X hours (healthy)` |
+| 7 | charon VICI listening | `docker exec strongswan ss -ltn \| grep 4502` | `127.0.0.1:4502 LISTEN` |
+| 8 | charon loaded eap-radius plugin | `docker exec strongswan cat /etc/strongswan.d/10-eap-radius.conf \| grep -c eap-radius` | ≥ 1 (proves bind mount is live) |
+| 9 | IKE_SA accepted from a real client | Pick ONE test customer (e.g. `zun-iphone`); from that device, attempt to connect to NEW_VPS_IP. Then on NEW_VPS: `docker exec strongswan swanctl --list-sas` | IKE_SA appears with `ESTABLISHED` state |
+| 10 | Quota enforcement live | `systemctl status quota-monitor bandwidth-monitor --no-pager` | Both `active (running)` |
+
+**Bonus check (post-cutover)**: After 24 h of production traffic, verify `mariadb -uroot radius -e 'SELECT COUNT(*) FROM radpostauth;'` grew by ~customer-connect-count. If unchanged, eap-radius is silently broken (auth still goes through FreeRADIUS → radcheck table directly, so customer VPN works but logging is missing).
+
+### 2.6 Rollback hints (if a step fails mid-rebuild)
+
+These are the most-likely failure modes with concrete recovery. **Do NOT panic-restart** — most failures are recoverable in 5–15 minutes.
+
+| Step | Failure mode | Likely cause | Recovery |
+|---|---|---|---|
+| 7 | `kopia repository connect` fails: "invalid password" or "connection refused" | Kopia password lost OR kop.databyte.co.za host down | STOP. **Cannot proceed without kopia password** — see §0.5 item #1. Verify off-server copy. If password is wrong but exists, try with `--password=...`. If host is down, restart kopia server (per §3.4 step 8). |
+| 10 | `kopia restore /etc` overwrites sshd_config, breaks SSH login | sshd_config in kopia differs from fresh-host defaults | **Before step 10**: `cp /etc/ssh/sshd_config /etc/ssh/sshd_config.fresh`. If login breaks after restore: drop to provider console (Xneelo VNC), restore from `.fresh`, `systemctl restart sshd`. |
+| 11 | `kopia restore /var/lib` fails: "permission denied" on `/var/lib/mysql` | `/var/lib/mysql` owned by `mysql:mysql` but running as root is fine; check `ls -ld /var/lib/mysql` | If owner is wrong after restore: `chown -R mysql:mysql /var/lib/mysql && systemctl start mariadb` |
+| 14 | MariaDB won't start: "Plugin 'mysql_native_password' already loaded" or "Access denied for user 'root'@'localhost'" | Server_id or auth string in `/etc/mysql/debian.cnf` doesn't match fresh host | See §1.6 gap #9. Stop mariadb, start with `--skip-grant-tables`, `ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('<new>')`, update debian.cnf. |
+| 16a | `groupadd -g 1002 strongswan` fails: "group already exists" (live rebuild from old backup) | GID already taken by another group | Check `getent group 1002`; if it's NOT strongswan, use a different GID AND update Dockerfile / docker run accordingly. Most common on fresh Debian where GID 1002 = `ubuntu` (Docker default). |
+| 17 | `docker run strongswan` exits immediately, no logs | Bind source dir missing OR port 500/4500 already bound | Verify all 7 bind source dirs exist (steps 16a + 16b + Dockerfile build). Check `ss -ulnp \| grep -E ':500 \|:4500 '` — if another process is bound, `kill` it. `docker logs strongswan 2>&1 \| tail -30` for actual error. |
+| 17 | `docker ps` shows strongswan as `Up` but `swanctl --list-sas` empty | Bind mounts NOT effective — charon up but no customer config loaded | Verify each bind individually: `docker exec strongswan cat /etc/strongswan.d/10-eap-radius.conf` should NOT say "No such file" |
+| 19 | Portal fails to start: "Address already in use" on port 8080 | Old gunicorn from vps-01 snapshot didn't clean up | `systemctl stop vpn-portal; pkill -9 -f gunicorn; sleep 2; systemctl start vpn-portal` |
+| 20 | `certbot --nginx` fails: "Could not bind TCP port 80" | nginx already bound, or port 80 blocked by firewall | `systemctl stop nginx; certbot certonly --standalone -d vpn-portal.databyte.co.za -d myvpn.databyte.co.za; systemctl start nginx` |
+| 22 | Customers reconnecting gets "authentication failed" | FreeRADIUS → MariaDB chain broken, OR `/etc/freeradius/3.0/mods-enabled/sql` config lost | `ls -la /etc/freeradius/3.0/mods-enabled/sql` should be a symlink to `../mods-available/sql`. If broken, `ln -s ../mods-available/sql /etc/freeradius/3.0/mods-enabled/sql && systemctl restart freeradius` |
+
+**Universal recovery**: If rebuild is irrecoverably stuck, **restore the vps-01 kopia snapshot directly** (if vps-01 VM is still bootable, see §2.1 row 2). This reverts to last-known-good state in 30 min. Don't iterate on a broken rebuild for more than 1 hour.
+
 ---
 
 ## 3. HA — Adding a Second VPS for Failover
@@ -471,6 +532,7 @@ ssh root@vps-01 'sudo -u debian -H bash -lc \
 | v1.0.4 | 2026-07-12 08:05 UTC / 10:05 SAST | Misha 🐻 | Deep docker-mount verification (Zun msg #25444). §1.6 extended 9 → 13 verified-live gaps. New gaps: (10) strongswan GID 1002 precondition; (11) charon-log-host dir mkdir; (12) image-baked vs bind mount semantics for EAP identities; (13) charon.log has NO logrotate (16 MB). §2.3 step 17 rewritten with exact docker run from live inspect. |
 | v1.0.5 | 2026-07-12 08:30 UTC / 10:30 SAST | Misha 🐻 | Phase 4E post-migration audit. §1.6 gap #3: table count 40 → 42; CORR-022 REVERTED (portal data now in MariaDB). §1.6 gap #4: radpostauth 323 → 324. §2.3 step 11 verify: MariaDB not SQLite for customers table. §3.6 row 6: ✅ DONE (Phase 4E eliminates SQLite split-brain; HA step 6 now simpler). §4 summary row 1 updated. See `docs/PHASE-4E-DEPLOYMENT-NOTES.md`. |
 | v1.0.6 | 2026-07-12 10:30 UTC / 12:30 SAST | Misha 🐻 | v2.1.1 deep fact-check audit (Zun msg #25511 "make sure this book is 100% factually aligned"). Verified against live `ssh root@vps-01` + MariaDB + kopia. **Drift fixed:** §1.2 vpn-portal.service row v2.1.0 → **v2.1.1** (CORR-035 cleanup applied). §1.3 listening ports added: **18120/udp** (FreeRADIUS Status-Server) + **3799/udp** (charon CoA/DAE). §1.4 kopia paths: added 3 missing paths — `/etc/letsencrypt/renewal` (655 B), `/home/debian/nft-migration-v2` (94.1 KB), `/root/projects/nft-migration-v2`. §1.6 gap #4: radpostauth 324 → **325**. §1.6 gap #13: charon.log size 16,666,802 B → **17,375,410 B** (growth rate ~700 KB / 12 h). §5 Hard Rule #1: added v2.1.1 CORR-035 note (dead `_sqlite_query` removed). Also deployed installer_tokens.py comment fix to VPS (was updated in `d9f9630` local but never scp'd — found during audit). All 7 drift items from the audit fixed. **NO drift remains in §1.1, §1.6 gaps #1-#3 / #5-#12, §2.3 step 17, §3.x, §4, §5 #2-7.** |
+| v1.0.7 | 2026-07-12 10:42 UTC / 12:42 SAST | Misha 🐻 | Doc-strengthening pass (Zun msg #25519 "push to validated docs"). Closes HIGH-severity gaps identified in v1.0.6 audit. **Three new subsections:** **§0.5 Off-server secret capture checklist** — 10-row table of secrets NOT in kopia (kopia password, CF token, Cloudflare login, GitHub SSH key, Tailscale auth key, Xneelo login, MariaDB root pw, FR shared secret, debian crontab, LE private keys) with "verify accessible" checkboxes + load-bearing warning. **§2.5 Acceptance test (Definition of Done)** — 10-check acceptance gate operator must pass before declaring rebuild successful. **§2.6 Rollback hints** — 11-row failure-mode table mapping step → failure → likely cause → recovery, for steps 7, 10, 11, 14, 16a, 17, 19, 20, 22. **Critical dependencies closed:** Rebuild now stops definitively at §2.3 step 7 (not §0.5 item #1 missing), and operator has a clear Definition of Done + recovery paths for the most common step failures. Doc grew 481 → ~590 lines. |
 
 ---
 
