@@ -35,6 +35,41 @@ os.environ.setdefault("SSH_KEY", "/dev/null")  # tests mock subprocess.run
 os.environ.setdefault("DB_PATH", "/tmp/test_ipsec.db")
 
 
+# ---------- MariaDB → SQLite UDF bridge ----------
+# Phase 4E cutover (commit 805ea84) made app.py / portal_auth use MariaDB
+# syntax in SQL: UNIX_TIMESTAMP() for "now epoch", UNIX_TIMESTAMP(string) for
+# "parse datetime", etc. Tests still use SQLite fixtures (see _test_db_sqlite
+# in patch_app_module below) because spinning up MariaDB in CI for every
+# test would slow things down 10x. Bridge the dialect gap by registering
+# the small set of MariaDB functions app code uses as SQLite UDFs. The
+# behaviour matches MariaDB closely enough for assertion purposes.
+_orig_sqlite3_connect = sqlite3.connect
+
+def _patched_sqlite3_connect(*args, **kwargs):
+    conn = _orig_sqlite3_connect(*args, **kwargs)
+    # UNIX_TIMESTAMP()  → epoch seconds (no args)
+    # UNIX_TIMESTAMP(ts) → epoch seconds from a datetime string
+    def _unix_timestamp(*a):
+        if not a:
+            return int(time.time())
+        v = a[0]
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str):
+            # MariaDB accepts "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DD"
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return int(time.mktime(time.strptime(v, fmt)))
+                except ValueError:
+                    continue
+            return int(time.time())  # unparseable → now
+        return int(time.time())
+    conn.create_function("UNIX_TIMESTAMP", -1, _unix_timestamp)
+    return conn
+
+sqlite3.connect = _patched_sqlite3_connect
+
+
 # ---------- DB schema ----------
 
 @pytest.fixture
