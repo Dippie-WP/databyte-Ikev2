@@ -19,6 +19,21 @@
 #   - proposals add ecp256 — iOS 18+ defaults to ECP_256 KE; without
 #     this, iOS gets N(INVAL_KE) and silently gives up.
 #
+# v1.8.0 — reauth_time 24h → 1h. The pool lease is sticky for reauth_time
+#   after the IKE_SA dies (DPD timeout, iOS sleep, etc.). A 24h retention
+#   meant stale leases accumulated: the operator panel showed 'Active
+#   session' for days after the customer's phone had stopped using the
+#   tunnel. 1h is short enough that stale state clears within a working
+#   day, long enough that a brief reconnect after a battery-saving sleep
+#   doesn't drop the assigned VIP.
+#
+# v1.9.0 — dpd_timeout 120s → 240s (2026-07-13). iPhone strongSwan client
+#   loses carrier NAT mapping during deep sleep; original 120s + 5
+#   retransmits tore the IKE_SA down every 4-6 minutes. 240s gives the
+#   iPhone 4 minutes of grace when it wakes up before we declare the
+#   peer dead. See CORR-2026-07-13-039 and memory/2026-07-13.md
+#   ("iOS+Win drops" section) for evidence and rollback plan.
+#
 # Notable choices:
 #   - send_cert = always (NOT inside local{}) — forces charon to send the
 #     cert in every IKE_AUTH response, even when not requested
@@ -36,11 +51,11 @@ connections {
     proposals    = aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256
     unique       = replace
     rekey_time   = 24h
-    reauth_time  = 24h
+    reauth_time  = 1h
     mobike       = yes
     fragmentation = yes
     dpd_delay    = 30s
-    dpd_timeout  = 120s
+    dpd_timeout  = 240s
 
     local {
       auth = pubkey
