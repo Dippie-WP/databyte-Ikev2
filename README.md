@@ -1,10 +1,10 @@
 # strongswan-vpn-gateway
 
-Databyte VPN stack — strongSwan 6.0.7 EAP-MSCHAPv2 gateway + FreeRADIUS/MariaDB identity store + FastAPI customer/operator portal. **Latest release `v2.1.1` (2026-07-12).**
+Databyte VPN stack — strongSwan 6.0.7 EAP-MSCHAPv2 gateway + FreeRADIUS/MariaDB identity store + FastAPI customer/operator portal. **Latest release `v2.2.0` (2026-07-13).**
 
 [![CI](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/ci.yml) [![drift-detect](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/drift-detect.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/drift-detect.yml) [![portal-smoke](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/portal-smoke.yml/badge.svg)](https://github.com/Dippie-WP/databyte-Ikev2/actions/workflows/portal-smoke.yml) [![Release](https://img.shields.io/github/v/release/Dippie-WP/databyte-Ikev2)](https://github.com/Dippie-WP/databyte-Ikev2/releases)
 
-## What this is (v2.1.1)
+## What this is (v2.2.0)
 
 A self-hosted IKEv2 VPN stack. StrongSwan handles the IPsec; **FreeRADIUS + MariaDB hold all customer identities**; the FastAPI `vpn-portal` does customer self-service + operator admin. Customers connect from anywhere over 5G/WiFi, authenticate via EAP-MSCHAPv2 against FreeRADIUS, and get a per-user sticky VIP out of `10.99.0.0/24`. Quota enforcement cuts at 100% by **disabling the RADIUS identity row + sending a signed RFC 5176 Disconnect-Request to charon's `eap-radius.dae` socket** — hard kill, no grace period.
 
@@ -56,6 +56,10 @@ Four workflows in `.github/workflows/`:
 
 Latest release line is **v2.x** (post Phase 5 eap-radius cutover). v1.x is historical — kept for reference only; do not build v1.x tags into prod images.
 
+### v2.2.0 (2026-07-13) — FreeRADIUS operator overlay + radacct chain wired end-to-end
+
+Six-bug fix chain in one session (CORR-2026-07-13-035): `sql_last_seen` sql_user_name directive, charon eap-radius `accounting = yes` + `station_id_with_port = no`, FreeRADIUS `-sql` → `sql` in `accounting { }`, `chown freerad:freerad /var/log/freeradius/radacct/`, MariaDB-compat `queries.conf` template fix. New `host/freeradius/` operator overlay + `provision-freeradius.sh` (idempotent, with smoke test) makes the fixes reproducible. DR runbook §2.3 step 14a rewritten.
+
 ### v2.1.1 (2026-07-12) — dead-code cleanup post-Phase-4E
 
 Phase 4E moved portal business data from SQLite to MariaDB but left behind a few portal-side SQLite references as dead code. Removed: `_sqlite_query()` helper + 4 env vars + dead comment block in `host/vpn-portal/portal_auth.py`; the `subprocess.run` interception block in `tests/conftest.py`; a stale comment in the installer-tokens helper. All tests still pass.
@@ -80,10 +84,11 @@ Includes:
 - **30s dashboard auto-refresh** — operator no longer misses quota cuts while watching stale data
 - **Phase 7 cleanup** — vestigial `eap-*` blocks removed; FR `clients.conf` IPv6 secret realigned (root cause of "Invalid Message-Authenticator" bursts across charon reloads)
 
-### v2.0.0 → v2.1.1 highlights
+### v2.0.0 → v2.2.0 highlights
 
 | Version | Date | What |
 |---|---|---|
+| v2.2.0 | 2026-07-13 | FreeRADIUS operator overlay + radacct chain (6-bug fix, CORR-035) |
 | v2.1.1 | 2026-07-12 | Dead-code cleanup post-Phase-4E |
 | v2.1.0 | 2026-07-11 | Case-insensitive identity normalization (3 sites) + CI drift detection |
 | v2.0.0 | 2026-07-06 | Phase 5 eap-radius cutover + DAE + reset bug fix + Phase 7 cleanups |

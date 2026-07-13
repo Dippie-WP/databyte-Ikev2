@@ -6,6 +6,56 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v2.2.0 — 2026-07-13
+
+**CORR-2026-07-13-035: FreeRADIUS operator overlay + radacct chain wired end-to-end**
+
+The earlier v2.1.1 / Phase-5 era only tracked the strongSwan container overlay (`docker/strongswan.d/`) in git. The matching FreeRADIUS-side fixes were applied directly to `/etc/freeradius/3.0/` on vps-01 but never backported to the repo. If vps-01 had been rebuilt that night, 5 of 6 fixes would be lost. **This release closes that gap.**
+
+Six bugs surfaced in one debug session (2026-07-13 09:32–10:34 UTC) — all contributing to the symptom "radacct empty + devices.last_seen_v4 has RFC6733 quote-encoded bracket strings":
+
+| # | Bug | Fix location |
+|---|---|---|
+| 1 | `sql_last_seen` UPDATE never fires (`WHERE u.name = ''`) | `host/freeradius/mods-available/sql_last_seen` (added `sql_user_name = "%{User-Name}"`) |
+| 2 | Charon sends NO Accounting-Request (upstream `accounting = no`) | `docker/strongswan.d/10-eap-radius.conf` (added `accounting = yes` + `accounting_interval = 300`) — already in v2.1.1 chain, confirmed working |
+| 3 | Calling-Station-Id stored as `160.242.18.238=5B9617=5D` (RFC6733 quote-encoded) | `docker/strongswan.d/10-eap-radius.conf` (added `station_id_with_port = no`) — already in v2.1.1 chain, confirmed working |
+| 4 | FreeRADIUS `accounting { }` block had `-sql` (disabled) | `host/freeradius/sites-enabled/default` (line 735: `-sql` → `sql`) |
+| 5 | `detail` module permission denied (radacct dir owned by root) | `provision-freeradius.sh` calls `chown -R freerad:freerad /var/log/freeradius/radacct/` |
+| 6 | Default `queries.conf` uses SQLite-flavored `${....event_timestamp}` template (MariaDB rejects) | `host/freeradius/mods-config/sql/main/mysql/queries.conf` (22× `${....event_timestamp}` → `FROM_UNIXTIME(UNIX_TIMESTAMP())`) |
+
+**Added:**
+
+- **`host/freeradius/`** — new operator overlay directory mirroring the pattern of `host/aide/`, `host/cert-monitor/`, `host/fail2ban/`, `host/systemd/`. Tracks the 3 critical FreeRADIUS config files that diverge from stock Debian defaults.
+- **`host/freeradius/provision-freeradius.sh`** — idempotent provisioning script:
+  - Detects drift via md5sum on overlay files vs `/etc/freeradius/3.0/`
+  - Backups current state to `/var/lib/databyte/freeradius-backups/<timestamp>/`
+  - Applies changed files (skips MATCH)
+  - Fixes radacct directory ownership
+  - Restarts FreeRADIUS only if files changed
+  - Smoke test: sends Accounting-Request via `radclient`, expects Accounting-Response
+  - Modes: `--check` (drift-only, exits 0/1 for CI), `--no-restart` (apply without restart for testing)
+- **`host/freeradius/README.md`** — what's tracked, what's not, how to update after a fix, how to handle Debian package upgrades, verification receipts.
+
+**Modified:**
+
+- **`docs/RUNBOOK-DR-REBUILD-AND-HA.md`** §1.6 gap #4 — flipped from "OPEN: radacct empty" to "RESOLVED in v2.2.0"; reference provision script.
+- **`docs/RUNBOOK-DR-REBUILD-AND-HA.md`** §2.3 step 14a — rewritten. Now invokes `provision-freeradius.sh` and requires `radacct` ≥1 within 5 min of first client connect.
+- **`docs/RUNBOOK-DR-REBUILD-AND-HA.md`** §1.1 — service inventory row updated: `radacct` no longer "EMPTY".
+
+**Verified live on vps-01 (2026-07-13 12:21–12:35 SAST):**
+
+- `radacctid=2` zunaid-win11-en-laptop: start=12:21:45, interim=12:26:44 (300s), in=599KB, out=2.3MB
+- `radacctid=3` zun-iphone: start=12:22:41, interim=12:27:40 (300s), in=2.8MB, out=1.4MB
+- `devices.id=104.last_seen_v4 = 105.174.128.86` (clean, no `[port]` brackets, no `=5B...=5D` encoding)
+- `devices.id=97.last_seen_v4 = 105.174.128.86` (clean)
+- `provision-freeradius.sh` idempotency proven: 0 drift on first run, auto-fix on tampered file, exit 1 on `--check` with drift, exit 0 on `--check` clean.
+
+**Companion fixes (applied directly to live VPS, NOT in this repo — covered by kopia `/etc` snapshot):**
+
+- `/etc/freeradius/3.0/clients.conf` localhost secret aligned with `/etc/freeradius/daloRADIUS.key` (from earlier v1.0.7 cleanup)
+
+**Author:** Misha 🐻 | **Commit:** `621f153` (Phase 4A, already pushed in session) + new commit for v2.2.0 overlay
+
 ### v2.1.1 — 2026-07-12
 
 **CORR-035: dead-code cleanup after Phase 4E unification**
