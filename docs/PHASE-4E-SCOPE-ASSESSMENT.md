@@ -1,6 +1,18 @@
 # Phase 4E — Scope Assessment: Unify portal SQLite + MariaDB
 
-**Status:** DEFERRED — scope assessment only (Zun to approve)
+> ⚠ **SUPERSEDED — DO NOT USE FOR CURRENT DECISIONS**
+>
+> **Status:** SUPERSEDED 2026-07-12 by:
+> - `docs/PHASE-4E-EXECUTION-PLAN.md` (live plan that was actually executed)
+> - `docs/PHASE-4E-DEPLOYMENT-NOTES.md` (post-cutover receipts, live-verified)
+>
+> **Phase 4E was SHIPPED 2026-07-12** at commit `cb9bf69` on origin/main. The original scope assessment (this doc) was a draft that missed several live-state facts during analysis (e.g., it assumed 5 expected portalside tables to migrate; the actual migration moved 10 tables because `tiers`/`audit_log`/`alerts`/`purchases`/`operator_sessions`/`customer_portal_sessions` had to come along for full business-state preservation). Phase 4E succeeded on the second try once the execution plan grounded itself in `mariadb -e "SHOW TABLES" radius` + `sqlite3 :memory "ATTACH \"...\" AS live; SELECT name FROM live.sqlite_master"` to count what's actually there.
+>
+> Kept in repo as historical record. Cross-reference: see the "🟢 fact-checked 2026-07-13" note in `docs/PHASE-4E-EXECUTION-PLAN.md` for the difference between this draft's assumptions and what was actually shipped.
+
+**Original draft header (preserved below for reference):**
+
+**Status:** DEFERRED — scope assessment only (Zun to approve) [SUPERSEDED — see above]
 **Date:** 2026-07-06 17:55 SAST
 **Author:** Misha (on request, post-Phase-7-cleanups)
 
