@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
 """
-quota-monitor.py — Phase 7 pool-LEASE edition (2026-06-27)
+quota-monitor.py — Phase 8 MariaDB edition (2026-07-12)
 
-v1.7.0 / Phase 7 (2026-06-27 05:50 UTC): Source of truth for VIP ownership
-is now `swanctl --list-pools --leases` instead of `swanctl --list-sas`.
+Phase 8 (2026-07-12 20:30 UTC): Phase 4E cutover replaced SQLite portal.db
+with MariaDB radius.* schema. The monitor was reading the WRONG database
+(charon's internal /var/lib/strongswan/ipsec.db, table `users` doesn't exist
+there — that's an attr-sql table), causing "no such table: users" errors
+for 13+ hours starting 06:45 UTC 2026-07-12.
 
-Why the change:
-  - iOS native IKEv2 client tears down SAs aggressively when the device
-    sleeps (background-suspend) — typical SA lifetime is <30s during normal
-    phone use, often <10s.
-  - The 10s quota-monitor poll therefore missed most iOS SAs entirely;
-    bytes accumulated in the nft meter but no DB row was updated.
-    Concrete case: customer 74 (zunaid-cellphone) connected multiple times
-    in a 12h window; meter accumulated 1.45 MB; DB stayed at 0; sidecar
-    never received an entry for customer 74.
+This version:
+  - Opens MariaDB radius.* schema via pymysql (DictCursor for dict-row returns)
+  - All customer/device/alert/audit queries now hit MariaDB
+  - RADIUS radcheck disable already uses MariaDB (Phase 5 cutover) — preserved
+  - Sidecar (/var/run/quota-monitor.session) unchanged — still on local fs
+  - nft meter reads unchanged — still on local nftables
 
-What this fixes:
-  - Pool leases are sticky for `reauth_time` (24h default, 1h after D).
-    While a lease is held (online OR offline), VIP→customer ownership is
-    known and meter bytes get attributed.
-  - First-observation baseline: when a customer first gets a lease on a
-    VIP, we baseline the meter (no catch-up delta). Prevents the previous
-    bug where a new customer on a recycled VIP got credited with the old
-    customer's bytes via `delta = meter_now - DB.data_used`.
-  - Released-lease cleanup: when a customer's lease is released (no longer
-    in `swanctl --list-pools --leases`), we drop the sidecar entry so the
-    next user of that VIP starts clean.
-
-What this preserves:
-  - The 80% warn + 100% cut logic, the kill_customer_credentials flow,
-    the operator/inactive skips, the meter source (nft named meters), the
-    10s poll interval, the audit + alerts tables.
+Behaviour identical to v1.7.0 except for DB layer. No business-logic changes.
 
 Reads per-VIP netfilter byte counters (nft named meters), resolves VIP →
 customer via pool lease → EAP identity, applies 80% warn + 100% hard-cut.
@@ -40,24 +25,13 @@ Data flow (one iteration):
   2. Snapshot per-VIP byte counters from named meters (client_src, client_dst)
   3. Drop sidecar entries for VIPs no longer leased (lease released)
   4. For each current lease (online OR offline):
-     a. Resolve identity → users → devices → customers
+     a. Resolve identity → users → devices → customers (MariaDB)
      b. Skip operator / inactive / no-mapping (legacy EAP)
      c. First observation of this customer-VIP pair → just baseline
      d. Else: delta = meter_now - sidecar[customer_id], update DB if > 0
      e. Check 80%/100% thresholds; act on cut (kill creds + terminate SAs)
   5. Save updated sidecar with current leases only
   6. Sleep POLL_INTERVAL, repeat
-
-Source of truth: nft named meters in /etc/nftables.conf + pool leases.
-DB is the persistence layer for cumulative usage + alert state.
-
-Run on the VPS HOST (not in the strongSwan container).
-The script uses `docker exec strongswan` for swanctl VICI calls.
-
-Usage:
-  quota-monitor.py                  # run as long-running daemon
-  quota-monitor.py --once           # one iteration, exit
-  quota-monitor.py --once --verbose # debug logging
 """
 import argparse
 import logging
@@ -65,28 +39,32 @@ import os
 import re
 import secrets
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
+import pymysql
+import pymysql.cursors
+
 # === Config (paths) ===
-DB_PATH = Path("/var/lib/strongswan/ipsec.db")
+# Phase 4E cutover (2026-07-12 06:20 UTC): customer/device/alert/audit tables
+# moved from /var/lib/strongswan/ipsec.db (SQLite, charon's attr-sql DB) into
+# MariaDB `radius` schema. The two RW rw-eap.conf and the radcheck password
+# disable (already MariaDB since Phase 5) are unchanged.
+_MARIADB_PW_FILE = Path("/root/.mariadb-radius-pw")
+_MARIADB_HOST = "127.0.0.1"
+_MARIADB_USER = "radius"
+_MARIADB_DB = "radius"
+
 CONF_PATH = Path("/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
 CONF_BACKUP_DIR = Path("/home/zunaid/strongswan/swanctl/conf.d/.backups")
 
 # 10.99.0.0/24 VIP range — must match iptables rules in rules.v4
 VIP_PREFIX = "10.99.0."
 
-# Poll interval (seconds)
-# Changed 2026-06-25 from 60s → 10s per Zun's directive (msg #22356).
-# At 60s with 40Mbps cap and 5-10 Mbps real LTE throughput, customers
-# were burning ~35-70 MB/min — zade hit 100% mid-poll and overran by
-# ~34 MB before the next poll detected it. 10s reduces max overrun to
-# ~6-12 MB while keeping CPU reasonable (10s × 40 customers × ~5ms/poll
-# = 20ms/s = 2% CPU). See HEARTBEAT 2026-06-25 19:47 UTC.
+# Poll interval (seconds) — unchanged from Phase 5
 POLL_INTERVAL = 10
 
 # Alert thresholds (percent)
@@ -94,56 +72,34 @@ WARN_PCT = 80
 CUT_PCT = 100
 
 # VICI (charon) — TCP socket exposed by the container on 127.0.0.1:4502
-# We call it via `docker exec strongswan swanctl --uri=tcp://...`
 SWANCTL_PREFIX = ["docker", "exec", "strongswan", "swanctl", "--uri=tcp://127.0.0.1:4502"]
 
 # === Logging ===
 log = logging.getLogger("quota-monitor")
 
-# === DAE (RFC 5176 Disconnect-Request) — Phase 5D, 2026-07-06 14:11 SAST ===
-#
-# vpn_disconnect.py lives in the same dir as quota-monitor.py (systemd runs
-# us from /home/zunaid/strongswan/quota/). sys.path insert below is a
-# defensive belt that covers manual runs, future venv moves, or any case
-# where cwd != script dir.
+# === DAE helper import (unchanged) ===
 _VPN_DISC_DIR = "/home/zunaid/strongswan/quota"
 if _VPN_DISC_DIR not in sys.path:
     sys.path.insert(0, _VPN_DISC_DIR)
 try:
     from vpn_disconnect import send_dae_disconnect  # type: ignore[import-not-found]
     _DAE_HELPER_IMPORTED = True
-except Exception as _dae_imp_err:  # ImportError, SyntaxError, anything
-    # Fall back to a no-op so the daemon still runs if vpn_disconnect.py
-    # is missing or broken on disk. We log loudly; _cut_customer will
-    # record "dae_result=missing_helper" in the audit row.
+except Exception as _dae_imp_err:
     log.error("vpn_disconnect import failed (%s) — DAE disabled, "
               "fallback no-op used; cut will fall back to "
               "swanctl --terminate", _dae_imp_err)
 
-    def send_dae_disconnect(*_args, **_kwargs):  # type: ignore[no-redef]
+    def send_dae_disconnect(*_args, **_kwargs):
         return "error"
 
     _DAE_HELPER_IMPORTED = False
 
-# === nft METER parsing (Phase 6, 2026-06-26) ===
-#
-# Meter output line example (from `nft list meter ip filter client_src`):
-#   elements = { 10.99.0.5 counter packets 200 bytes 8000,
-#                 10.99.0.7 counter packets 50 bytes 2000 }
-#
-# client_src meter: created by `ip saddr 10.99.0.0/24 meter client_src { ip saddr counter } accept`
-# client_dst meter: created by `ip daddr 10.99.0.0/24 meter client_dst { ip daddr counter } accept`
-#
-# Counter elements are auto-created by the kernel on first match
-# (`flags dynamic`). No runtime rule installation required.
+# === nft METER parsing (Phase 6, unchanged) ===
 METER_ELEM_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)\s+counter packets (\d+) bytes (\d+)")
 
 
 def _read_meter(meter_name: str) -> dict[str, tuple[int, int]]:
-    """Read {VIP: (packets, bytes)} from a named meter in `ip filter` table.
-
-    Returns empty dict on failure (e.g. meter missing during transition).
-    """
+    """Read {VIP: (packets, bytes)} from a named meter in `ip filter` table."""
     try:
         out = subprocess.run(
             ["/usr/sbin/nft", "list", "meter", "ip", "filter", meter_name],
@@ -169,18 +125,7 @@ def _read_meter(meter_name: str) -> dict[str, tuple[int, int]]:
 
 
 def sample_counters() -> dict[str, tuple[int, int, int, int]]:
-    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)} from named meters.
-
-    Phase 6 (2026-06-26): reads two named meters instead of 508 per-rule counters.
-      client_src meter: {ip saddr 10.99.0.X} → outbound (upload)
-      client_dst meter: {ip daddr 10.99.0.X} → inbound (download)
-
-    Return shape unchanged from Phase 5 so downstream logic (delta
-    computation, DB writes, alert thresholds) needs no modification.
-
-    Meters live in /etc/nftables.conf — declared in source-of-truth, loaded
-    at boot by nftables.service. No runtime rule installation needed here.
-    """
+    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)} from named meters."""
     src = _read_meter("client_src")
     dst = _read_meter("client_dst")
 
@@ -193,12 +138,57 @@ def sample_counters() -> dict[str, tuple[int, int, int, int]]:
     return out
 
 
+# === MariaDB layer ===
+
+def _read_radius_db_password() -> Optional[str]:
+    """Read MariaDB radius@127.0.0.1 password from /root/.mariadb-radius-pw."""
+    if not _MARIADB_PW_FILE.exists():
+        log.error("RADIUS password file missing: %s", _MARIADB_PW_FILE)
+        return None
+    try:
+        text = _MARIADB_PW_FILE.read_text()
+    except (PermissionError, OSError) as e:
+        log.error("Cannot read %s: %s (quota-monitor must run as root)",
+                  _MARIADB_PW_FILE, e)
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    log.error("No password line found in %s (only comments?)", _MARIADB_PW_FILE)
+    return None
+
+
+def _open_mariadb() -> Optional[pymysql.connections.Connection]:
+    """Open a MariaDB connection with DictCursor.
+
+    Returns None if password file is missing/unreadable or DB unreachable.
+    Caller must close the connection (use `with` or try/finally).
+    """
+    pw = _read_radius_db_password()
+    if not pw:
+        return None
+    try:
+        return pymysql.connect(
+            host=_MARIADB_HOST,
+            user=_MARIADB_USER,
+            password=pw,
+            database=_MARIADB_DB,
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False,
+            connect_timeout=5,
+            read_timeout=10,
+            write_timeout=10,
+        )
+    except pymysql.MySQLError as e:
+        log.error("MariaDB connect failed: %s", e)
+        return None
+
 
 # === DB queries ===
+# Note: MariaDB uses %s placeholders (not ? like SQLite). All queries
+# that previously used `?` now use `%s`.
 
-# Resolve username → customer/device using the canonical schema.
-# identities.data is a BLOB containing the username as bytes; users.name is TEXT.
-# We CAST the blob to TEXT for the join.
 CUSTOMER_LOOKUP_SQL = """
 SELECT
     u.id                 AS user_id,
@@ -215,34 +205,25 @@ SELECT
 FROM users u
 JOIN devices d          ON d.strongswan_user_id = u.id
 JOIN customers c        ON c.id  = d.customer_id
-WHERE u.name = ?
+WHERE u.name = %s
 LIMIT 1
 """
 
 
-def lookup_customer_for_username(db: sqlite3.Connection, username: str) -> dict | None:
+def lookup_customer_for_username(db, username: str) -> dict | None:
     """Resolve an IKE identity (username) to its device+customer record.
 
-    Returns None if the username is not provisioned (orphan user, no
-    customer mapping). This is the case for legacy EAP users (zun, etc.)
-    that pre-date the 5B customer schema.
+    Phase 4E: MariaDB collation is utf8_general_ci (case-insensitive by default
+    for VARCHAR with _ci suffix). We still lower() the username here for
+    symmetry with v1.7.0 and so the sidecar baseline is keyed consistently.
     """
-    # CORR-2026-07-11-026 (companion fix): charon reports lease identity
-    # with whatever case the client sent. FreeRADIUS is case-insensitive
-    # (MariaDB utf8_general_ci) so VPN auth succeeds, but charon SQLite
-    # users.name is exact-match. Normalize to lowercase so quota accounting
-    # matches what FreeRADIUS accepted. Companion fix to app.py:portal_login.
-    cur = db.execute(CUSTOMER_LOOKUP_SQL, (username.lower(),))
-    r = cur.fetchone()
-    return dict(r) if r else None
+    with db.cursor() as cur:
+        cur.execute(CUSTOMER_LOOKUP_SQL, (username.lower(),))
+        r = cur.fetchone()
+    return r if r else None
 
 
-# Pool lease line format (strongSwan 6.0.7 swanctl --list-pools --leases):
-#   rw-pool              10.99.0.1                           0 / 1 / 254
-#     10.99.0.1                      online  'saalieg-laptop'
-# Header line (no indent) is pool summary; indented lines are leases.
-# Phase 7 (2026-06-27): we treat ALL leases (online + offline) as the
-# source of truth for VIP ownership, not just ESTABLISHED IKE_SAs.
+# Pool lease line format (unchanged from v1.7.0)
 _POOL_LEASE_LINE_RE = re.compile(
     r"^\s+(?P<vip>\d+\.\d+\.\d+\.\d+)\s+"
     r"(?P<status>online|offline)\s+"
@@ -251,17 +232,7 @@ _POOL_LEASE_LINE_RE = re.compile(
 
 
 def list_pool_leases() -> list[dict]:
-    """Parse `swanctl --list-pools --leases` output.
-
-    Phase 7 (2026-06-27): returns ALL leases (online + offline) so quota
-    attribution survives SA churn. See module docstring.
-
-    Returns one dict per lease with keys:
-      - pool     (str, the pool name, e.g. "rw-pool")
-      - vip      (str, e.g. "10.99.0.1")
-      - identity (str, the EAP identity, e.g. "saalieg-laptop")
-      - online   (bool)
-    """
+    """Parse `swanctl --list-pools --leases` output (unchanged)."""
     try:
         proc = subprocess.run(
             SWANCTL_PREFIX + ["--list-pools", "--leases"],
@@ -278,7 +249,6 @@ def list_pool_leases() -> list[dict]:
         if not line.strip():
             continue
         if not line.startswith(" "):
-            # Header line: "<pool-name> <base> <used>/<total>/<size>"
             parts = line.split()
             if parts:
                 current_pool = parts[0]
@@ -295,16 +265,9 @@ def list_pool_leases() -> list[dict]:
 
 
 def list_active_sas() -> list[dict]:
-    """Parse `swanctl --list-sas` output.
+    """Parse `swanctl --list-sas` output (unchanged).
 
-    Used only by terminate_customer_sas() to find SAs to kill on a 100%
-    cut. The data flow no longer depends on this for billing — see
-    list_pool_leases() (Phase 7).
-
-    Returns one dict per ESTABLISHED IKE_SA with keys:
-      - username  (str, the EAP identity)
-      - vip       (str, e.g. "10.99.0.5")
-      - uniqueid  (str, the IKE_SA unique id, e.g. "153")
+    Used only by terminate_customer_sas() to find SAs to kill on a 100% cut.
     """
     try:
         proc = subprocess.run(
@@ -312,14 +275,13 @@ def list_active_sas() -> list[dict]:
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
-        log.error("swanctl --list-sas failed: rc=%s stderr=%s", e.returncode, e.stderr)
+        log.error("swanctl --list-sas failed: rc=%s stderr=%s",
+                  e.returncode, e.stderr)
         return []
 
     out: list[dict] = []
     sa = None
     for line in proc.stdout.splitlines():
-        # Top of a new SA block, e.g.:
-        # rw-eap: #153, ESTABLISHED, IKEv2, ...
         m = re.match(r"\s*rw-eap:\s+#(\d+),\s+ESTABLISHED", line)
         if m:
             sa = {"uniqueid": m.group(1), "username": None, "vip": None}
@@ -327,8 +289,6 @@ def list_active_sas() -> list[dict]:
             continue
         if sa is None:
             continue
-        # "  remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.1]"
-        # strongSwan 6.0.7 format: EAP identity after "EAP:", VIP is bracketed IP at end of line
         m = re.search(r"EAP:\s+'([^']+)'\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
         if m:
             sa["username"] = m.group(1)
@@ -336,64 +296,54 @@ def list_active_sas() -> list[dict]:
     return [s for s in out if s["username"] and s["vip"]]
 
 
-def update_used_bytes(db: sqlite3.Connection, customer_id: int, delta: int) -> None:
+def update_used_bytes(db, customer_id: int, delta: int) -> None:
     """Add `delta` to customers.data_used_bytes. Idempotent caller-side."""
-    db.execute(
-        "UPDATE customers SET data_used_bytes = data_used_bytes + ?, updated_at = ? WHERE id = ?",
-        (delta, int(time.time()), customer_id),
-    )
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE customers SET data_used_bytes = data_used_bytes + %s, "
+            "updated_at = %s WHERE id = %s",
+            (delta, int(time.time()), customer_id),
+        )
 
 
-def alert_already_sent(db: sqlite3.Connection, customer_id: int, threshold: int) -> bool:
-    cur = db.execute(
-        "SELECT 1 FROM alerts WHERE customer_id = ? AND threshold = ? LIMIT 1",
-        (customer_id, threshold),
-    )
-    return cur.fetchone() is not None
+def alert_already_sent(db, customer_id: int, threshold: int) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM alerts WHERE customer_id = %s AND threshold = %s LIMIT 1",
+            (customer_id, threshold),
+        )
+        return cur.fetchone() is not None
 
 
-def log_alert(db: sqlite3.Connection, customer_id: int, threshold: int, data_used: int) -> None:
-    db.execute(
-        "INSERT INTO alerts (customer_id, threshold, sent_at, data_used_bytes_at_alert) "
-        "VALUES (?, ?, ?, ?)",
-        (customer_id, threshold, int(time.time()), data_used),
-    )
+def log_alert(db, customer_id: int, threshold: int, data_used: int) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO alerts (customer_id, threshold, sent_at, data_used_bytes_at_alert) "
+            "VALUES (%s, %s, %s, %s)",
+            (customer_id, threshold, int(time.time()), data_used),
+        )
 
 
-def log_audit(db: sqlite3.Connection, actor: str, action: str, target_type: str,
+def log_audit(db, actor: str, action: str, target_type: str,
               target_id: int | None, payload: str) -> None:
-    db.execute(
-        "INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (actor, action, target_type, target_id, payload, int(time.time())),
-    )
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (actor, action, target_type, target_id, payload, int(time.time())),
+        )
 
 
-# === Kill credentials at 100% ===
+# === Kill credentials at 100% (unchanged from v1.7.0) ===
 
-def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username: str) -> bool:
-    """Replace rw-eap.conf secret for `username` with KILLED-<random>.
-
-    Phase 5 (post-cutover 2026-07-06): charon authenticates via RADIUS
-    (`auth = eap-radius`). The rw-eap.conf `secrets { eap-XXX { ... } }`
-    block is dead-weight — killing it does NOT lock the customer out.
-    The PRIMARY kill mechanism is now disable_customer_radcheck() (RADIUS).
-    This rw-eap.conf kill is kept as defense-in-depth: if eap-radius
-    ever fails and charon falls back to eap-mschapv2, the dead secret
-    is still useful.
-
-    Returns True on success OR if no block was found (Phase 5+ customer
-    that never had a rw-eap.conf entry — normal, not an error).
-    Returns False only on write/reload failure.
-    """
+def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
+    """Replace rw-eap.conf secret for `username` with KILLED-<random>."""
     if not CONF_PATH.exists():
         log.error("rw-eap.conf not found at %s", CONF_PATH)
         return False
 
     original = CONF_PATH.read_text()
 
-    # Match:  eap-<username> {\n    id     = <username>\n    secret = "..."\n  }
-    # Replace secret value with a random unguessable token.
     killed = f"KILLED-{secrets.token_hex(8)}"
     pattern = re.compile(
         r"(eap-" + re.escape(username) + r"\s*\{\s*id\s*=\s*"
@@ -402,13 +352,10 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     )
     new_text, n_subs = pattern.subn(r"\g<1>" + killed + r"\g<2>", original)
     if n_subs == 0:
-        # No rw-eap.conf block — expected for customers created post-Phase-5
-        # cutover (only radcheck rows exist). Not an error.
         log.info("No eap-%s block in rw-eap.conf (Phase 5+ customer, "
                  "auth via RADIUS only) — rw-eap kill skipped", username)
         return True
 
-    # Backup before write
     CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     bak = CONF_BACKUP_DIR / f"rw-eap.conf.bak-quotamon-{int(time.time())}"
     bak.write_text(original)
@@ -417,7 +364,6 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     CONF_PATH.write_text(new_text)
     log.info("Killed eap-%s secret in %s (subs=%d)", username, CONF_PATH, n_subs)
 
-    # Reload charon via VICI
     try:
         subprocess.run(
             SWANCTL_PREFIX + ["--load-creds"],
@@ -427,7 +373,6 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     except subprocess.CalledProcessError as e:
         log.error("charon --load-creds FAILED: rc=%s stderr=%s stdout=%s",
                   e.returncode, e.stderr, e.stdout)
-        # Rollback the conf change — we don't want to leave a broken state
         CONF_PATH.write_text(original)
         log.warning("Rolled back conf change due to charon reload failure")
         return False
@@ -435,60 +380,15 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     return True
 
 
-# === Phase 5: RADIUS radcheck disable (primary kill mechanism) ===
-
-_RADIUS_DB_NAME = "radius"
-_RADIUS_PW_FILE = Path("/root/.mariadb-radius-pw")
-
-
-def _read_radius_db_password() -> Optional[str]:
-    """Read MariaDB radius@127.0.0.1 password from /root/.mariadb-radius-pw.
-
-    The file is root-only (mode 600). quota-monitor.service runs as root,
-    so this is safe. Returns None if the file is missing/unreadable.
-    Skips comment lines (file starts with `# ...` metadata).
-    """
-    if not _RADIUS_PW_FILE.exists():
-        log.error("RADIUS password file missing: %s", _RADIUS_PW_FILE)
-        return None
-    try:
-        text = _RADIUS_PW_FILE.read_text()
-    except (PermissionError, OSError) as e:
-        log.error("Cannot read %s: %s (quota-monitor must run as root)",
-                  _RADIUS_PW_FILE, e)
-        return None
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            return line
-    log.error("No password line found in %s (only comments?)", _RADIUS_PW_FILE)
-    return None
-
+# === Phase 5: RADIUS radcheck disable (already MariaDB, unchanged) ===
 
 def disable_customer_radcheck(username: str) -> bool:
-    """Replace radcheck Cleartext-Password with DISABLED-<random> marker.
-
-    Phase 5 cutover (2026-07-06): this is the PRIMARY kill mechanism.
-    Charon authenticates via RADIUS (`auth = eap-radius` in rw-eap.conf);
-    only the radcheck row matters for whether the customer can reconnect.
-
-    SQL mirrors the portal_auth.disable_customer_radcheck() function:
-      1. DELETE all existing radcheck rows for this username
-      2. INSERT a Cleartext-Password := DISABLED-<random> marker
-         (fails MSCHAPv2 verification — rejects every auth attempt)
-
-    Returns True on success, False if DB unavailable or SQL failed.
-    The original Cleartext-Password is preserved in customer_auth
-    (managed by the portal) for restoration via /api/quota/{id}/reset.
-    """
+    """Replace radcheck Cleartext-Password with DISABLED-<random> marker."""
     pw = _read_radius_db_password()
     if not pw:
         return False
 
     disabled_marker = f"DISABLED-{secrets.token_hex(8)}"
-    # token_hex output is `[0-9a-f]+` — safe to interpolate directly.
-    # username comes from our DB join (already validated by SQLite path);
-    # still escape single quotes defensively.
     safe_user = username.replace("'", "''")
     sql = (
         f"DELETE FROM radcheck WHERE username = '{safe_user}';\n"
@@ -497,10 +397,8 @@ def disable_customer_radcheck(username: str) -> bool:
     )
 
     try:
-        # Use MYSQL_PWD env var instead of -p<pw> arg to avoid leaking
-        # the password via `ps`. mariadb/mysql CLI both respect MYSQL_PWD.
         proc = subprocess.run(
-            ["mariadb", "-u", "radius", "-h", "127.0.0.1", _RADIUS_DB_NAME],
+            ["mariadb", "-u", "radius", "-h", "127.0.0.1", _MARIADB_DB],
             input=sql,
             check=True,
             capture_output=True,
@@ -519,21 +417,17 @@ def disable_customer_radcheck(username: str) -> bool:
 
 
 def terminate_customer_sas(username: str) -> int:
-    """Terminate SAs for a specific EAP username.
-
-    Uses `swanctl --terminate-sae --ike <id>` for each matching SA.
-    Returns count of SAs terminated.
-    """
+    """Terminate SAs for a specific EAP username (unchanged)."""
     try:
         proc = subprocess.run(
             SWANCTL_PREFIX + ["--list-sas"],
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
-        log.error("swanctl --list-sas failed: rc=%s stderr=%s", e.returncode, e.stderr)
+        log.error("swanctl --list-sas failed: rc=%s stderr=%s",
+                  e.returncode, e.stderr)
         return 0
 
-    # Find all IKE_SA unique ids belonging to this username
     target_ids: list[str] = []
     current_id: str | None = None
     for line in proc.stdout.splitlines():
@@ -545,7 +439,6 @@ def terminate_customer_sas(username: str) -> int:
             target_ids.append(current_id)
             current_id = None
         elif current_id and not re.match(r"\s+(remote|local|AES_|established|rekeying|reauth|net:|in |out )", line):
-            # Left the SA block (any line that doesn't look like a SA attribute)
             current_id = None
 
     if not target_ids:
@@ -555,7 +448,6 @@ def terminate_customer_sas(username: str) -> int:
     terminated = 0
     for ike_id in target_ids:
         try:
-            # swanctl 6.0.7: --ike-id is the IKE_SA unique id (not --ike)
             subprocess.run(
                 SWANCTL_PREFIX + ["--terminate", "--ike-id", ike_id, "--force"],
                 check=True, capture_output=True, text=True,
@@ -578,26 +470,15 @@ class QuotaMonitor:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    def _open_db(self) -> sqlite3.Connection:
-        db = sqlite3.connect(str(DB_PATH), timeout=5)
-        db.row_factory = sqlite3.Row
-        # The charon container writes to this DB via attr-sql. Use WAL-ish
-        # busy timeout; charon holds short transactions.
-        db.execute("PRAGMA busy_timeout = 5000")
+    def _open_db(self):
+        """Open a MariaDB connection (Phase 4E cutover — was SQLite)."""
+        db = _open_mariadb()
+        if db is None:
+            raise RuntimeError("Cannot open MariaDB — check /root/.mariadb-radius-pw")
         return db
 
     def _last_sampled_bytes(self) -> dict[str, int]:
-        """Load {key: last_meter_total} from sidecar.
-
-        Sidecar is keyed by 'cid:vip' string so we can correctly handle
-        the case where a customer moves between VIPs across reconnects
-        and the case where a recycled VIP gets a new customer. On first
-        observation of a (cid, vip) pair, we baseline (no credit) to
-        avoid leaking the previous VIP user's bytes into the new user.
-
-        Dropped automatically by _save_session when the corresponding
-        lease is released.
-        """
+        """Load {key: last_meter_total} from sidecar (unchanged)."""
         sidecar = Path("/var/run/quota-monitor.session")
         if not sidecar.exists():
             return {}
@@ -615,17 +496,11 @@ class QuotaMonitor:
         return f"{customer_id}:{vip}"
 
     def run_once(self) -> None:
-        """Single iteration. Returns when done. Safe to call repeatedly.
-
-        Phase 7 (2026-06-27): iterates over pool leases (online + offline)
-        rather than active IKE_SAs. See module docstring for rationale.
-        """
+        """Single iteration. Returns when done. Safe to call repeatedly."""
         log.info("=== quota-monitor iteration start ===")
         leases = list_pool_leases()
         if not leases:
             log.info("no pool leases — nothing to bill; clearing sidecar")
-            # No leases means nobody owns any VIP. Drop all sidecar
-            # entries so the next user of any recycled VIP starts clean.
             self._save_session({})
             return
 
@@ -645,9 +520,6 @@ class QuotaMonitor:
                 online = lease["online"]
 
                 if vip not in counters:
-                    # Lease held but no meter activity yet — common on
-                    # brand-new connection before first packet. Skip; we'll
-                    # pick it up on the next iteration.
                     log.debug("VIP %s (%s): lease held but no meter entry — skipping",
                               vip, identity)
                     continue
@@ -669,8 +541,6 @@ class QuotaMonitor:
                 if is_operator:
                     log.debug("VIP %s: operator %s — skipping billing, baselining",
                               vip, cust["customer_name"])
-                    # Still baseline so the next non-operator user of this
-                    # VIP starts from the operator's end-state.
                     new_totals[key] = total_now
                     continue
 
@@ -682,11 +552,6 @@ class QuotaMonitor:
 
                 prior = last_totals.get(key)
                 if prior is None:
-                    # First observation of this (customer, VIP) pair.
-                    # Baseline only — do NOT credit catch-up delta.
-                    # (Phase 5 bug: this used to do `delta = meter - data_used`
-                    # which leaked the previous VIP user's bytes into the
-                    # new user. Phase 7 fix: key by (cid, vip), not just cid.)
                     log.info("VIP %s (%s/%s): first observation on this (customer,VIP) pair, "
                              "baseline meter=%d (DB data_used=%d)",
                              vip, cust["customer_name"], cust["device_name"],
@@ -696,7 +561,6 @@ class QuotaMonitor:
 
                 delta = total_now - prior
                 if delta < 0:
-                    # Meter went backwards (e.g. nftables reloaded). Re-baseline.
                     log.warning("VIP %s: meter went backwards (%d → %d), re-baselining",
                                 vip, prior, total_now)
                     delta = 0
@@ -712,14 +576,10 @@ class QuotaMonitor:
 
                 new_totals[key] = total_now
 
-                # Enrich cust for downstream functions
                 cust["vip"] = vip
                 cust["username"] = identity
                 cust["online"] = online
 
-                # Check thresholds — fires regardless of online/offline.
-                # A customer who hit 100% while online should still get cut
-                # even if their phone went to sleep in the meantime.
                 if data_limit > 0:
                     pct = 100 * data_used / data_limit
                     if pct >= CUT_PCT and not cust["over_quota"]:
@@ -729,18 +589,12 @@ class QuotaMonitor:
 
             db.commit()
 
-            # Sidecar cleanup: new_totals already only contains (cid, vip)
-            # pairs for current leases. Saving it automatically drops
-            # entries for leases that were released since the last
-            # iteration. This prevents the next user of a recycled VIP
-            # from inheriting the previous user's baseline.
             self._save_session(new_totals)
         finally:
             db.close()
         log.info("=== quota-monitor iteration done ===")
 
-    def _warn_customer(self, db: sqlite3.Connection, cust: dict, data_used: int, pct: float) -> None:
-        """80% threshold — log alert, write audit. (Telegram DM is a no-op for now.)"""
+    def _warn_customer(self, db, cust: dict, data_used: int, pct: float) -> None:
         customer_id = cust["customer_id"]
         log.warning("VIP %s user=%s cust=%s: 80%% WARN — used %d / %d (%.1f%%)",
                     cust["vip"], cust["username"], cust["customer_name"],
@@ -750,62 +604,24 @@ class QuotaMonitor:
                   f'{{"pct": {pct:.2f}, "data_used": {data_used}, '
                   f'"data_limit": {cust["data_limit_bytes"]}}}')
 
-    def _cut_customer(self, db: sqlite3.Connection, cust: dict, data_used: int) -> None:
-        """100% threshold — kill RADIUS radcheck (PRIMARY), kill rw-eap.conf
-        (defense-in-depth), DAE Disconnect-Request (RFC 5176 standards-based
-        SA kill), terminate SAs as belt-and-suspenders, set over_quota=1.
-
-        Phase 5+ cutover (2026-07-06): charon authenticates via RADIUS
-        (`auth = eap-radius`). The rw-eap.conf secret KILL is no longer
-        the mechanism that locks a customer out — only the radcheck
-        Cleartext-Password in MariaDB is. We do BOTH: radcheck disable
-        is the primary kill (a hard fail in this step is a cut failure);
-        rw-eap.conf kill is defense-in-depth (warn but don't fail if
-        the block is missing — Phase 5+ customers don't have one).
-
-        DAE Disconnect-Request (Phase 5D, 2026-07-06 14:11 SAST): the
-        cleanest, standards-based way to actively terminate the
-        customer's IKE_SA. Sent to charon's eap-radius.dae listener
-        on UDP/127.0.0.1:3799 via vpn_disconnect.send_dae_disconnect().
-        charon returns ACK = terminated, NAK = no SA matched (already
-        offline = OK). Replaces (complements) swanctl --terminate
-        which is kept as belt-and-suspenders for SAs the DAE path
-        misses (half-open, mid-rekey).
-
-        Reverts /api/quota/{id}/reset restores radcheck via
-        enable_customer_radcheck() in the portal.
-        """
+    def _cut_customer(self, db, cust: dict, data_used: int) -> None:
         customer_id = cust["customer_id"]
         username = cust["username"]
         log.error("VIP %s user=%s cust=%s: 100%% CUT — used %d / %d",
                   cust["vip"], username, cust["customer_name"],
                   data_used, cust["data_limit_bytes"])
 
-        # 1. PRIMARY: disable RADIUS radcheck (locks future auth)
         radcheck_killed = disable_customer_radcheck(username)
-
-        # 2. DEFENSE-IN-DEPTH: kill rw-eap.conf secret (Phase-5 obsolete
-        # but kept for safety; no-op for Phase 5+ customers)
         rw_eap_killed = kill_customer_credentials(db, customer_id, username)
-
-        # 3. RFC 5176 DAE Disconnect-Request - standards-based active SA
-        #    termination via charon's eap-radius.dae listener (UDP/3799).
-        #    pyrad sends User-Name=<username>; charon matches against
-        #    active IKE_SAs and sends IKE DELETE INFORMATIONAL. ACK = ok,
-        #    NAK = no SA (already offline). Both are non-fatal in the
-        #    cut log: we're not blocking on either result.
         dae_result = send_dae_disconnect(username)
-
-        # 4. Belt-and-suspenders: parse swanctl --list-sas and terminate.
-        #    Catches any SA the DAE path missed (e.g., half-open states).
         n_terminated = terminate_customer_sas(username)
 
-        # 5. Mark + audit + alert
         if radcheck_killed:
-            db.execute(
-                "UPDATE customers SET over_quota = 1, updated_at = ? WHERE id = ?",
-                (int(time.time()), customer_id),
-            )
+            with db.cursor() as cur:
+                cur.execute(
+                    "UPDATE customers SET over_quota = 1, updated_at = %s WHERE id = %s",
+                    (int(time.time()), customer_id),
+                )
             log_alert(db, customer_id, CUT_PCT, data_used)
             log_audit(db, "quota-monitor", "cut_100pct", "customer", customer_id,
                       f'{{"data_used": {data_used}, "data_limit": {cust["data_limit_bytes"]}, '
@@ -822,7 +638,6 @@ class QuotaMonitor:
                       f'"rw_eap_killed": {rw_eap_killed}}}')
 
     def run_daemon(self) -> None:
-        """Long-running loop with graceful shutdown on SIGTERM/SIGINT."""
         running = True
 
         def stop(*_):
@@ -835,11 +650,6 @@ class QuotaMonitor:
 
         log.info("starting daemon (poll every %ds, warn=%d%%, cut=%d%%)",
                  POLL_INTERVAL, WARN_PCT, CUT_PCT)
-
-        # Phase 6 (2026-06-26): no runtime rule installation needed.
-        # Quota meters (`client_src` / `client_dst`) live in /etc/nftables.conf
-        # and load at boot via nftables.service. Kernel auto-creates counter
-        # elements per VIP on first packet match.
 
         while running:
             try:
@@ -854,7 +664,7 @@ class QuotaMonitor:
 
 
 def main():
-    p = argparse.ArgumentParser(description="5B.3 quota monitor")
+    p = argparse.ArgumentParser(description="Phase 8 quota monitor (MariaDB)")
     p.add_argument("--once", action="store_true", help="run a single iteration and exit")
     p.add_argument("--verbose", "-v", action="store_true", help="debug logging")
     p.add_argument(
@@ -862,9 +672,7 @@ def main():
         help="One-time migration: for each current pool lease with a "
              "customer mapping and data_used_bytes=0 in DB, credit the "
              "current nft meter total to data_used_bytes and write it to "
-             "the sidecar as the baseline. Use this when deploying "
-             "Phase 7 to recover meter bytes accumulated during the "
-             "Phase 5/6 iOS-misses-SAs bug window.",
+             "the sidecar as the baseline.",
     )
     args = p.parse_args()
 
@@ -878,17 +686,6 @@ def main():
 
 
 def backfill_orphans(mon: "QuotaMonitor") -> None:
-    """One-time migration for Phase 7 deploy.
-
-    For each current pool lease:
-      - Look up the customer via the EAP identity
-      - Skip if operator / inactive / no mapping
-      - If customer.data_used_bytes == 0 AND meter has bytes for the VIP:
-        credit meter_total to data_used_bytes (so the historical bytes
-        that the Phase 5/6 code missed are visible to the operator)
-        AND seed the sidecar with the same meter total so subsequent
-        iterations don't double-count.
-    """
     log.info("=== backfill-orphans: one-time migration ===")
     leases = list_pool_leases()
     counters = sample_counters()
