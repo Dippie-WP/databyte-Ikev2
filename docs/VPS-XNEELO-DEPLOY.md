@@ -32,17 +32,22 @@ Zun does this in the Xneelo panel before handing you SSH access:
 
 ## What Gets Deployed
 
+> **🟢 Verified-live v2.2.0 (2026-07-13, commit `805ea84`):** This list was last touched 2026-07-10 and contained four stale lines (DB / Firewall / Backup / Portal version). Updated below; see CHANGELOG.md v2.2.0 entry for the 6-bug fix chain in FreeRADIUS that this release closes.
+
 | Component | Detail |
 |---|---|
 | **OS** | Debian 13 (trixie) or Ubuntu 24.04 LTS |
 | **Docker** | `zun/strongswan:6.0.7-mschapv2-attrsql` (pre-built, 166MB) |
 | **VPN protocol** | IKEv2 + EAP-MSCHAPv2 + EAP-PSK |
 | **CA** | Self-signed (ECDSA P-256 server cert, RSA 4096 CA, 10y) |
-| **DB** | SQLite at `/var/lib/strongswan/ipsec.db` |
-| **Firewall** | iptables-legacy with MSS clamp (5G fix) + VPN FORWARD rules |
-| **Subnet** | `10.99.0.0/24` (VPN clients get IPs from this range) |
-| **Backup** | Nightly cron → RustFS on homelab |
-| **Portal** | Deployed as `vpn-portal.service` since 2026-06-22 (under 5D pre-launch scope). Portal version on VPS: v1.9.0. See [`host/scripts/deploy-portal-vps.sh`](../host/scripts/deploy-portal-vps.sh) for the deploy mechanism. |
+| **DB (charon-internal)** | SQLite at `/var/lib/strongswan/ipsec.db` (retained; holds charon-only tables: `addresses`, `ike_sas`, `pools`, `child_configs`, `certificates`) |
+| **DB (identity + portal business)** | **MariaDB 11.x at 127.0.0.1:3306, db `radius`** — single source of truth for RADIUS-protocol tables (`radcheck`, `radreply`, `radusergroup`, `radpostauth`, `radacct`) and portal business tables (`customers`, `users`, `devices`, `installer_tokens`, `tiers`, `alerts`, `purchases`, `operator_sessions`, `customer_portal_sessions`, `audit_log`, plus ~25 daloRADIUS-mirrored). 42 tables total. Phase 4E `cb9bf69` (2026-07-12). |
+| **AAA backend** | **FreeRADIUS 3.0.x** (apt package; PID 868286 live) listening 127.0.0.1:1812 (auth), 127.0.0.1:1813 (accounting), 127.0.0.1:18120 (status). CoA relay via charon UDP/3799. Charon forwards EAP-MSCHAPv2 to FreeRADIUS via `eap-radius.conf` overlay (`/opt/strongswan-vpn-gateway/docker/strongswan.d/10-eap-radius.conf`). |
+| **FreeRADIUS overlay** | `host/freeradius/` directory in repo + `provision-freeradius.sh` (idempotent, drift-detectable via `--check`, with smoke test). v2.2.0 commit `805ea84`. |
+| **Firewall** | **nftables** (`nftables-vpn.service` runs `nft -f /etc/nftables.conf` with `inet quota_table` for per-VIP counters; `inet filter_table` for FORWARD/MASQ/MSS-clamp 1260). iptables-legacy → nftables swap done in Phase 7.5 (2026-07-09) for persistent counters. |
+| **Subnet** | `10.99.0.0/24` (VPN clients get IPs from this range; per-user sticky VIP pinned by FreeRADIUS + MariaDB) |
+| **Backup** | kopia → PBS (homelab, `pbs` @ 192.168.10.84) for full-host snapshots (`/etc`, `/var/lib/mysql`, `/var/lib/strongswan`, etc.). rclone → RustFS (192.168.10.89:30293, `rustfs:` remote) only for doc push + validated docs archive. |
+| **Portal** | FastAPI + gunicorn as `vpn-portal.service` (systemd, local-only port behind nginx 443). Version on VPS: **v2.2.0** (matches HEAD `805ea84`). Reads MariaDB via `portal_auth._db()`. See [`host/scripts/deploy-portal-vps.sh`](../host/scripts/deploy-portal-vps.sh) for the deploy mechanism. |
 
 ---
 
@@ -69,24 +74,25 @@ The bootstrap script does ALL of the following automatically:
 
 | Step | What it does | Time |
 |---|---|---|
-| 1 | apt update + install Docker, rclone, sqlite3, unattended-upgrades, fail2ban, rkhunter, iptables-persistent | 3-5 min |
+| 1 | apt update + install Docker, rclone, sqlite3, **freeradius, freeradius-mysql, mariadb-server, mariadb-client**, nftables, unattended-upgrades, fail2ban, rkhunter | 5-7 min |
 | 2 | Disable root SSH login | 30 sec |
 | 3 | Create operator user (zunaid) with sudo + copy SSH key | 1 min |
 | 4 | Enable unattended security upgrades | 30 sec |
 | 5 | Configure fail2ban (SSH: 3 retries → 24h ban) | 30 sec |
 | 6 | Configure rkhunter | 30 sec |
 | 7 | Apply sysctl (ip_forward, redirect hardening) | 30 sec |
-| 8 | Apply iptables (MSS clamp 1260 + VPN FORWARD + MASQUERADE) | 1 min |
+| 8 | Apply **nftables** (MSS clamp 1260 in `inet filter_table` + MASQ + `inet quota_table` for per-VIP counters). nftables replaces the iptables-legacy / `iptables-persistent` setup of v1.x — see Phase 7.5 (`docs/CHANGELOG.md`) | 1 min |
 | 9 | Clone project repo to `/opt/strongswan-vpn-gateway` | 2 min |
 | 10 | Generate CA + server certs (SAN = myvpn.databyte.co.za) | 10 sec |
 | 11 | Configure rw-eap.conf + rw-psk.conf | 1 min |
 | 12 | Build Docker image | 5 min |
 | 13 | Start container | 1 min |
-| 14 | Seed operator + demo customer in SQLite DB | 30 sec |
-| 15 | Configure rclone for RustFS backup | 1 min |
-| 16 | Install nightly DB backup cron (03:00 UTC = 05:00 SAST) | 30 sec |
+| 14 | Apply FreeRADIUS schema + operator overlay (`bash host/freeradius/provision-freeradius.sh`); seed operator + demo customers in MariaDB `radius` DB (`/opt/vpn-portal/scripts/migrate_sqlite_to_mariadb.py` or the live migration) | 1 min |
+| 15 | Configure rclone for RustFS backup (docs push only; primary backup is kopia → PBS) | 1 min |
+| 16 | Install kopia backup cron + nightly charon-db backup cron (03:00 UTC = 05:00 SAST) | 30 sec |
+| 17 | Install `bandwidth-monitor.service` + `quota-monitor.service` + `quota-schema.service` (uses nftables counters; reads MariaDB; interoperates with FreeRADIUS DISABLE+CoA at 100%) | 30 sec |
 
-**Total: ~15-25 min depending on network speed.**
+**Total: ~25-40 min depending on network speed.**
 
 ### 3. Verify DNS has propagated before running bootstrap
 

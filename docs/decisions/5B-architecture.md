@@ -285,3 +285,18 @@ counters don't have this problem.
 - **HA + LB (5H)** — 2x v1.1 + keepalived VRRP for ~5s failover
 
 All gated on 5B sign-off and Zun approval per the two-gate rule.
+
+---
+
+## Update note (2026-07-13, v2.2.0 doc-sync — added by Misha)
+
+This ADR was written for the LXC 903 lab design (2026-06-19). For VPS production (`vpn-prod-01`, 154.65.110.44), the quota backend was migrated to **nftables named counters** in Phase 7.5 (2026-07-09) — see `docs/ARCHITECTURE.md` "🟢 Verified-live 2026-07-13" table (this doc-sync commit). The 5B.6 fix (narrow watchdog case statement) and the kill-credentials design both remain valid as defense-in-depth. The choice of iptables-legacy over nftables for the lab was correct at the time; for production, nftables was the right call (named counters don't reset on rule reload).
+
+The five "Future work" items at the bottom of this doc are now mostly historical:
+- Admin web page → **DELIVERED** as `vpn-portal.service` (Phase 5D)
+- Telegram bot at 80/100 → **⏔ NEVER BUILT** (no customer self-service; operator manual per Zun 2026-06-19)
+- Grafana dashboard → **DELIVERED** as `host/grafana/dashboards/strongswan-quota.json` (5C.3)
+- Backup verify → ⛔ **CANCELLED 2026-06-20** — replaced by PBS full-host backup (DR runbook §1.4)
+- Payment integration → ⛔ **NEVER PLANNED** (operator-only model)
+- Multi-device → ⛔ **5C.5 REVERTED 2026-06-20** + 5C.6 SHELVED (1-customer-1-device model)
+- HA + LB → ⏳ **NOT STARTED** (last-last phase per Zun 2026-06-20)

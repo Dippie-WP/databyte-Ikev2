@@ -1,6 +1,42 @@
 # ARCHITECTURE
 
-> **⚠ Live deployment context (added 2026-07-01):** Production runs on the Xneelo VPS (`vpn-prod-01`, 154.65.110.44, `myvpn.databyte.co.za`). The detailed architecture below describes the LAB environment on LXC 903 (192.168.10.98) — kept here because that's where most of the engineering history happened, and because the VPS runbook mirrors this design closely (with `nftables.service` + Docker MASQ instead of `iptables-legacy`). See `docs/VPS-XNEELO-DEPLOY.md` for the production system and `docs/INCIDENT-2026-06-27.md` for the destructive-replay recovery context. The lab and prod are intentionally separate — no sync between them.
+> **⚠ Live deployment context (updated 2026-07-13, v2.2.0 fact-check):** Production runs on the Xneelo VPS (`vps-01`, 154.65.110.44, `myvpn.databyte.co.za`). This doc was last touched 2026-07-01 and primarily describes the LXC 903 lab; significant drift has accumulated. See the "🟢 Verified-live 2026-07-13" annotations at section heads for the current state. See `docs/VPS-XNEELO-DEPLOY.md` for the production system. Lab (LXC 903 @ 192.168.10.98) and prod (VPS @ 154.65.110.44) are intentionally separate — no sync, never will be.
+
+## 🟢 Verified-live 2026-07-13 (v2.2.0 production state on vps-01)
+
+The following are live-verified facts from `ssh root@vps-01` at 14:00 UTC / 16:00 SAST, cross-checked against `git rev-parse HEAD` on origin/main = `805ea844ee2d28d8107a24d467a1ee0873b5898e` (= tag v2.2.0):
+
+| Aspect | Live state | Notes |
+|---|---|---|
+| **Image** | `zun/strongswan:6.0.7-mschapv2-attrsql` | Same image as v1.x; only operator-overlay config changed |
+| **Container ID** | `Up About an hour (healthy)` (lived-tracked) | bind mounts: 7 paths from `/opt/strongswan-vpn-gateway/docker/...` |
+| **charon daemon** | PID 831235, UDP/500 + UDP/4500 listening on `0.0.0.0` + `[::]` | EAP-MSCHAPv2 via FreeRADIUS (NOT local SQLite) |
+| **VICI socket** | TCP `127.0.0.1:4502` (container-internal listener, host-readable via `docker exec`) | unchanged |
+| **Quotas** | **nftables** (`nft list ruleset \| grep quota` → `table inet quota_table`) | Per-VIP packets/bytes counters in nftables (NOT iptables-legacy). Per TOOLS.md Phase 7.5 switch |
+| **Identity store** | **MariaDB 11.x at 127.0.0.1:3306, db `radius`** (post-Phase-4E cutover) | 42 tables: 7 RADIUS-protocol + 35 daloRADIUS-mirrored business (`customers`, `users`, `devices`, `installer_tokens`, `tiers`, etc.) |
+| **FreeRADIUS** | active (pid 868286), listening 1812/1813/18120 + CoA at 3799 | Connected to charon via `eap-radius.conf` (binds UDP/1812+1813 to charon in container) |
+| **Services running** | `apache2`, `bandwidth-monitor`, `dockhand-bridge`, `freeradius`, `mariadb`, `nginx`, `quota-exporter`, `quota-monitor`, `strongswan_exporter`, `vpn-portal` | All active (systemctl) |
+| **radpostauth** | 390 rows | Live MSCHAPv2 with migrated NTLM hashes from charon SQLite |
+| **radacct** | 5 rows | Live interim-updates from charon eap-radius `accounting = yes` (added v2.2.0, 805ea84) |
+| **customers** | 5 rows | Live portal business data |
+| **charon/customer identity source** | **NOW**: FreeRADIUS with `SELECT id FROM users WHERE name='%{User-Name}'` SQL module | Was: SQLite at `/var/lib/strongswan/ipsec.db` via attr-sql |
+| **Backup** | kopia → PBS (homelab) + RustFS (docs push only) | kopia runs per-host; doc push only via rclone |
+| **ACCOUNTING CHAIN** | Wired end-to-end (v2.2.0) | See `host/freeradius/` overlay + `provision-freeradius.sh` |
+
+## Key architecture shifts since the v1.x design (locked forward by v2.2.0)
+
+| Was (v1.x) | Is now (v2.2.0) | Commit |
+|---|---|---|
+| SQLite at `/var/lib/strongswan/ipsec.db` (portable via bind-mount) | MariaDB `radius` database with `customers`/`users`/`devices`/`installer_tokens`/etc. tables (single source of truth) | Phase 4E `cb9bf69` (2026-07-12) |
+| iptables-legacy per-VIP byte counters in FORWARD | nftables named counters in `inet quota_table` | Phase 7.5 / applied 2026-07-09 |
+| charon's local `users`/`pools`/`leases` (SQLite) | FreeRADIUS `radcheck`/`radusergroup` (MariaDB), charon eap-radius plugin proxies auth | Phase 5 `a9d2527` (2026-07-06) |
+| `/etc/freeradius/3.0/` with default Debian config (no operator overlay) | `host/freeradius/` overlay dir + `provision-freeradius.sh` | v2.2.0 `805ea84` (2026-07-13) |
+| Quota enforcement via iptables counter + ipsec connection kill | Quota enforcement via nftables counter + RADIUS identity DISABLE + RFC 5176 Disconnect-Request (`3799/udp` → charon) | Phase 5+ `b00b8e` (2026-07-06) |
+| `curl https://vpn-portal.databyte.co.za/` for portal | same URL, now powered by portal v2.2.0 (FastAPI + MariaDB `radius` DB) | Phase 4C `09e3cfe` |
+| `/home/zunaid/strongswan/quota/quota-monitor.py` (LXC 903 lab only) | live at `/opt/strongswan-vpn-gateway/quota/quota-monitor.py` on VPS | phase-by-phase, see ROADMAP.md |
+
+The remainder of this file, below, is the **legacy v1.x lab architecture** (LXC 903 192.168.10.98). It is preserved for historical context and as the design from which the above shifts were derived. DO NOT use it as a guide for current state — every claim about "the system" should be cross-checked against the 🟢 verified-live table above.
+
 
 ## Network topology
 
@@ -108,11 +144,13 @@ IKE (UDP 500/4500) and ESP (proto 50) require direct host access. Bridge mode wo
 ### Docker image built fresh per host (NOT pushed to registry)
 The build is ~5 min and the image is tied to a specific strongSwan version. Pushing to a registry adds operational overhead with no real benefit at this scale. We can add `ghcr.io` later if a 3rd host deployment makes the build time matter.
 
-### SQLite (NOT Postgres, NOT MySQL)
-The DB is small (~200KB), low-write (just lease updates), no concurrent writers (single charon). SQLite is the right tool. The daily backup is a 200KB copy to RustFS. If we ever need multiple gateway replicas, this changes.
+### ~~SQLite (NOT Postgres, NOT MySQL)~~ — STALE 2026-07-12 (Phase 4E)
 
-### iptables-legacy (NOT nftables) for quota counters
-We use iptables-legacy with per-VIP ACCEPT rules. **Why not nftables?** nftables has named counters that persist across rule reloads (a 5B.6-style bug couldn't happen with nftables). But nftables doesn't ship with the LXC's firewalld backend yet, and adding nftables-native as a second stack would duplicate complexity. **Tradeoff:** iptables-legacy counters get wiped on every `iptables-restore`. The 5B.6 fix (narrow watchdog case statement) prevents the wipe. For v1.3 we may migrate to nftables for permanent counter persistence.
+The 2026-06 discussion chose SQLite for the charon-stack (small, low-write, single charon writer). This was correct for **charon internal state** (addresses, ike_sas, pools — unchanged). For **portal business state** (customers, devices, users), the design shifted in Phase 4E (commit `cb9bf69`, 2026-07-12) to **MariaDB 11.x at 127.0.0.1:3306, db `radius`**. Both coexist now: MariaDB holds business + RADIUS-protocol tables; SQLite at `/var/lib/strongswan/ipsec.db` holds ONLY charon-internal tables. See "🟢 Verified-live" table at top of file.
+
+### ~~iptables-legacy (NOT nftables) for quota counters~~ — STALE 2026-07-09 (Phase 7.5)
+
+This section described the LXC 903 lab design (pre-July 9). For VPS production, we **did migrate** to nftables in Phase 7.5: live `nft list ruleset | grep quota` returns `table inet quota_table { ... }` with named counters that persist across `nft flush ruleset`. iptables-legacy was the right choice for the lab; nftables is the right choice for production with the 5B.6-style bug class as a permanent category. The 5B.6 fix (narrow watchdog case statement) remains as defense-in-depth even though it no longer fires on VPS.
 
 ### Self-signed CA (NOT Let's Encrypt)
 LE is what v1.3 will use. For v1.0/v1.1, the Android strongSwan app handles self-signed CAs fine when the CA is installed as a user CA. iOS is broken either way. The setup is:
@@ -314,3 +352,12 @@ See ADR `docs/decisions/5B-architecture.md` for full analysis.
 - **Cloudflare bot detection** — ifconfig.me may give `ERR_CONNECTION_CLOSED` because shared MASQ IP looks bot-like. Actually works on 5G in our testing, but other Cloudflare-fronted sites may fail.
 - **No HA** — single charon. If the container dies, all clients disconnect. 5H is the fix.
 - **iptables-counter fragility** — any future re-apply of `rules.v4` will reset counters. See 5B.6 ADR for migration plan to nftables named counters.
+
+---
+
+## Changelog (architecture doc itself)
+
+- **2026-07-13 16:00 SAST / 14:00 UTC (v2.2.0 doc-sync):** Added "🟢 Verified-live 2026-07-13" table at the top with live-verified facts from `ssh root@vps-01`. Added "Key architecture shifts since v1.x" mapping each commit+date for the SQLite→MariaDB (Phase 4E), iptables→nftables (Phase 7.5), SQLite→FreeRADIUS (Phase 5) transitions. Marked two design-decision subsections as STALE with the commit that superseded each. The lab (LXC 903) architecture below is preserved as historical context — every claim MUST be cross-checked against the verified-live table. Doc-touch commit: included in v2.2.0 docs sync (this audit). Verification receipts: live VPS container image MD5, freeRADIUS listening on 1812/1813/18120, charon UDP/500+4500, MariaDB `radius` DB at 42 tables with `customers`/`users`/`devices` rows.
+
+- **2026-07-01:** Added "live deployment context" warning (lab = LXC 903; prod = VPS via DEPLOYMENT.md).
+- **Earlier:** Original v1.x architecture documentation as-built (5A → 5B → 5C sequence).

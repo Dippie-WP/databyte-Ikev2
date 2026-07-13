@@ -19,6 +19,8 @@ This walks through deploying the strongSwan gateway on a fresh LXC. **The live p
 
 ## 1. LXC host setup (one-time)
 
+> **🟢 Verified-live v2.2.0 (2026-07-13):** This generic DEPLOYMENT.md pre-dates the RADIUS migration (Phase 5) and the Phase 4E MariaDB unified-source-of-truth change. The doc-step **0\. Prerequisites** now also requires `freeradius` + `freeradius-mysql` packages and `mariadb-server` + `mariadb-client`; the **new §7a FreeRADIUS + MariaDB provisioning** step (added 2026-07-13) layers in identity-store-on-MariaDB over charon-side MSCHAPv2. If you're re-deploying VPS from scratch on commit `805ea84` (HEAD = v2.2.0), also follow `docs/RUNBOOK-DR-REBUILD-AND-HA.md` §2.3 which is the live-verified recovery procedure; this DEPLOYMENT.md describes the manual steps the runbook condenses.
+
 ### 1.1 Sysctl
 
 ```bash
@@ -58,6 +60,35 @@ sudo iptables -t mangle -L FORWARD -n -v | grep TCPMSS
 ```
 
 **If you skip this step, 5G clients will see TCP handshakes complete but responses time out (ERR_TIMED_OUT).** See ISSUES-LOG §5A.7.
+
+### 1.4 FreeRADIUS + MariaDB (REQUIRED for v2.0.0 / Phase 5 / v2.2.0+)
+
+v1.x used charon's local `users`/`pools`/`leases` tables via `attr-sql` against `/var/lib/strongswan/ipsec.db` (SQLite). v2.0.0+ uses **FreeRADIUS + MariaDB** for identity. Pre-v2.0 DB seeding code (`scripts/seed-db.sh`) is now stale; use the operator overlay on commit `805ea84` instead.
+
+```bash
+# 1. Install the trio (RADIUS + DB + SQL connector)
+sudo apt install -y freeradius freeradius-mysql mariadb-server mariadb-client
+sudo systemctl enable --now freeradius mariadb
+
+# 2. Bootstrap the radius DB (verbatim from live vps-01)
+sudo mariadb -e "CREATE DATABASE IF NOT EXISTS radius; \
+                  CREATE USER IF NOT EXISTS 'radius'@'localhost' IDENTIFIED BY 'radiuspw'; \
+                  GRANT ALL ON radius.* TO 'radius'@'localhost'; \
+                  CREATE USER IF NOT EXISTS 'portal'@'127.0.0.1' IDENTIFIED BY 'portalpw'; \
+                  GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, INDEX, ALTER, REFERENCES ON radius.* TO 'portal'@'127.0.0.1';"
+# Change 'radiuspw' / 'portalpw' before running — see host/vpn-portal/.env for production credentials.
+
+# 3. Apply FreeRADIUS schema + operator overlay from the repo
+sudo bash scripts/deploy-freeradius.sh   # applies stock schema + commits 805ea84's host/freeradius/ overlay
+# (This runs `provision-freeradius.sh` from inside the repo: see host/freeradius/README.md.)
+
+# 4. Verify
+systemctl is-active freeradius
+radtest testing password 127.0.0.1 0 testing123   # localhost client secret from /etc/freeradius/3.0/clients.conf
+sudo mariadb radius -e "SELECT COUNT(*) FROM radcheck;"   # expect >0 (after seed step below)
+```
+
+See `host/freeradius/README.md` for the overlay design + `provision-freeradius.sh --check` for drift detection. The script is idempotent and exits 1 when live `/etc/freeradius/3.0/` diverges from the repo overlay — suitable for CI.
 
 ## 2. Project checkout
 
@@ -129,7 +160,11 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-pools
 
 The first call to `swanctl --list-pools` initializes the SQLite DB schema. Without it, the DB dir looks empty.
 
-## 7. Seed the first user
+## 7. Seed the first user (v1.x — SUPERSEDED for v2.0.0+; kept for reference)
+
+> **🟡 Migration note (2026-07-13):** This section seeds charon local SQLite. As of v2.0.0 (Phase 5), identity lives in FreeRADIUS + MariaDB (`radius` DB), not charon SQLite. For v2.0.0+ first-time seed: see `docs/RUNBOOK-DR-REBUILD-AND-HA.md` §2.3 step 17 for the post-charon-cutover identity bootstrap. The script `scripts/seed-db.sh` referenced here exists for v1.x only and will NOT work against v2.x — do NOT run it.
+
+```bash
 
 ```bash
 # Generate NTLM hash from password (or skip — charon will do it on first use)
@@ -261,14 +296,11 @@ curl --interface 10.99.0.50 --max-time 10 https://ifconfig.me
 
 ## 11. Rollback
 
-If v1.2 is broken, rollback to v1.1 (PSK only, no VIP pin) in 3 min:
-
-```bash
-bash scripts/rollback-v1.1.sh
-# Type 'yes' to confirm
-```
-
-The DB is bind-mounted, not in the image — your data is preserved.
+> **🟡 Stale-cleanup note (2026-07-13):** This section referenced `scripts/rollback-v1.1.sh` (claimed 3-min rollback to v1.1 PSK-only). As of v2.2.0, this script does NOT exist in the repo (verified `ls scripts/` = 2 README + 1 .ps1 + 1 .sh). For current rollback semantics:
+>
+> - **Rollback within v2.x** — `git checkout v2.1.1 && git push --force-with-lease` (last-known-good tagged version). The MariaDB schema is forward-compatible from v2.0.0 onward (no destructive migrations in v2.1.x or v2.2.0).
+> - **Rollback to v1.x** — **not supported** as of 2026-07-13. v1.x identity is charon-SQLite + iptables-legacy; v2.x is FreeRADIUS+MariaDB + nftables. To go back to v1.x you'd need to re-run the **reverse** of Phase 4E (re-create SQLite from MariaDB) + Phase 5 (revert charon from `eap-radius` to attr-sql) + Phase 7.5 (revert nftables → iptables-legacy). **Don't.** Use the existing in-branch DR runbook (`docs/RUNBOOK-DR-REBUILD-AND-HA.md`) to recover the running stack in 12-25 min instead.
+> - **Verified DR path:** see §2.3 of `docs/RUNBOOK-DR-REBUILD-AND-HA.md` — the runbook is itself a fact-checked rollback script via fresh-host build.
 
 ## 12. Common issues
 
