@@ -547,57 +547,83 @@ def step_customers_and_tiers():
 
 
 def step_active_leases():
-    """Step 3: active SA leases -- hybrid (charon SQLite for SA state,
-    MariaDB for customer/device join).
+    """Step 3: active VIP leases -- radacct-derived (2026-07-14 revision).
 
-    Charon tracks SA state in `addresses`+`identities`. Portal tracks which
-    identity belongs to which customer in `devices`+`customers`. Pull both,
-    join on identity_name in Python.
+    Why radacct, not charon SQLite:
+      - Charon's `attr-sql` plugin is NOT loaded in this container
+        (no config in /etc/strongswan.conf), so `addresses` table is
+        always empty. The original code reading from charon SQLite was
+        a pre-existing no-op in this environment.
+      - The strongswan-iptables-watchdog is also inactive, so per-VIP
+        iptables rules (which the exporter used to read) don't exist.
+
+    What we do instead:
+      - Read open radacct sessions directly from MariaDB. radacct has:
+          - username (the EAP identity, e.g. "siraaj-iphone")
+          - framedipaddress (the VIP, e.g. "10.99.0.2")
+          - callingstationid (peer IP)
+          - updated interim-by-interim (300s) by FreeRADIUS
+      - Look up customer_name via the proper bridge:
+          radacct.username -> users.name -> users.id
+                            == devices.strongswan_user_id
+                            -> devices.customer_id
+                            == customers.id -> customers.name
+        (device_name in devices is a short label like "iphone" -- NOT
+        the same as radacct.username which is the full EAP identity)
+      - Set g_lease_count to the number of currently-open radacct
+        sessions (the metric dashboard panel 6 expects)
+      - Best-effort populate per-VIP byte counters from iptables
+        (will be 0 if watchdog isn't running; fall back to radacct
+        byte counters)
     """
-    leases = db_query_charon("""
-        SELECT hex(a.address)        AS hex_addr,
-               i.id                 AS identity_id,
-               CAST(i.data AS TEXT) AS identity_name,
-               a.acquired           AS acquired_at
-        FROM addresses a
-        JOIN identities i ON i.id = a.identity
-        WHERE a.acquired > 0 AND a.released = 0
-        ORDER BY a.acquired DESC
+    sessions = db_query_mariadb("""
+        SELECT username, framedipaddress, callingstationid,
+               COALESCE(acctinputoctets, 0) AS rad_bytes_in,
+               COALESCE(acctoutputoctets, 0) AS rad_bytes_out,
+               acctstarttime AS acquired_ts,
+               UNIX_TIMESTAMP(acctstarttime) AS acquired_epoch
+        FROM radacct
+        WHERE acctstoptime IS NULL AND framedipaddress IS NOT NULL
+        ORDER BY acctstarttime DESC
     """)
-    if not leases:
+    if not sessions:
         g_lease_count.set(0)
         return
 
-    identities = [L["identity_name"] for L in leases if L.get("identity_name")]
+    # Bridge radacct.username -> customers.name via users + devices.
+    usernames = [s["username"] for s in sessions if s.get("username")]
     customer_map = {}
-    if identities:
-        placeholders = ",".join(["%s"] * len(identities))
+    if usernames:
+        placeholders = ",".join(["%s"] * len(usernames))
         rows = db_query_mariadb(
-            f"SELECT d.device_name, d.id AS device_id, d.device_type, "
-            f"c.id AS customer_id, c.name AS customer_name "
-            f"FROM devices d JOIN customers c ON c.id = d.customer_id "
-            f"WHERE d.device_name IN ({placeholders})",
-            tuple(identities),
+            f"SELECT u.name AS username, "
+            f"       c.id AS customer_id, c.name AS customer_name "
+            f"FROM users u "
+            f"JOIN devices d ON d.strongswan_user_id = u.id "
+            f"JOIN customers c ON c.id = d.customer_id "
+            f"WHERE u.name IN ({placeholders})",
+            tuple(usernames),
         )
-        customer_map = {r["device_name"]: r for r in rows}
+        customer_map = {r["username"]: r for r in rows}
 
     ipt = iptables_counters()
-    g_lease_count.set(len(leases))
-    for lease in leases:
-        hex_addr = lease.get("hex_addr") or ""
-        try:
-            vip = ".".join(str(int(hex_addr[i:i+2], 16)) for i in (0, 2, 4, 6))
-        except Exception:
-            vip = "unknown"
-        identity = lease.get("identity_name") or "unknown"
-        cm = customer_map.get(identity) or {}
+    g_lease_count.set(len(sessions))
+    for s in sessions:
+        vip = s.get("framedipaddress") or "unknown"
+        username = s.get("username") or "unknown"
+        cm = customer_map.get(username) or {}
         customer = cm.get("customer_name") or "unmapped"
-        device = identity  # identity_name == device_name by portal convention
+        device = username
+        # Prefer iptables counters (kernel-authoritative); fall back to
+        # radacct counters if iptables rule for this VIP doesn't exist.
         ctr = ipt.get(vip, {})
-        g_lease_in.labels(vip=vip, customer=customer, device=device).set(ctr.get("in_bytes", 0))
-        g_lease_out.labels(vip=vip, customer=customer, device=device).set(ctr.get("out_bytes", 0))
-        if lease.get("acquired_at"):
-            g_lease_acquired.labels(vip=vip, customer=customer).set(lease["acquired_at"])
+        in_bytes = ctr.get("in_bytes") or int(s["rad_bytes_in"])
+        out_bytes = ctr.get("out_bytes") or int(s["rad_bytes_out"])
+        g_lease_in.labels(vip=vip, customer=customer, device=device).set(in_bytes)
+        g_lease_out.labels(vip=vip, customer=customer, device=device).set(out_bytes)
+        acquired_epoch = s.get("acquired_epoch")
+        if acquired_epoch is not None:
+            g_lease_acquired.labels(vip=vip, customer=customer).set(int(acquired_epoch))
 
 
 def step_pools():
