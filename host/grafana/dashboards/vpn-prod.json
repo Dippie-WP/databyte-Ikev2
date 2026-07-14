@@ -18,8 +18,24 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Number of active IKE_SAs. Should be >= 1 when clients are connected. If 0 with expected clients: check strongswan_exporter connectivity (charon crashed or clients disconnected).",
       "fieldConfig": {
         "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -61,6 +77,22 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Active CHILD SAs (IPsec child associations). Typically 2x IKE_SA count (inbound + outbound per client). If 0 while IKE_SAs > 0: charon may have lost SA state.",
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "yellow",
+                  "text": "NONE"
+                }
+              },
+              "type": "value"
+            }
+          ]
+        }
+      },
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -91,8 +123,26 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "charon process uptime in seconds. Red if < 5min (just restarted). Yellow 5min-1h. Green > 1h. Restart without expected downtime = investigate (crash or manual restart?).",
       "fieldConfig": {
         "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 300
+              },
+              {
+                "color": "green",
+                "value": 3600
+              }
+            ]
+          },
           "unit": "s"
         }
       },
@@ -126,6 +176,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Number of loaded charon plugins. Stable count = healthy startup. Change = charon config changed or image rebuilt.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -156,6 +207,24 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Active SA leases from radacct (acctstoptime IS NULL). If 0 but clients are connected: radacct lagging or charon not writing. If > 0 with no active clients: stale sessions (clients dropped without Stop packet).",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -185,6 +254,24 @@
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
+      },
+      "description": "Online addresses in strongSwan rw-pool (swanctl --list-pools). If 0 but active leases > 0: pool state out of sync with radacct (run swanctl --list-pools on vps-01 to verify).",
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
       },
       "gridPos": {
         "h": 4,
@@ -229,6 +316,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Top 10 IKE SAs by bytes received (strongswan_sa_bytes_in_total). Bar gauge. Empty when no active SAs = normal when clients disconnected.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes"
@@ -261,6 +349,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Top 10 IKE SAs by bytes sent (strongswan_sa_bytes_out_total). Bar gauge. Empty when no active SAs = normal when clients disconnected.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes"
@@ -293,6 +382,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Active SA table showing bytes in per remote_id. Configure transformations: sort by Bytes In descending, rename metric.remote_id to Client.",
       "gridPos": {
         "h": 6,
         "w": 8,
@@ -312,6 +402,40 @@
         }
       ],
       "title": "Active SAs",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludes": [
+              {
+                "name": "__name__"
+              },
+              {
+                "name": "instance"
+              },
+              {
+                "name": "job"
+              }
+            ],
+            "renameByName": {
+              "Value": "Bytes In",
+              "metric.remote_id": "Client",
+              "metric.virtual_ip": "VIP"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "desc": true,
+                "property": "Bytes In"
+              }
+            ]
+          }
+        }
+      ],
       "type": "table"
     },
     {
@@ -332,6 +456,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Bytes/sec received per remote_id (rate of sa_bytes_in_total[5m]). Shows current throughput per client. Zero = client disconnected or no traffic.",
       "fieldConfig": {
         "defaults": {
           "unit": "Bps"
@@ -344,6 +469,21 @@
         "y": 13
       },
       "id": 21,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (remote_id) (rate(strongswan_sa_bytes_in_total{instance=\"vps-01\"}[5m]))",
@@ -359,6 +499,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Bytes/sec sent per remote_id (rate of sa_bytes_out_total[5m]). Shows current throughput per client. Zero = client disconnected or no traffic.",
       "fieldConfig": {
         "defaults": {
           "unit": "Bps"
@@ -371,6 +512,21 @@
         "y": 13
       },
       "id": 22,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "targets": [
         {
           "expr": "sum by (remote_id) (rate(strongswan_sa_bytes_out_total{instance=\"vps-01\"}[5m]))",
@@ -399,6 +555,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "CPU usage %% over time. Spike = process overload. Sustained high = investigate charon load (many SAs, crypto operations).",
       "fieldConfig": {
         "defaults": {
           "max": 100,
@@ -412,6 +569,21 @@
         "y": 22
       },
       "id": 31,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "targets": [
         {
           "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{instance=\"vps-01:9100\",mode=\"idle\"}[5m])) * 100)",
@@ -427,6 +599,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Memory used = MemTotal - MemAvailable (RSS). Growing trend = memory leak (restart charon if sustained growth > 80%%).",
       "fieldConfig": {
         "defaults": {
           "unit": "decmbytes"
@@ -439,6 +612,21 @@
         "y": 22
       },
       "id": 32,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "targets": [
         {
           "expr": "(node_memory_MemTotal_bytes{instance=\"vps-01:9100\"} - node_memory_MemAvailable_bytes{instance=\"vps-01:9100\"}) / 1024 / 1024",
@@ -454,6 +642,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Root filesystem usage %%. Sustained > 80%% = disk pressure (log rotation needed or backup filling disk).",
       "fieldConfig": {
         "defaults": {
           "max": 100,
@@ -467,6 +656,21 @@
         "y": 22
       },
       "id": 33,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
       "targets": [
         {
           "expr": "(1 - (node_filesystem_avail_bytes{instance=\"vps-01:9100\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=\"vps-01:9100\",mountpoint=\"/\"})) * 100",
@@ -495,6 +699,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Cumulative data used per customer (vpn_customer_data_used_bytes). Shows how much of their monthly quota each customer has consumed.",
       "fieldConfig": {
         "defaults": {
           "unit": "bytes"
@@ -527,6 +732,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
+      "description": "Customer status table: active flag, operator flag, tier name, over-quota flag. Useful for quick health check of all registered customers.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -566,7 +772,7 @@
         "type": "prometheus",
         "uid": "prometheus-default"
       },
-      "description": "Cumulative bytes received per CHILD_SA. Lines reset on IKE_SA rekey (~4 hours for iPhone, ~50 min for Windows). Tracks per-session usage only \u2014 historical data lost when SA terminates. Source: strongswan_exporter.py :9101.",
+      "description": "Cumulative bytes received per remote_id (strongswan_sa_bytes_in_total). Resets on IKE_SA rekey. For session-persistent byte accounting use panel 66 (radacct-based).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -625,7 +831,7 @@
         "type": "prometheus",
         "uid": "prometheus-default"
       },
-      "description": "Cumulative bytes sent per CHILD_SA. Lines reset on IKE_SA rekey. Source: strongswan_exporter.py :9101.",
+      "description": "Cumulative bytes sent per remote_id (strongswan_sa_bytes_out_total). Resets on IKE_SA rekey. For session-persistent byte accounting use panel 66 (radacct-based).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -900,11 +1106,24 @@
         "type": "prometheus",
         "uid": "prometheus-default"
       },
-      "description": "Distinct users with open RADIUS accounting sessions. More accurate than IKE_SA count (RADIUS survives IKE_SA rekeys).",
+      "description": "Distinct users with open RADIUS accounting sessions (acctstoptime IS NULL). More accurate than IKE_SA count because radacct survives IKE_SA rekey.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
           },
           "unit": "none"
         }
@@ -947,7 +1166,7 @@
         "type": "prometheus",
         "uid": "prometheus-default"
       },
-      "description": "RADIUS sessions over last 7 days by terminate cause. Lost-Service = link drop (high on satellite). User-Request = manual toggle. If Lost-Service dominates, consider bumping dpd_timeout past 240s.",
+      "description": "RADIUS sessions over 7 days by terminate cause. Lost-Service = link drop (satellite handover). User-Request = manual disconnect. If Lost-Service > 30%% of sessions: consider bumping dpd_timeout past 240s.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1052,7 +1271,7 @@
         "type": "prometheus",
         "uid": "prometheus-default"
       },
-      "description": "Cumulative bytes (in+out) per active RADIUS session. **Survives IKE_SA rekey** \u2014 radacct interim updates every 300s refresh this. Stronger than strongswan_sa_bytes_* which resets on rekey. Currently visible: Zun's iPhone + Windows (both reconnected during this session).",
+      "description": "Cumulative bytes (in+out) per active RADIUS session (acctstoptime IS NULL). Survives IKE_SA rekey because radacct interim updates every 300s. More accurate than strongswan_sa_bytes_* for per-session tracking.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1103,6 +1322,266 @@
       ],
       "title": "\ud83d\udcca Cumulative Data per User (this session, radacct)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "id": 70,
+      "panels": [],
+      "title": "\ud83d\udce1 Satellite & Session Analytics",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Customers currently over their data limit (over_quota=1). If > 0: those customers are throttled/blocked. Query: SELECT name, data_used_bytes, data_limit_bytes FROM customers WHERE over_quota=1 on MariaDB radius database.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "All OK"
+                },
+                "1": {
+                  "color": "red",
+                  "text": "OVER QUOTA"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 63
+      },
+      "id": 71,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "sum(vpn_customer_over_quota{instance=\"vps-01-quota\"} == 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "\ud83d\udea8 Customers Over Quota",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Total data used per tier (sum of all customers in that tier). tier_5gb = Siraaj, custom tiers = other customers. Useful for capacity planning: which tier consumes most bandwidth?",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 10,
+        "x": 4,
+        "y": 63
+      },
+      "id": 72,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "topk(10, sum by (tier) (vpn_customer_data_used_bytes{instance=\"vps-01-quota\"}))",
+          "legendFormat": "{{tier}}",
+          "refId": "A"
+        }
+      ],
+      "title": "\ud83d\udcca Data Used by Tier (cumulative)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "RADIUS sessions started per hour, last 24h, colored by terminate cause. Red = Lost-Service (satellite link drop). Blue = User-Request (manual). Orange = Unknown. Tracks satellite handover frequency. Data source: vpn_radacct_sessions_per_hour gauge (updated every 30s by quota-exporter).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Lost.Service"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "User.Request"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 63
+      },
+      "id": 73,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true
+        },
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "topk(15, vpn_radacct_sessions_per_hour{instance=\"vps-01-quota\"})",
+          "legendFormat": "{{hour_bin}} / {{cause}}",
+          "refId": "A"
+        }
+      ],
+      "title": "\ud83d\udcc8 Sessions per Hour by Outcome (24h, radacct)",
+      "type": "bargauge"
     }
   ],
   "refresh": "30s",
@@ -1128,11 +1607,10 @@
     ]
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-6h",
     "to": "now"
   },
   "timezone": "browser",
   "title": "VPN \u2014 Prod (vps-01)",
-  "uid": "vpn-prod",
-  "version": 5
+  "uid": "vpn-prod"
 }
