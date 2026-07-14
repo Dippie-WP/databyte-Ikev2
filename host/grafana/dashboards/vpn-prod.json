@@ -1,0 +1,713 @@
+{
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "panels": [],
+      "title": "\ud83d\udcca Overview",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "strongswan_ikesas_total{instance=\"vps-01\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active IKE SAs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "strongswan_childsas_total{instance=\"vps-01\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active CHILD SAs",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "strongswan_charon_uptime_seconds{instance=\"vps-01\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Charon Uptime",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 1
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(strongswan_loaded_plugins{instance=\"vps-01\"} == 1)",
+          "refId": "A"
+        }
+      ],
+      "title": "Loaded Plugins",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 1
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "vpn_active_lease_count{instance=\"vps-01-quota\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Leases",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 1
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "targets": [
+        {
+          "expr": "vpn_pool_online{instance=\"vps-01-quota\"}",
+          "refId": "A"
+        }
+      ],
+      "title": "Pool Online",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "id": 10,
+      "panels": [],
+      "title": "\ud83d\udc65 Per-User Traffic (Top Talkers)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 6
+      },
+      "id": 11,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showValue": "always"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, strongswan_sa_bytes_in_total{instance=\"vps-01\"})",
+          "legendFormat": "{{remote_id}} ({{virtual_ip}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Top by Bytes In (per SA)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 6
+      },
+      "id": 12,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showValue": "always"
+      },
+      "targets": [
+        {
+          "expr": "topk(10, strongswan_sa_bytes_out_total{instance=\"vps-01\"})",
+          "legendFormat": "{{remote_id}} ({{virtual_ip}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Top by Bytes Out (per SA)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 6
+      },
+      "id": 13,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "strongswan_sa_bytes_in_total{instance=\"vps-01\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Active SAs",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "id": 20,
+      "panels": [],
+      "title": "\ud83d\udcc8 Throughput Over Time",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "id": 21,
+      "targets": [
+        {
+          "expr": "sum by (remote_id) (rate(strongswan_sa_bytes_in_total{instance=\"vps-01\"}[5m]))",
+          "legendFormat": "{{remote_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Bytes/sec In (per user)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "id": 22,
+      "targets": [
+        {
+          "expr": "sum by (remote_id) (rate(strongswan_sa_bytes_out_total{instance=\"vps-01\"}[5m]))",
+          "legendFormat": "{{remote_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Bytes/sec Out (per user)",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 21
+      },
+      "id": 30,
+      "panels": [],
+      "title": "\ud83d\udda5\ufe0f Server Metrics (vps-01)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 22
+      },
+      "id": 31,
+      "targets": [
+        {
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{instance=\"vps-01:9100\",mode=\"idle\"}[5m])) * 100)",
+          "legendFormat": "{{instance}}",
+          "refId": "A"
+        }
+      ],
+      "title": "CPU Usage %",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 22
+      },
+      "id": 32,
+      "targets": [
+        {
+          "expr": "(node_memory_MemTotal_bytes{instance=\"vps-01:9100\"} - node_memory_MemAvailable_bytes{instance=\"vps-01:9100\"}) / 1024 / 1024",
+          "legendFormat": "Used",
+          "refId": "A"
+        }
+      ],
+      "title": "Memory Used (MB)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "unit": "percent"
+        }
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 22
+      },
+      "id": 33,
+      "targets": [
+        {
+          "expr": "(1 - (node_filesystem_avail_bytes{instance=\"vps-01:9100\",mountpoint=\"/\"} / node_filesystem_size_bytes{instance=\"vps-01:9100\",mountpoint=\"/\"})) * 100",
+          "legendFormat": "/",
+          "refId": "A"
+        }
+      ],
+      "title": "Disk Usage %",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "id": 40,
+      "panels": [],
+      "title": "\ud83d\udce6 Customer Quotas (vps-01 prod)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "id": 41,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showValue": "always"
+      },
+      "targets": [
+        {
+          "expr": "topk(20, vpn_customer_data_used_bytes{instance=\"vps-01-quota\"})",
+          "legendFormat": "{{customer_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Customer Data Used (Bytes)",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "id": 42,
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "expr": "vpn_customer_info{instance=\"vps-01-quota\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Customer Status",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 50,
+      "panels": [],
+      "title": "\ud83d\udcca Cumulative Data Usage per User (this session)",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Cumulative bytes received per CHILD_SA. Lines reset on IKE_SA rekey (~4 hours for iPhone, ~50 min for Windows). Tracks per-session usage only \u2014 historical data lost when SA terminates. Source: strongswan_exporter.py :9101.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 39
+      },
+      "id": 51,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "strongswan_sa_bytes_in_total{instance=\"vps-01\"}",
+          "instant": false,
+          "legendFormat": "{{remote_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Bytes In per User (cumulative)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Cumulative bytes sent per CHILD_SA. Lines reset on IKE_SA rekey. Source: strongswan_exporter.py :9101.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 39
+      },
+      "id": 52,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "strongswan_sa_bytes_out_total{instance=\"vps-01\"}",
+          "instant": false,
+          "legendFormat": "{{remote_id}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Bytes Out per User (cumulative)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "vpn",
+    "prod",
+    "vps-01",
+    "strongswan"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "Prometheus-vps01",
+          "value": "Prometheus-vps01"
+        },
+        "name": "datasource",
+        "query": "prometheus",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "VPN \u2014 Prod (vps-01)",
+  "uid": "vpn-prod",
+  "version": 4
+}
