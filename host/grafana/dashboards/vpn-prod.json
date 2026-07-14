@@ -678,6 +678,431 @@
       ],
       "title": "Bytes Out per User (cumulative)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 60,
+      "panels": [],
+      "title": "\ud83e\ude7a Exporter & RADIUS Health",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "1 if the quota-exporter last scrape succeeded, 0 if errored. If DOWN, run `journalctl -u quota-exporter -n 50` on vps-01.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 49
+      },
+      "id": 61,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "vpn_exporter_up{instance=\"vps-01-quota\"}",
+          "legendFormat": "Exporter Up",
+          "refId": "A"
+        }
+      ],
+      "title": "Quota Exporter Status",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Cumulative scrape errors since exporter start. Rising = something broke. Should be flat during normal operation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 49
+      },
+      "id": 62,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "vpn_exporter_scrape_errors_total{instance=\"vps-01-quota\"}",
+          "legendFormat": "Errors",
+          "refId": "A"
+        }
+      ],
+      "title": "Scrape Errors (cumulative)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Last scrape duration in seconds. 30s scrape interval \u2014 should be well under 1s normally.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "unit": "s"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 49
+      },
+      "id": 63,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "vpn_exporter_scrape_duration_seconds{instance=\"vps-01-quota\"}",
+          "legendFormat": "Seconds",
+          "refId": "A"
+        }
+      ],
+      "title": "Scrape Duration (last)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Distinct users with open RADIUS accounting sessions. More accurate than IKE_SA count (RADIUS survives IKE_SA rekeys).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "unit": "none"
+        }
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 49
+      },
+      "id": 64,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "count(count by (username) (vpn_radacct_active_session_bytes{instance=\"vps-01-quota\"}))",
+          "legendFormat": "Users",
+          "refId": "A"
+        }
+      ],
+      "title": "Active Customers (radacct)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "RADIUS sessions over last 7 days by terminate cause. Lost-Service = link drop (high on satellite). User-Request = manual toggle. If Lost-Service dominates, consider bumping dpd_timeout past 240s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "displayMode": "gradient",
+            "orientation": "horizontal"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 25
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Lost-Service"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "User-Request"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 49
+      },
+      "id": 65,
+      "options": {
+        "displayMode": "gradient",
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true
+        },
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "topk(10, vpn_radacct_sessions_total_7d{instance=\"vps-01-quota\"})",
+          "legendFormat": "{{cause}}",
+          "refId": "A"
+        }
+      ],
+      "title": "\ud83d\udea8 7-day Session Outcomes",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus-default"
+      },
+      "description": "Cumulative bytes (in+out) per active RADIUS session. **Survives IKE_SA rekey** \u2014 radacct interim updates every 300s refresh this. Stronger than strongswan_sa_bytes_* which resets on rekey. Currently visible: Zun's iPhone + Windows (both reconnected during this session).",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 16,
+        "x": 0,
+        "y": 53
+      },
+      "id": 66,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-default"
+          },
+          "expr": "vpn_radacct_active_session_bytes{instance=\"vps-01-quota\"}",
+          "legendFormat": "{{username}}",
+          "refId": "A"
+        }
+      ],
+      "title": "\ud83d\udcca Cumulative Data per User (this session, radacct)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -709,5 +1134,5 @@
   "timezone": "browser",
   "title": "VPN \u2014 Prod (vps-01)",
   "uid": "vpn-prod",
-  "version": 4
+  "version": 5
 }
