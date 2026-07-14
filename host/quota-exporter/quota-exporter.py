@@ -205,6 +205,12 @@ g_radacct_sessions_7d = Gauge(
     "RADIUS sessions in last 7 days, by terminate cause",
     ["cause"],
 )
+g_radacct_sessions_per_hour = Gauge(
+    "vpn_radacct_sessions_per_hour",
+    "RADIUS sessions started per hour, last 24h, by terminate cause "
+    "(for satellite link-flap trend analysis)",
+    ["hour_bin", "cause"],
+)
 c_scrape_errors = Counter(
     "vpn_exporter_scrape_errors_total",
     "Number of scrape failures (DB or iptables)",
@@ -497,6 +503,7 @@ def _reset_gauges():
         g_pool_size, g_pool_online,
         g_alerts_total, g_audit_total,
         g_radacct_active_bytes, g_radacct_active_duration, g_radacct_sessions_7d,
+        g_radacct_sessions_per_hour,
     ]:
         try:
             gauge.clear()
@@ -699,6 +706,36 @@ def step_radacct_sessions_7d():
         g_radacct_sessions_7d.labels(cause=r["cause"]).set(r["n"])
 
 
+def step_radacct_sessions_per_hour():
+    """RADIUS step (added 2026-07-14, second revision): sessions started
+    per hour, last 24h, by terminate cause. Lets dashboard show a trend
+    instead of just a snapshot.
+
+    Cardinality: 24 hours x ~3 causes = ~72 series max. Safe.
+
+    Schema note: acctstarttime is DATETIME (not INT), so WHERE clause
+    uses NOW() - INTERVAL 24 HOUR. Tested live 2026-07-14 07:09 UTC,
+    returns 30 rows for last 24h.
+    """
+    rows = db_query_mariadb("""
+        SELECT hour_bin, cause, n FROM (
+          SELECT
+            DATE_FORMAT(acctstarttime, '%%Y-%%m-%%d %%H:00:00') AS hour_bin,
+            COALESCE(NULLIF(acctterminatecause, ''), 'Unknown') AS cause,
+            COUNT(*) AS n
+          FROM radacct
+          WHERE acctstarttime > NOW() - INTERVAL 24 HOUR
+          GROUP BY DATE_FORMAT(acctstarttime, '%%Y-%%m-%%d %%H:00:00'), acctterminatecause
+        ) AS t
+        ORDER BY hour_bin DESC, cause
+    """)
+    for r in rows:
+        g_radacct_sessions_per_hour.labels(
+            hour_bin=r["hour_bin"],
+            cause=r["cause"],
+        ).set(r["n"])
+
+
 # ---------- main scrape ----------
 
 def scrape():
@@ -727,6 +764,7 @@ def scrape():
         step_audit_log,              # MariaDB
         step_radacct_active,         # MariaDB (RADIUS)
         step_radacct_sessions_7d,    # MariaDB (RADIUS)
+        step_radacct_sessions_per_hour,  # MariaDB (RADIUS, hourly trend)
     ):
         try:
             step_fn()
