@@ -1,0 +1,510 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 1600" width="2400" height="1600">
+  <defs>
+    <pattern id="grid5" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#f0f0f0" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arrR5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#CC0000"/>
+    </marker>
+    <marker id="arrO5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#FF8800"/>
+    </marker>
+    <marker id="arrGrn5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#008000"/>
+    </marker>
+    <marker id="arrBl5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0066CC"/>
+    </marker>
+    <marker id="arrPur5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#993399"/>
+    </marker>
+    <marker id="arrDark5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#333333"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="2400" height="1600" fill="white"/>
+  <rect width="2400" height="1600" fill="none" stroke="#1a1a1a" stroke-width="4"/>
+  <!-- Drawing border -->
+  <rect x="30" y="30" width="2340" height="1540" fill="none" stroke="#1a1a1a" stroke-width="1.5"/>
+  <!-- Grid area -->
+  <rect x="50" y="100" width="2300" height="1260" fill="url(#grid5)"/>
+
+  <!-- ===================== HEADER ===================== -->
+  <rect x="50" y="100" width="1750" height="70" fill="#1f3a5f"/>
+  <text x="60" y="137" font-family="Arial" font-size="26" font-weight="bold" fill="white">
+    UNIFIED ELECTRICAL + SIGNAL SINGLE-LINE DIAGRAM
+  </text>
+  <text x="60" y="158" font-family="Arial" font-size="13" fill="#aaccff">
+    Domestic Water Replenishment Controller — ESP32-C6 Based | DAT-WATER-PLC-001 | Rev 0.3 | 2026-07-18
+  </text>
+  <!-- DOC / REV block top-right -->
+  <rect x="1820" y="100" width="530" height="70" fill="#f8f8f8" stroke="#1a1a1a" stroke-width="1"/>
+  <text x="1830" y="125" font-family="Arial" font-size="11" fill="#333">Drawing D-05</text>
+  <text x="1830" y="143" font-family="Arial" font-size="11" fill="#333">Rev 0.3</text>
+  <text x="1870" y="125" font-family="Arial" font-size="11" fill="#333">Sheet 1 of 1</text>
+  <text x="1870" y="143" font-family="Arial" font-size="11" fill="#333">2026-07-18</text>
+  <text x="2000" y="125" font-family="Arial" font-size="11" fill="#333">Scale 1:10</text>
+  <text x="2000" y="143" font-family="Arial" font-size="11" fill="#333">Misha</text>
+
+  <!-- ===================== COLUMN HEADERS ===================== -->
+  <!-- AC Power column -->
+  <rect x="50" y="180" width="700" height="38" fill="#CC0000"/>
+  <text x="400" y="205" text-anchor="middle" font-family="Arial" font-size="15" font-weight="bold" fill="white">
+    AC POWER (220V AC / 12V DC)
+  </text>
+  <!-- Signal column -->
+  <rect x="770" y="180" width="900" height="38" fill="#0066CC"/>
+  <text x="1220" y="205" text-anchor="middle" font-family="Arial" font-size="15" font-weight="bold" fill="white">
+    SIGNAL + CONTROL (ESP32-C6)
+  </text>
+  <!-- Network column -->
+  <rect x="1690" y="180" width="660" height="38" fill="#1f5f1f"/>
+  <text x="2020" y="205" text-anchor="middle" font-family="Arial" font-size="15" font-weight="bold" fill="white">
+    NETWORK + HA INTEGRATION
+  </text>
+
+  <!-- Divider lines -->
+  <line x1="750" y1="180" x2="750" y2="1360" stroke="#888" stroke-width="1" stroke-dasharray="8,4"/>
+  <line x1="1690" y1="180" x2="1690" y2="1360" stroke="#888" stroke-width="1" stroke-dasharray="8,4"/>
+
+  <!-- ===================== AC POWER SECTION ===================== -->
+
+  <!-- === MAINS INTAKE === -->
+  <text x="70" y="240" font-family="Arial" font-size="11" font-weight="bold" fill="#CC0000">AC POWER SUPPLY</text>
+  <!-- Mains symbol (IEC 60617 circle with L/N) -->
+  <circle cx="100" cy="290" r="28" fill="none" stroke="#CC0000" stroke-width="2.5"/>
+  <text x="100" y="286" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold" fill="#CC0000">L</text>
+  <text x="100" y="300" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold" fill="#CC0000">N</text>
+  <!-- 50Hz label -->
+  <text x="100" y="268" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">50Hz</text>
+  <!-- Mains labels -->
+  <text x="100" y="332" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">220V AC</text>
+  <text x="100" y="344" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">Mains</text>
+  <!-- Wire L -->
+  <line x1="100" y1="318" x2="100" y2="360" stroke="#CC0000" stroke-width="2.5"/>
+  <!-- Wire N -->
+  <line x1="128" y1="318" x2="128" y2="360" stroke="#0044AA" stroke-width="2.5"/>
+  <!-- Earth -->
+  <line x1="114" y1="318" x2="114" y2="360" stroke="#DAA520" stroke-width="2"/>
+  <text x="80" y="335" font-family="Arial" font-size="10" fill="#DAA520">PE</text>
+
+  <!-- === POOL SUB-DB === -->
+  <rect x="155" y="265" width="140" height="90" fill="#f4f4f4" stroke="#1a1a1a" stroke-width="2" rx="3"/>
+  <text x="225" y="285" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">Pool Sub-DB</text>
+  <text x="225" y="300" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">Existing</text>
+  <text x="225" y="315" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">60A main</text>
+  <!-- Wire from mains to DB -->
+  <line x1="128" y1="290" x2="155" y2="290" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <line x1="128" y1="318" x2="155" y2="318" stroke="#0044AA" stroke-width="2.5"/>
+  <line x1="114" y1="318" x2="155" y2="318" stroke="#DAA520" stroke-width="1.5"/>
+  <!-- Feed wires -->
+  <line x1="295" y1="290" x2="320" y2="290" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <line x1="295" y1="318" x2="320" y2="318" stroke="#0044AA" stroke-width="2.5"/>
+
+  <!-- === MCB 10A (MCB-01) — dedicated feed to PSU === -->
+  <rect x="320" y="255" width="40" height="70" fill="#ffcc00" stroke="#cc9900" stroke-width="2" rx="2"/>
+  <line x1="340" y1="260" x2="340" y2="268" stroke="#1a1a1a" stroke-width="1.5"/>
+  <text x="340" y="286" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold">10A</text>
+  <text x="340" y="300" text-anchor="middle" font-family="Arial" font-size="8">C-curve</text>
+  <text x="340" y="312" text-anchor="middle" font-family="Arial" font-size="8">6kA</text>
+  <text x="300" y="248" text-anchor="middle" font-family="Arial" font-size="8" fill="#CC0000">MCB-01</text>
+  <!-- Wire to 10A MCB -->
+  <line x1="360" y1="290" x2="370" y2="290" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <line x1="360" y1="318" x2="370" y2="318" stroke="#0044AA" stroke-width="2.5"/>
+  <!-- Feed from MCB-01 out -->
+  <line x1="360" y1="290" x2="420" y2="290" stroke="#CC0000" stroke-width="2.5"/>
+  <line x1="360" y1="318" x2="420" y2="318" stroke="#0044AA" stroke-width="2.5"/>
+  <!-- Down to Mornsun -->
+  <line x1="420" y1="290" x2="420" y2="360" stroke="#CC0000" stroke-width="2.5"/>
+  <line x1="420" y1="318" x2="420" y2="360" stroke="#0044AA" stroke-width="2.5"/>
+  <!-- Wire label -->
+  <text x="430" y="300" font-family="Arial" font-size="9" fill="#CC0000">4mm²</text>
+  <text x="430" y="312" font-family="Arial" font-size="8" fill="#666">TPS</text>
+
+  <!-- === MORNSUN LM50 PSU (E-02) === -->
+  <rect x="320" y="370" width="200" height="95" fill="#1f3a5f" stroke="#0d1f30" stroke-width="2" rx="4"/>
+  <text x="420" y="393" text-anchor="middle" font-family="Arial" font-size="13" font-weight="bold" fill="white">MORNSUN LM50-23B12R2S</text>
+  <text x="420" y="412" text-anchor="middle" font-family="Arial" font-size="10" fill="#aaccff">50W | 12V/4.2A | 85-305VAC</text>
+  <text x="420" y="430" text-anchor="middle" font-family="Arial" font-size="10" fill="#aaccff">4kVAC isolation | OCP/OVP/SCP</text>
+  <text x="420" y="448" text-anchor="middle" font-family="Arial" font-size="9" fill="#88aacc">E-02 | Communica | R265</text>
+  <!-- 12V output busbar -->
+  <line x1="520" y1="420" x2="600" y2="420" stroke="#CC0000" stroke-width="3"/>
+  <text x="560" y="415" text-anchor="middle" font-family="Arial" font-size="9" fill="#CC0000" font-weight="bold">+12V BUSBAR</text>
+
+  <!-- === 12V DISTRIBUTION BUS === -->
+  <rect x="50" y="475" width="700" height="55" fill="#fff0f0" stroke="#CC0000" stroke-width="1.5" rx="3"/>
+  <text x="60" y="495" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">12V DC POWER BUS</text>
+  <text x="60" y="512" font-family="Arial" font-size="8" fill="#666">From Mornsun LM50-23B12R2S | Powers: BDD pump, HL-52S relay coil, A02YYUW, YF-S201</text>
+  <!-- Bus connections from Mornsun out -->
+  <line x1="520" y1="420" x2="700" y2="420" stroke="#CC0000" stroke-width="3"/>
+  <line x1="700" y1="420" x2="700" y2="475" stroke="#CC0000" stroke-width="3"/>
+  <line x1="700" y1="530" x2="700" y2="700" stroke="#CC0000" stroke-width="3"/>
+  <!-- Bus bar -->
+  <line x1="50" y1="502" x2="750" y2="502" stroke="#CC0000" stroke-width="3"/>
+  <text x="750" y="500" font-family="Arial" font-size="9" fill="#CC0000">+12V</text>
+
+  <!-- GND bus -->
+  <line x1="50" y1="530" x2="750" y2="530" stroke="#333" stroke-width="2"/>
+  <text x="750" y="528" font-family="Arial" font-size="9" fill="#333">GND</text>
+
+  <!-- ===== 12V LOADS ===== -->
+
+  <!-- === MCB 2A DC (MCB-04) — BDD pump rail CRITICAL === -->
+  <rect x="60" y="700" width="140" height="55" fill="#fff0f0" stroke="#CC0000" stroke-width="2" rx="3"/>
+  <text x="130" y="718" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">MCB-04: 2A DC</text>
+  <text x="130" y="732" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">DC-rated C-curve 6kA</text>
+  <text x="130" y="746" text-anchor="middle" font-family="Arial" font-size="8" fill="#CC0000">⚠ CRITICAL: DC arcs</text>
+  <!-- Wire from bus to MCB-04 -->
+  <line x1="200" y1="502" x2="200" y2="700" stroke="#CC0000" stroke-width="3"/>
+  <line x1="200" y1="700" x2="220" y2="700" stroke="#CC0000" stroke-width="3"/>
+  <line x1="200" y1="530" x2="220" y2="530" stroke="#333" stroke-width="2"/>
+  <text x="210" y="690" font-family="Arial" font-size="9" fill="#CC0000">+12V</text>
+
+  <!-- === BDD PUMP (P-02) === -->
+  <rect x="60" y="770" width="180" height="95" fill="#CC6600" stroke="#993300" stroke-width="2" rx="4"/>
+  <text x="150" y="792" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold" fill="white">BDD 12V DC PUMP</text>
+  <text x="150" y="810" text-anchor="middle" font-family="Arial" font-size="9" fill="#ffe0b0">BK-12V | 800 L/h | 5m head</text>
+  <text x="150" y="826" text-anchor="middle" font-family="Arial" font-size="9" fill="#ffe0b0">12V/19W/1A | IP67 | Centrifugal</text>
+  <text x="150" y="842" text-anchor="middle" font-family="Arial" font-size="9" fill="#ffe0b0">External, gravity-fed from JoJo tank</text>
+  <text x="150" y="858" text-anchor="middle" font-family="Arial" font-size="8" fill="#ffddbb">P-02 | Communica | R250</text>
+  <!-- Wire from MCB-04 -->
+  <line x1="200" y1="727" x2="230" y2="727" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <text x="215" y="722" font-family="Arial" font-size="9" fill="#CC0000">+12V</text>
+  <!-- GND from bus -->
+  <line x1="180" y1="530" x2="220" y2="530" stroke="#333" stroke-width="2"/>
+  <line x1="220" y1="530" x2="220" y2="775" stroke="#333" stroke-width="2"/>
+  <line x1="220" y1="775" x2="240" y2="775" stroke="#333" stroke-width="2"/>
+
+  <!-- === AO3400A MOSFET (E-07) — BDD pump switch === -->
+  <rect x="270" y="760" width="140" height="105" fill="#ddd" stroke="#888" stroke-width="2" rx="3"/>
+  <text x="340" y="782" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold">AO3400A MOSFET</text>
+  <text x="340" y="798" text-anchor="middle" font-family="Arial" font-size="9">N-Channel | Vdss 30V | Id 5.8A</text>
+  <text x="340" y="814" text-anchor="middle" font-family="Arial" font-size="9">Vgs(th) 0.6-1.4V (logic-level)</text>
+  <text x="340" y="830" text-anchor="middle" font-family="Arial" font-size="9">SOT-23 | E-07 | Communica R5</text>
+  <!-- Wire from pump to MOSFET (drain) -->
+  <line x1="240" y1="790" x2="270" y2="790" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <text x="255" y="785" font-family="Arial" font-size="9" fill="#CC0000">Drain</text>
+  <!-- Source to GND -->
+  <line x1="340" y1="865" x2="340" y2="900" stroke="#333" stroke-width="2.5"/>
+  <line x1="340" y1="900" x2="380" y2="900" stroke="#333" stroke-width="2.5"/>
+  <line x1="380" y1="900" x2="380" y2="530" stroke="#333" stroke-width="2"/>
+  <text x="345" y="875" font-family="Arial" font-size="9" fill="#333">Source → GND</text>
+
+  <!-- === WELL PUMP RELAY (HL-52S) (E-06) === -->
+  <rect x="60" y="920" width="180" height="95" fill="#ddd" stroke="#888" stroke-width="2" rx="3"/>
+  <text x="150" y="942" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold">HL-52S RELAY</text>
+  <text x="150" y="958" text-anchor="middle" font-family="Arial" font-size="9">5V coil | 10A contacts 250VAC</text>
+  <text x="150" y="974" text-anchor="middle" font-family="Arial" font-size="9">Opto-isolated | E-06</text>
+  <text x="150" y="990" text-anchor="middle" font-family="Arial" font-size="9" fill="#666">220V AC → Well Pump (EXISTING)</text>
+  <!-- Wire from 12V bus -->
+  <line x1="200" y1="502" x2="200" y2="920" stroke="#CC0000" stroke-width="3"/>
+  <line x1="200" y1="920" x2="220" y2="920" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <text x="210" y="915" font-family="Arial" font-size="9" fill="#CC0000">+12V coil</text>
+  <!-- GND from bus -->
+  <line x1="220" y1="530" x2="220" y2="960" stroke="#333" stroke-width="2"/>
+  <line x1="220" y1="960" x2="240" y2="960" stroke="#333" stroke-width="2"/>
+  <!-- Contact output to well pump -->
+  <line x1="240" y1="940" x2="290" y2="940" stroke="#CC0000" stroke-width="2.5" marker-end="url(#arrR5)"/>
+  <text x="265" y="935" font-family="Arial" font-size="9" fill="#CC0000">220V AC</text>
+  <text x="265" y="948" font-family="Arial" font-size="8" fill="#666">to well pump</text>
+
+  <!-- === LM2596 12V→5V BUCK (E-03) === -->
+  <rect x="430" y="475" width="180" height="80" fill="#FF8800" stroke="#cc5500" stroke-width="2" rx="4"/>
+  <text x="520" y="498" text-anchor="middle" font-family="Arial" font-size="12" font-weight="bold" fill="white">LM2596S BUCK</text>
+  <text x="520" y="518" text-anchor="middle" font-family="Arial" font-size="10" fill="#ffe0b0">12V → 5V DC-DC | 3A peak</text>
+  <text x="520" y="536" text-anchor="middle" font-family="Arial" font-size="10" fill="#ffe0b0">E-03 | SET TO 5.0V ±0.1V</text>
+  <text x="520" y="550" text-anchor="middle" font-family="Arial" font-size="9" fill="#ffcc88">ZUN HAS | Verify before use</text>
+  <!-- 5V output -->
+  <line x1="610" y1="515" x2="700" y2="515" stroke="#FF8800" stroke-width="3"/>
+  <text x="655" y="510" font-family="Arial" font-size="9" fill="#FF8800" font-weight="bold">+5V RAIL</text>
+  <!-- 12V in -->
+  <line x1="430" y1="515" x2="370" y2="515" stroke="#CC0000" stroke-width="2.5"/>
+  <line x1="370" y1="515" x2="370" y2="475" stroke="#CC0000" stroke-width="2.5"/>
+  <line x1="370" y1="475" x2="420" y2="475" stroke="#CC0000" stroke-width="2.5"/>
+  <!-- GND -->
+  <line x1="520" y1="555" x2="520" y2="700" stroke="#333" stroke-width="2"/>
+  <line x1="520" y1="700" x2="540" y2="700" stroke="#333" stroke-width="2"/>
+  <line x1="540" y1="700" x2="540" y2="530" stroke="#333" stroke-width="2"/>
+
+  <!-- 5V Bus section label -->
+  <rect x="50" y="610" width="700" height="50" fill="#fff8f0" stroke="#FF8800" stroke-width="1.5" rx="3"/>
+  <text x="60" y="630" font-family="Arial" font-size="10" font-weight="bold" fill="#FF8800">+5V POWER BUS</text>
+  <text x="60" y="647" font-family="Arial" font-size="8" fill="#666">From LM2596 buck | Powers: ESP32-C6, WS2812B, aviation LEDs, HL-52S coil</text>
+  <line x1="50" y1="637" x2="750" y2="637" stroke="#FF8800" stroke-width="3"/>
+  <line x1="50" y1="660" x2="750" y2="660" stroke="#333" stroke-width="2"/>
+  <text x="750" y="655" font-family="Arial" font-size="9" fill="#333">GND</text>
+
+  <!-- ===================== ESP32-C6 SECTION (SIGNAL) ===================== -->
+
+  <!-- === ESP32-C6 DEVKITC-1 === -->
+  <rect x="800" y="230" width="380" height="190" fill="#0d6b1f" stroke="#0a4d15" stroke-width="2.5" rx="6"/>
+  <text x="990" y="258" text-anchor="middle" font-family="Arial" font-size="18" font-weight="bold" fill="white">ESP32-C6 DevKitC-1</text>
+  <text x="990" y="280" text-anchor="middle" font-family="Arial" font-size="12" fill="#aaffaa">N16R8 | 8MB Flash | WiFi 6 | BLE 5 | 160MHz RISC-V</text>
+  <text x="990" y="300" text-anchor="middle" font-family="Arial" font-size="10" fill="#88aa88">USB-C programming | OTA enabled (port 3232)</text>
+  <!-- Power in -->
+  <line x1="800" y1="340" x2="700" y2="340" stroke="#FF8800" stroke-width="2.5"/>
+  <line x1="700" y1="340" x2="700" y2="515" stroke="#FF8800" stroke-width="2.5"/>
+  <text x="750" y="335" font-family="Arial" font-size="9" fill="#FF8800">+5V</text>
+  <!-- GND -->
+  <line x1="800" y1="370" x2="700" y2="370" stroke="#333" stroke-width="2"/>
+  <line x1="700" y1="370" x2="700" y2="660" stroke="#333" stroke-width="2"/>
+  <text x="750" y="375" font-family="Arial" font-size="9" fill="#333">GND</text>
+
+  <!-- === GPIO PIN BLOCKS === -->
+  <!-- POWER RAILS label -->
+  <rect x="800" y="428" width="380" height="30" fill="#333"/>
+  <text x="990" y="449" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold" fill="white">POWER RAILS: +5V (from LM2596) | +3.3V (on-board LDO) | GND</text>
+
+  <!-- INPUTS column -->
+  <rect x="800" y="465" width="180" height="270" fill="#f0fff0" stroke="#1f5f1f" stroke-width="1.5" rx="4"/>
+  <text x="990" y="485" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold" fill="#1f5f1f">DIGITAL INPUTS</text>
+
+  <g font-family="Arial" font-size="9">
+    <!-- GPIO2: Cistern float -->
+    <line x1="800" y1="500" x2="850" y2="500" stroke="#0066CC" stroke-width="1.5"/>
+    <rect x="850" y="488" width="130" height="24" fill="#ccffcc" stroke="#006600" stroke-width="1" rx="2"/>
+    <text x="915" y="505" text-anchor="middle">GPIO2: Cistern Float</text>
+    <text x="915" y="518" text-anchor="middle" font-size="7" fill="#666">Reed switch | 10k pull-up</text>
+    <line x1="980" y1="500" x2="1000" y2="500" stroke="#0066CC" stroke-width="1.5" marker-end="url(#arrBl5)"/>
+
+    <!-- GPIO3: YF-S201 flow -->
+    <line x1="800" y1="530" x2="850" y2="530" stroke="#0066CC" stroke-width="1.5"/>
+    <rect x="850" y="518" width="130" height="24" fill="#ccffcc" stroke="#006600" stroke-width="1" rx="2"/>
+    <text x="915" y="535" text-anchor="middle">GPIO3: YF-S201 Flow</text>
+    <text x="915" y="548" text-anchor="middle" font-size="7" fill="#666">Pulse interrupt | F=7.5×Q Hz</text>
+    <line x1="980" y1="530" x2="1000" y2="530" stroke="#0066CC" stroke-width="1.5" marker-end="url(#arrBl5)"/>
+
+    <!-- GPIO4: Mode switch -->
+    <line x1="800" y1="560" x2="850" y2="560" stroke="#0066CC" stroke-width="1.5"/>
+    <rect x="850" y="548" width="130" height="24" fill="#ccffcc" stroke="#006600" stroke-width="1" rx="2"/>
+    <text x="915" y="565" text-anchor="middle">GPIO4: Mode Toggle</text>
+    <text x="915" y="578" text-anchor="middle" font-size="7" fill="#666">3-pos OFF/AUTO/MAN | 10k pull-up</text>
+    <line x1="980" y1="560" x2="1000" y2="560" stroke="#0066CC" stroke-width="1.5" marker-end="url(#arrBl5)"/>
+
+    <!-- GPIO5: Manual button -->
+    <line x1="800" y1="590" x2="850" y2="590" stroke="#0066CC" stroke-width="1.5"/>
+    <rect x="850" y="578" width="130" height="24" fill="#ccffcc" stroke="#006600" stroke-width="1" rx="2"/>
+    <text x="915" y="595" text-anchor="middle">GPIO5: Manual Button</text>
+    <text x="915" y="608" text-anchor="middle" font-size="7" fill="#666">Momentary NO | 10k pull-up</text>
+    <line x1="980" y1="590" x2="1000" y2="590" stroke="#0066CC" stroke-width="1.5" marker-end="url(#arrBl5)"/>
+
+    <!-- GPIO6: I2C SDA -->
+    <line x1="800" y1="620" x2="850" y2="620" stroke="#993399" stroke-width="1.5"/>
+    <rect x="850" y="608" width="130" height="24" fill="#f3e8ff" stroke="#993399" stroke-width="1" rx="2"/>
+    <text x="915" y="625" text-anchor="middle">GPIO6: I²C SDA</text>
+    <text x="915" y="638" text-anchor="middle" font-size="7" fill="#666">OLED SSD1306 + DS3231 RTC</text>
+    <line x1="980" y1="620" x2="1000" y2="620" stroke="#993399" stroke-width="1.5" marker-end="url(#arrPur5)"/>
+
+    <!-- GPIO7: I2C SCL -->
+    <line x1="800" y1="650" x2="850" y2="650" stroke="#993399" stroke-width="1.5"/>
+    <rect x="850" y="638" width="130" height="24" fill="#f3e8ff" stroke="#993399" stroke-width="1" rx="2"/>
+    <text x="915" y="655" text-anchor="middle">GPIO7: I²C SCL</text>
+    <text x="915" y="668" text-anchor="middle" font-size="7" fill="#666">4.7kΩ pull-ups | 100kHz bus</text>
+    <line x1="980" y1="650" x2="1000" y2="650" stroke="#993399" stroke-width="1.5" marker-end="url(#arrPur5)"/>
+
+    <!-- GPIO20/21: UART2 -->
+    <line x1="800" y1="680" x2="850" y2="680" stroke="#f4a020" stroke-width="1.5"/>
+    <rect x="850" y="668" width="130" height="24" fill="#fffbe6" stroke="#f4a020" stroke-width="1" rx="2"/>
+    <text x="915" y="685" text-anchor="middle">GPIO20/21: UART2</text>
+    <text x="915" y="698" text-anchor="middle" font-size="7" fill="#666">A02YYUW | 9600 baud</text>
+    <line x1="980" y1="680" x2="1000" y2="680" stroke="#f4a020" stroke-width="1.5" marker-end="url(#arrGrn5)"/>
+  </g>
+
+  <!-- OUTPUTS column -->
+  <rect x="1000" y="465" width="180" height="270" fill="#fff0f0" stroke="#CC0000" stroke-width="1.5" rx="4"/>
+  <text x="1090" y="485" text-anchor="middle" font-family="Arial" font-size="11" font-weight="bold" fill="#CC0000">DIGITAL OUTPUTS</text>
+
+  <g font-family="Arial" font-size="9">
+    <!-- GPIO15: BDD pump MOSFET -->
+    <line x1="1180" y1="500" x2="1230" y2="500" stroke="#CC6600" stroke-width="2"/>
+    <rect x="1000" y="488" width="180" height="24" fill="#ffe0b0" stroke="#CC6600" stroke-width="1" rx="2"/>
+    <text x="1090" y="505" text-anchor="middle">GPIO15: BDD Pump (AO3400A)</text>
+    <line x1="1000" y1="500" x2="970" y2="500" stroke="#CC6600" stroke-width="2" marker-end="url(#arrO5)"/>
+
+    <!-- GPIO16: WS2812B toilet -->
+    <line x1="1180" y1="530" x2="1230" y2="530" stroke="#993399" stroke-width="2"/>
+    <rect x="1000" y="518" width="180" height="24" fill="#f3e8ff" stroke="#993399" stroke-width="1" rx="2"/>
+    <text x="1090" y="535" text-anchor="middle">GPIO16: WS2812B Toilet RGB</text>
+    <line x1="1000" y1="530" x2="970" y2="530" stroke="#993399" stroke-width="2" marker-end="url(#arrPur5)"/>
+
+    <!-- GPIO18: Well pump relay -->
+    <line x1="1180" y1="560" x2="1230" y2="560" stroke="#888" stroke-width="2"/>
+    <rect x="1000" y="548" width="180" height="24" fill="#eee" stroke="#888" stroke-width="1" rx="2"/>
+    <text x="1090" y="565" text-anchor="middle">GPIO18: Well Pump Relay (HL-52S)</text>
+    <line x1="1000" y1="560" x2="970" y2="560" stroke="#888" stroke-width="2" marker-end="url(#arrDark5)"/>
+
+    <!-- GPIO10-13: Aviation LEDs PWM -->
+    <rect x="1000" y="578" width="180" height="80" fill="#fff0f0" stroke="#CC0000" stroke-width="1" rx="2"/>
+    <text x="1090" y="595" text-anchor="middle" font-family="Arial" font-size="9">GPIO10-13: Aviation LEDs (LEDC)</text>
+    <text x="1090" y="612" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">GPIO10 Red (220Ω) | GPIO11 White (120Ω)</text>
+    <text x="1090" y="628" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">GPIO12 Blue (120Ω) | GPIO13 Orange (220Ω)</text>
+    <text x="1090" y="644" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">1kHz PWM | 15mA target | from +5V rail</text>
+    <!-- Four LED wires -->
+    <line x1="1180" y1="595" x2="1230" y2="595" stroke="#CC0000" stroke-width="1.5"/>
+    <line x1="1180" y1="612" x2="1230" y2="612" stroke="#fff" stroke-width="1.5"/>
+    <line x1="1180" y1="629" x2="1230" y2="629" stroke="#0044CC" stroke-width="1.5"/>
+    <line x1="1180" y1="646" x2="1230" y2="646" stroke="#FF8800" stroke-width="1.5"/>
+    <line x1="1000" y1="595" x2="970" y2="595" stroke="#CC0000" stroke-width="1.5" marker-end="url(#arrR5)"/>
+    <line x1="1000" y1="612" x2="970" y2="612" stroke="#fff" stroke-width="1.5" marker-end="url(#arrR5)"/>
+    <line x1="1000" y1="629" x2="970" y2="629" stroke="#0044CC" stroke-width="1.5" marker-end="url(#arrBl5)"/>
+    <line x1="1000" y1="646" x2="970" y2="646" stroke="#FF8800" stroke-width="1.5" marker-end="url(#arrO5)"/>
+  </g>
+
+  <!-- ===================== NETWORK + HA SECTION ===================== -->
+
+  <!-- WiFi icon -->
+  <g transform="translate(1740, 240)">
+    <circle cx="30" cy="30" r="28" fill="none" stroke="#1f5f1f" stroke-width="2"/>
+    <text x="30" y="27" text-anchor="middle" font-family="Arial" font-size="16">📶</text>
+    <text x="30" y="42" text-anchor="middle" font-family="Arial" font-size="8" fill="#1f5f1f">WiFi 6</text>
+  </g>
+  <!-- WiFi label -->
+  <text x="1800" y="258" font-family="Arial" font-size="10" fill="#1f5f1f">802.11ax</text>
+  <text x="1800" y="272" font-family="Arial" font-size="9" fill="#666">Home WiFi</text>
+  <!-- WiFi connection -->
+  <line x1="1180" y1="320" x2="1740" y2="270" stroke="#1f5f1f" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <text x="1450" y="295" font-family="Arial" font-size="9" fill="#1f5f1f">MQTT/API</text>
+
+  <!-- MQTT / Home Assistant -->
+  <rect x="1740" y="300" width="240" height="100" fill="#1f5f1f" stroke="#0a4d15" stroke-width="2" rx="5"/>
+  <text x="1860" y="325" text-anchor="middle" font-family="Arial" font-size="14" font-weight="bold" fill="white">Home Assistant</text>
+  <text x="1860" y="345" text-anchor="middle" font-family="Arial" font-size="10" fill="#aaffaa">MQTT Discovery</text>
+  <text x="1860" y="362" text-anchor="middle" font-family="Arial" font-size="9" fill="#88aa88">Auto-discover 12 entities</text>
+  <text x="1860" y="380" text-anchor="middle" font-family="Arial" font-size="9" fill="#88aa88">OTA update port 3232</text>
+  <!-- HA Entities list -->
+  <rect x="1740" y="410" width="560" height="190" fill="#f0fff0" stroke="#1f5f1f" stroke-width="1.5" rx="3"/>
+  <text x="1750" y="430" font-family="Arial" font-size="10" font-weight="bold" fill="#1f5f1f">HOME ASSISTANT ENTITIES (12)</text>
+  <text x="1750" y="448" font-family="monospace" font-size="8" fill="#333">sensor.jojo_level_percent | sensor.jojo_level_liters | sensor.water_flow_rate_lpm</text>
+  <text x="1750" y="462" font-family="monospace" font-size="8" fill="#333">sensor.daily_water_liters | binary_sensor.cistern_full | binary_sensor.cistern_demand</text>
+  <text x="1750" y="476" font-family="monospace" font-size="8" fill="#333">switch.jojo_pump_manual_override | switch.well_pump_manual_override</text>
+  <text x="1750" y="490" font-family="monospace" font-size="8" fill="#333">binary_sensor.schedule_active | binary_sensor.system_fault | sensor.wifi_rssi</text>
+  <text x="1750" y="508" font-family="monospace" font-size="8" fill="#333">light.aviation_lights (GPIO10-13 group) | light.toilet_indicator (GPIO16 WS2812B)</text>
+
+  <!-- NTP sync -->
+  <rect x="1740" y="610" width="200" height="55" fill="#f0f8ff" stroke="#0066CC" stroke-width="1.5" rx="3"/>
+  <text x="1840" y="630" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold">NTP Sync</text>
+  <text x="1840" y="648" text-anchor="middle" font-family="Arial" font-size="9">Internet time</text>
+  <text x="1840" y="662" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">17:00-07:00 daily window</text>
+
+  <!-- DS3231 RTC backup -->
+  <rect x="1960" y="610" width="180" height="55" fill="#e8f8e8" stroke="#1f5f1f" stroke-width="1.5" rx="3"/>
+  <text x="2050" y="630" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold">DS3231 RTC</text>
+  <text x="2050" y="648" text-anchor="middle" font-family="Arial" font-size="9">±2 ppm | CR2032 backup</text>
+  <text x="2050" y="662" text-anchor="middle" font-family="Arial" font-size="8" fill="#666">Time during WiFi outage</text>
+
+  <!-- ===================== ANNOTATION CALLOUTS ===================== -->
+
+  <!-- Callout 1: DC MCB note -->
+  <rect x="60" y="950" width="290" height="70" fill="#fffbe6" stroke="#806600" stroke-width="1.5" rx="3"/>
+  <text x="70" y="968" font-family="Arial" font-size="10" font-weight="bold" fill="#806600">⚠ CRITICAL DESIGN NOTE</text>
+  <text x="70" y="985" font-family="Arial" font-size="9" fill="#333">MCB-04 (2A DC) MUST be DC-rated.</text>
+  <text x="70" y="1000" font-family="Arial" font-size="8" fill="#666">DC arcs do NOT self-extinguish with AC MCBs.</text>
+  <text x="70" y="1015" font-family="Arial" font-size="8" fill="#666">Order: Communica | SANS 60898 | DC2A-C</text>
+
+  <!-- Callout 2: Strap pin note -->
+  <rect x="60" y="1030" width="290" height="55" fill="#fffbe6" stroke="#806600" stroke-width="1.5" rx="3"/>
+  <text x="70" y="1048" font-family="Arial" font-size="10" font-weight="bold" fill="#806600">⚠ GPIO15 STRAP PIN</text>
+  <text x="70" y="1065" font-family="Arial" font-size="9" fill="#333">GPIO15 is SPI boot strap — 10kΩ pull-down</text>
+  <text x="70" y="1080" font-family="Arial" font-size="8" fill="#666">ensures safe boot with AO3400A MOSFET gate</text>
+
+  <!-- Callout 3: LM2596 verify -->
+  <rect x="370" y="1030" width="280" height="55" fill="#fffbe6" stroke="#FF8800" stroke-width="1.5" rx="3"/>
+  <text x="380" y="1048" font-family="Arial" font-size="10" font-weight="bold" fill="#FF8800">⚠ BEFORE POWER-UP</text>
+  <text x="380" y="1065" font-family="Arial" font-size="9" fill="#333">Verify LM2596 output = 5.0V ±0.1V</text>
+  <text x="380" y="1080" font-family="Arial" font-size="8" fill="#666">Do NOT connect ESP32 until voltage confirmed</text>
+
+  <!-- ===================== LEGEND ===================== -->
+  <rect x="50" y="1100" width="680" height="200" fill="#f8f8f8" stroke="#1a1a1a" stroke-width="1.5" rx="4"/>
+  <text x="60" y="1120" font-family="Arial" font-size="12" font-weight="bold">LEGEND</text>
+
+  <g font-family="Arial" font-size="9">
+    <!-- Wire types -->
+    <line x1="60" y1="1140" x2="120" y2="1140" stroke="#CC0000" stroke-width="3"/>
+    <text x="130" y="1143">+12V DC power</text>
+
+    <line x1="60" y1="1160" x2="120" y2="1160" stroke="#FF8800" stroke-width="3"/>
+    <text x="130" y="1163">+5V DC power</text>
+
+    <line x1="60" y1="1180" x2="120" y2="1180" stroke="#333" stroke-width="2"/>
+    <text x="130" y="1183">GND / Earth</text>
+
+    <line x1="60" y1="1200" x2="120" y2="1200" stroke="#0066CC" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="130" y="1203">Digital signal / GPIO</text>
+
+    <line x1="60" y1="1220" x2="120" y2="1220" stroke="#993399" stroke-width="1.5" stroke-dasharray="3,2"/>
+    <text x="130" y="1223">I²C / UART data</text>
+
+    <line x1="60" y1="1240" x2="120" y2="1240" stroke="#1f5f1f" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="130" y="1243">Network / MQTT</text>
+
+    <line x1="60" y1="1260" x2="120" y2="1260" stroke="#CC0000" stroke-width="1.5" stroke-dasharray="2,2"/>
+    <text x="130" y="1263">220V AC mains</text>
+  </g>
+
+  <!-- Component symbols legend -->
+  <g font-family="Arial" font-size="9">
+    <!-- MCB -->
+    <rect x="370" y="1130" width="35" height="50" fill="#ffcc00" stroke="#cc9900" stroke-width="1.5" rx="2"/>
+    <line x1="387" y1="1135" x2="387" y2="1142" stroke="#1a1a1a" stroke-width="1"/>
+    <text x="387" y="1160" text-anchor="middle">MCB</text>
+
+    <!-- PSU -->
+    <rect x="420" y="1130" width="60" height="50" fill="#1f3a5f" stroke="#0d1f30" stroke-width="1.5" rx="2"/>
+    <text x="450" y="1147" text-anchor="middle" font-size="8" fill="white">PSU</text>
+    <text x="450" y="1160" text-anchor="middle" font-size="8" fill="white">AC/DC</text>
+
+    <!-- Relay coil -->
+    <rect x="495" y="1130" width="50" height="50" fill="#ddd" stroke="#888" stroke-width="1.5" rx="2"/>
+    <text x="520" y="1160" text-anchor="middle">Relay</text>
+
+    <!-- Transistor/MOSFET -->
+    <rect x="560" y="1130" width="50" height="50" fill="#ffe0b0" stroke="#CC6600" stroke-width="1.5" rx="2"/>
+    <text x="585" y="1160" text-anchor="middle">MOSFET</text>
+  </g>
+
+  <!-- ===================== TITLE BLOCK ===================== -->
+  <rect x="50" y="1360" width="2300" height="210" fill="white" stroke="#1a1a1a" stroke-width="2"/>
+  <!-- Internal divisions -->
+  <line x1="50" y1="1390" x2="2350" y2="1390" stroke="#1a1a1a" stroke-width="1"/>
+  <line x1="50" y1="1420" x2="2350" y2="1420" stroke="#1a1a1a" stroke-width="1"/>
+  <line x1="50" y1="1450" x2="2350" y2="1450" stroke="#1a1a1a" stroke-width="1"/>
+  <line x1="50" y1="1470" x2="2350" y2="1470" stroke="#1a1a1a" stroke-width="1"/>
+  <line x1="1400" y1="1360" x2="1400" y2="1570" stroke="#1a1a1a" stroke-width="1"/>
+  <line x1="1850" y1="1360" x2="1850" y2="1570" stroke="#1a1a1a" stroke-width="1"/>
+
+  <!-- Row 1 -->
+  <text x="60" y="1378" font-family="Arial" font-size="10" font-weight="bold">Drawing D-05: Unified Electrical + Signal Single-Line Diagram</text>
+  <text x="1410" y="1378" font-family="Arial" font-size="10" font-weight="bold">Rev 0.3</text>
+  <text x="1860" y="1378" font-family="Arial" font-size="10" font-weight="bold">2026-07-18</text>
+
+  <!-- Row 2 -->
+  <text x="60" y="1413" font-family="Arial" font-size="9">DAT-WATER-PLC-001 | v0.3</text>
+  <text x="1410" y="1413" font-family="Arial" font-size="9">Sheet 1 of 1</text>
+  <text x="1860" y="1413" font-family="Arial" font-size="9">Misha</text>
+
+  <!-- Row 3 -->
+  <text x="60" y="1443" font-family="Arial" font-size="9">Scale 1:10 | A3 Landscape</text>
+  <text x="1410" y="1443" font-family="Arial" font-size="9">Grid: 10mm</text>
+  <text x="1860" y="1443" font-family="Arial" font-size="9">Owner: Zun</text>
+
+  <!-- Row 4 -->
+  <text x="60" y="1465" font-family="Arial" font-size="9">Prepared: Misha (AI agent) | Reviewed: [blank]</text>
+  <text x="1410" y="1465" font-family="Arial" font-size="9">Approved: [blank]</text>
+  <text x="1860" y="1465" font-family="Arial" font-size="9">Classification: Internal</text>
+
+  <!-- Row 5 -->
+  <text x="60" y="1487" font-family="Arial" font-size="9">Supersedes: D-02 v0.2 (Electrical) + D-03 v0.2 (IO Wiring)</text>
+  <text x="1410" y="1487" font-family="Arial" font-size="9">Format: SVG vector + 300 DPI PNG</text>
+  <text x="1860" y="1487" font-family="Arial" font-size="9">Retention: 5 years</text>
+
+  <!-- Drawing reference note -->
+  <text x="60" y="1509" font-family="Arial" font-size="8" fill="#666">Print all 5 drawings (D-01 to D-05) at 300 DPI A3 landscape and staple with DAT-WATER-PLC-001-v0.3-Misha.docx</text>
+
+  <!-- COMPONENT REFERENCE TABLE -->
+  <rect x="50" y="1520" width="680" height="50" fill="#f8f8f8" stroke="#1a1a1a" stroke-width="1"/>
+  <text x="60" y="1538" font-family="Arial" font-size="9" font-weight="bold">KEY COMPONENTS:</text>
+  <text x="60" y="1554" font-family="Arial" font-size="8" fill="#333">E-02 Mornsun LM50 12V/4.2A | E-03 LM2596 12V→5V | E-06 HL-52S 5V relay | E-07 AO3400A MOSFET | P-02 BDD 12V pump | ESP32-C6 DevKitC-1 | MCB-04 2A DC-rated</text>
+</svg>
