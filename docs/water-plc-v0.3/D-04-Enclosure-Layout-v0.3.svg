@@ -1,0 +1,443 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 900" width="1500" height="900">
+  <defs>
+    <pattern id="grid4" width="10" height="10" patternUnits="userSpaceOnUse">
+      <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#f5f5f5" stroke-width="0.3"/>
+    </pattern>
+  </defs>
+  <rect x="0" y="0" width="1500" height="900" fill="white"/>
+  <rect x="0" y="0" width="1500" height="900" fill="none" stroke="#2a2a2a" stroke-width="3"/>
+  <rect x="20" y="20" width="1460" height="860" fill="none" stroke="#2a2a2a" stroke-width="1"/>
+  <rect x="40" y="50" width="1420" height="790" fill="url(#grid4)"/>
+
+  <!-- Header -->
+  <rect x="40" y="50" width="1100" height="55" fill="#1f3a5f"/>
+  <text x="590" y="82" text-anchor="middle" font-family="Arial" font-size="19" font-weight="bold" fill="white">
+    Hammond RP1465C — Enclosure Layout
+  </text>
+  <text x="590" y="96" text-anchor="middle" font-family="Arial" font-size="9" fill="#aaccff">
+    DAT-WATER-PLC-001 | Rev 0.3 | 2026-07-18 | Sheet 1 of 1
+  </text>
+
+  <!-- Enclosure outer (220×165mm at 1:1) — drawn at 440×330 for clarity -->
+  <!-- Scale: 2mm → 4px (2x for clarity). Enclosure: 440×330. -->
+  <!-- Hammond RP1465C: 220×165×85mm. Scale 2:1 → 440×330px -->
+  <rect x="80" y="140" width="440" height="330" fill="#e8e8e8" stroke="#2a2a2a" stroke-width="3" rx="6"/>
+
+  <!-- Mounting holes (4× M6) -->
+  <circle cx="96" cy="156" r="6" fill="none" stroke="#666" stroke-width="1.5"/>
+  <circle cx="504" cy="156" r="6" fill="none" stroke="#666" stroke-width="1.5"/>
+  <circle cx="96" cy="454" r="6" fill="none" stroke="#666" stroke-width="1.5"/>
+  <circle cx="504" cy="454" r="6" fill="none" stroke="#666" stroke-width="1.5"/>
+
+  <!-- PG9 cable glands on bottom face -->
+  <!-- 4× PG9: positions along bottom edge y=450 -->
+  <circle cx="130" cy="460" r="8" fill="#bbb" stroke="#888" stroke-width="1.5"/>
+  <text x="130" y="463" text-anchor="middle" font-family="Arial" font-size="7" fill="#333">PG9</text>
+  <text x="130" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">A02YYUW</text>
+
+  <circle cx="200" cy="460" r="8" fill="#bbb" stroke="#888" stroke-width="1.5"/>
+  <text x="200" y="463" text-anchor="middle" font-family="Arial" font-size="7" fill="#333">PG9</text>
+  <text x="200" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">Float switch</text>
+
+  <circle cx="270" cy="460" r="6" fill="#ccc" stroke="#888" stroke-width="1"/>
+  <text x="270" y="463" text-anchor="middle" font-family="Arial" font-size="6" fill="#333">PG7</text>
+  <text x="270" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">LED A</text>
+
+  <circle cx="310" cy="460" r="6" fill="#ccc" stroke="#888" stroke-width="1"/>
+  <text x="310" y="463" text-anchor="middle" font-family="Arial" font-size="6" fill="#333">PG7</text>
+  <text x="310" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">LED B</text>
+
+  <circle cx="350" cy="460" r="6" fill="#ccc" stroke="#888" stroke-width="1"/>
+  <text x="350" y="463" text-anchor="middle" font-family="Arial" font-size="6" fill="#333">PG7</text>
+  <text x="350" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">LED W</text>
+
+  <circle cx="390" cy="460" r="6" fill="#ccc" stroke="#888" stroke-width="1"/>
+  <text x="390" y="463" text-anchor="middle" font-family="Arial" font-size="6" fill="#333">PG7</text>
+  <text x="390" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">LED O</text>
+
+  <circle cx="430" cy="460" r="6" fill="#ccc" stroke="#888" stroke-width="1"/>
+  <text x="430" y="463" text-anchor="middle" font-family="Arial" font-size="6" fill="#333">PG7</text>
+  <text x="430" y="472" text-anchor="middle" font-family="Arial" font-size="6" fill="#666">BDD pump</text>
+
+  <!-- DIMENSION LINES -->
+  <line x1="80" y1="485" x2="520" y2="485" stroke="#2a2a2a" stroke-width="0.75"/>
+  <line x1="80" y1="480" x2="80" y2="490" stroke="#2a2a2a" stroke-width="0.75"/>
+  <line x1="520" y1="480" x2="520" y2="490" stroke="#2a2a2a" stroke-width="0.75"/>
+  <text x="300" y="500" text-anchor="middle" font-family="Arial" font-size="10">220 mm</text>
+
+  <line x1="55" y1="140" x2="55" y2="470" stroke="#2a2a2a" stroke-width="0.75"/>
+  <line x1="50" y1="140" x2="60" y2="140" stroke="#2a2a2a" stroke-width="0.75"/>
+  <line x1="50" y1="470" x2="60" y2="470" stroke="#2a2a2a" stroke-width="0.75"/>
+  <text x="45" y="305" text-anchor="middle" font-family="Arial" font-size="10" transform="rotate(-90,45,305)">165 mm</text>
+
+  <!-- DIN rail (TS35, 7.5mm height) -->
+  <rect x="86" y="300" width="428" height="10" fill="#aaa" stroke="#888" stroke-width="1"/>
+  <text x="92" y="308" font-family="Arial" font-size="7" fill="#333">DIN Rail TS35 | slotted | 215mm wide</text>
+
+  <!-- ===== DIN RAIL COMPONENTS (top row, y=155-295) ===== -->
+  <!-- ① Earth bar -->
+  <rect x="92" y="230" width="50" height="65" fill="#DAA520" stroke="#B8860B" stroke-width="1.5" rx="2"/>
+  <text x="117" y="250" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="#333">Earth</text>
+  <text x="117" y="262" text-anchor="middle" font-family="Arial" font-size="8" fill="#333">Bar</text>
+  <text x="117" y="274" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">Brass 6-way</text>
+  <text x="117" y="286" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">DIN-rail</text>
+  <text x="117" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">①</text>
+
+  <!-- ② MCB 10A (L1) -->
+  <rect x="150" y="230" width="35" height="65" fill="#ffcc00" stroke="#cc9900" stroke-width="1.5" rx="2"/>
+  <line x1="167" y1="235" x2="167" y2="243" stroke="#333" stroke-width="1"/>
+  <text x="167" y="258" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold">10A</text>
+  <text x="167" y="270" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">C-krom</text>
+  <text x="167" y="282" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">6kA</text>
+  <text x="167" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">②</text>
+
+  <!-- ③ MCB 6A (well pump) -->
+  <rect x="193" y="230" width="35" height="65" fill="#ffcc00" stroke="#cc9900" stroke-width="1.5" rx="2"/>
+  <line x1="210" y1="235" x2="210" y2="243" stroke="#333" stroke-width="1"/>
+  <text x="210" y="258" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold">6A</text>
+  <text x="210" y="270" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">C-krom</text>
+  <text x="210" y="282" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">6kA</text>
+  <text x="210" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">③</text>
+
+  <!-- ④ MCB 3A (12V PSU) -->
+  <rect x="236" y="230" width="35" height="65" fill="#ffcc00" stroke="#cc9900" stroke-width="1.5" rx="2"/>
+  <line x1="253" y1="235" x2="253" y2="243" stroke="#333" stroke-width="1"/>
+  <text x="253" y="258" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold">3A</text>
+  <text x="253" y="270" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">C-krom</text>
+  <text x="253" y="282" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">6kA</text>
+  <text x="253" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">④</text>
+
+  <!-- ⑤ MCB 2A DC (pump rail) -->
+  <rect x="279" y="230" width="35" height="65" fill="#ff4444" stroke="#cc0000" stroke-width="2" rx="2"/>
+  <line x1="296" y1="235" x2="296" y2="243" stroke="#fff" stroke-width="1"/>
+  <text x="296" y="258" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">2A DC</text>
+  <text x="296" y="270" text-anchor="middle" font-family="Arial" font-size="7" fill="#ffaaaa">DC-rated</text>
+  <text x="296" y="282" text-anchor="middle" font-family="Arial" font-size="7" fill="#ffaaaa">MUST</text>
+  <text x="296" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑤</text>
+
+  <!-- ⑥ Mornsun LM50 PSU -->
+  <rect x="322" y="225" width="50" height="70" fill="#1f3a5f" stroke="#0d1f30" stroke-width="1.5" rx="2"/>
+  <text x="347" y="243" text-anchor="middle" font-family="Arial" font-size="7" fill="white" font-weight="bold">MORNSUN</text>
+  <text x="347" y="255" text-anchor="middle" font-family="Arial" font-size="7" fill="#aaccff">LM50-23B12R2S</text>
+  <text x="347" y="267" text-anchor="middle" font-family="Arial" font-size="7" fill="#aaccff">50W 12V</text>
+  <text x="347" y="279" text-anchor="middle" font-family="Arial" font-size="7" fill="#aaccff">4.2A</text>
+  <text x="347" y="215" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑥</text>
+
+  <!-- ===== SECOND ROW (y=310-385) ===== -->
+  <!-- ⑦ HL-52S relay -->
+  <rect x="92" y="315" width="55" height="55" fill="#ddd" stroke="#888" stroke-width="1.5" rx="2"/>
+  <text x="119" y="333" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold">HL-52S</text>
+  <text x="119" y="346" text-anchor="middle" font-family="Arial" font-size="7">Relay</text>
+  <text x="119" y="359" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">5V coil</text>
+  <text x="119" y="371" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">10A contacts</text>
+  <text x="119" y="308" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑦</text>
+
+  <!-- ⑧ Terminal blocks -->
+  <rect x="155" y="315" width="70" height="55" fill="#f4f4f4" stroke="#888" stroke-width="1.5" rx="2"/>
+  <text x="190" y="333" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold">TERMINALS</text>
+  <text x="190" y="346" text-anchor="middle" font-family="Arial" font-size="7">2-way × 3</text>
+  <text x="190" y="359" text-anchor="middle" font-family="Arial" font-size="7">5mm pitch</text>
+  <text x="190" y="371" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">Signal wiring</text>
+  <text x="190" y="308" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑧</text>
+
+  <!-- ⑨ ESP32-C6 DevKitC-1 (backplate, not DIN) -->
+  <rect x="233" y="315" width="120" height="55" fill="#0d6b1f" stroke="#0a4d15" stroke-width="1.5" rx="3"/>
+  <text x="293" y="333" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">ESP32-C6</text>
+  <text x="293" y="346" text-anchor="middle" font-family="Arial" font-size="8" fill="#aaffaa">DevKitC-1 N16R8</text>
+  <text x="293" y="359" text-anchor="middle" font-family="Arial" font-size="7" fill="#88aa88">WiFi 6 | USB-C</text>
+  <text x="293" y="371" text-anchor="middle" font-family="Arial" font-size="7" fill="#88aa88">standoffs (not DIN)</text>
+  <text x="293" y="308" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑨</text>
+
+  <!-- ⑩ DS3231 RTC module -->
+  <rect x="361" y="315" width="80" height="55" fill="#2e5a2e" stroke="#1a3a1a" stroke-width="1.5" rx="3"/>
+  <text x="401" y="333" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">DS3231</text>
+  <text x="401" y="346" text-anchor="middle" font-family="Arial" font-size="8" fill="#aaffaa">ZS-042 RTC</text>
+  <text x="401" y="359" text-anchor="middle" font-family="Arial" font-size="7" fill="#88aa88">±2 ppm | CR2032</text>
+  <text x="401" y="371" text-anchor="middle" font-family="Arial" font-size="7" fill="#88aa88">I²C 0x68</text>
+  <text x="401" y="308" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑩</text>
+
+  <!-- ⑪ LM2596 module -->
+  <rect x="449" y="315" width="65" height="55" fill="#CC6600" stroke="#993300" stroke-width="1.5" rx="3"/>
+  <text x="481" y="333" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">LM2596</text>
+  <text x="481" y="346" text-anchor="middle" font-family="Arial" font-size="8" fill="#ffe0b0">Buck 12V→5V</text>
+  <text x="481" y="359" text-anchor="middle" font-family="Arial" font-size="7" fill="#ffe0b0">ZUN HAS</text>
+  <text x="481" y="371" text-anchor="middle" font-family="Arial" font-size="7" fill="#ffe0b0">set to 5.0V</text>
+  <text x="481" y="308" text-anchor="middle" font-family="Arial" font-size="10" font-weight="bold" fill="#CC0000">⑪</text>
+
+  <!-- ===== DOOR INTERFACE PANEL (dashed outline right) ===== -->
+  <rect x="540" y="140" width="450" height="400" fill="#f8f0e8" stroke="#5c3317" stroke-width="2" stroke-dasharray="8,4" rx="4"/>
+  <text x="550" y="162" font-family="Arial" font-size="12" font-weight="bold" fill="#5c3317">DOOR INTERFACE PANEL</text>
+  <text x="550" y="177" font-family="Arial" font-size="8" fill="#888">Transparent door | Hammond RP1465C | IP65</text>
+
+  <!-- OLED on door -->
+  <rect x="560" y="192" width="120" height="80" fill="#1f3a5f" stroke="#0d1f30" stroke-width="1.5" rx="3"/>
+  <rect x="565" y="197" width="110" height="55" fill="#000" stroke="#333" stroke-width="0.5"/>
+  <text x="620" y="213" text-anchor="middle" font-family="monospace" font-size="9" fill="#00ff00">Water PLC v0.3</text>
+  <text x="620" y="227" text-anchor="middle" font-family="monospace" font-size="8" fill="#00ff00">JoJo: 75%</text>
+  <text x="620" y="239" text-anchor="middle" font-family="monospace" font-size="8" fill="#00ff00">PUMP: OFF</text>
+  <text x="620" y="251" text-anchor="middle" font-family="monospace" font-size="8" fill="#00ff00">19:45 18/07</text>
+  <text x="620" y="265" text-anchor="middle" font-family="Arial" font-size="8" fill="white">OLED 0.96" 128×64</text>
+  <text x="560" y="285" font-family="Arial" font-size="8" fill="#666">SSD1306 | I²C 0x3C | GPIO6/7</text>
+
+  <!-- Mode toggles on door -->
+  <rect x="700" y="192" width="60" height="30" fill="#ddd" stroke="#888" stroke-width="1.5" rx="3"/>
+  <text x="730" y="207" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold">MODE</text>
+  <text x="730" y="220" text-anchor="middle" font-family="Arial" font-size="7">OFF|AUTO|MAN</text>
+  <text x="700" y="235" font-family="Arial" font-size="8">Well pump mode</text>
+  <text x="700" y="246" font-family="Arial" font-size="7" fill="#666">GPIO4 | 10k pull-up</text>
+
+  <rect x="770" y="192" width="60" height="30" fill="#ddd" stroke="#888" stroke-width="1.5" rx="3"/>
+  <text x="800" y="207" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold">MODE</text>
+  <text x="800" y="220" text-anchor="middle" font-family="Arial" font-size="7">OFF|AUTO|MAN</text>
+  <text x="770" y="235" font-family="Arial" font-size="8">JoJo mode</text>
+  <text x="770" y="246" font-family="Arial" font-size="7" fill="#666">reserve</text>
+
+  <!-- Manual buttons on door -->
+  <circle cx="720" cy="285" r="16" fill="#009900" stroke="#006600" stroke-width="2"/>
+  <text x="720" y="289" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">W</text>
+  <text x="720" y="310" text-anchor="middle" font-family="Arial" font-size="8">Well</text>
+  <text x="720" y="322" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">GPIO5</text>
+
+  <circle cx="775" cy="285" r="16" fill="#009900" stroke="#006600" stroke-width="2"/>
+  <text x="775" y="289" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">J</text>
+  <text x="775" y="310" text-anchor="middle" font-family="Arial" font-size="8">JoJo</text>
+  <text x="775" y="322" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">GPIO5</text>
+
+  <circle cx="830" cy="285" r="16" fill="#CC0000" stroke="#880000" stroke-width="2"/>
+  <text x="830" y="289" text-anchor="middle" font-family="Arial" font-size="9" font-weight="bold" fill="white">R</text>
+  <text x="830" y="310" text-anchor="middle" font-family="Arial" font-size="8">Reset</text>
+  <text x="830" y="322" text-anchor="middle" font-family="Arial" font-size="7" fill="#666">GPIO9</text>
+
+  <!-- Status LEDs on door -->
+  <circle cx="700" cy="375" r="12" fill="#00cc00" stroke="#008800" stroke-width="1.5"/>
+  <text x="720" y="379" font-family="Arial" font-size="9">Run (green)</text>
+  <circle cx="770" cy="375" r="12" fill="#CC0000" stroke="#880000" stroke-width="1.5"/>
+  <text x="790" y="379" font-family="Arial" font-size="9">Fault (red)</text>
+  <circle cx="840" cy="375" r="12" fill="#FF8800" stroke="#cc5500" stroke-width="1.5"/>
+  <text x="860" y="379" font-family="Arial" font-size="9">Active (amber)</text>
+
+  <!-- LED housings on door (4× M12 bezels) -->
+  <text x="550" y="415" font-family="Arial" font-size="10" font-weight="bold" fill="#5c3317">Aviation LEDs on door (M12 metal bezels)</text>
+  <rect x="560" y="425" width="35" height="35" fill="#CC0000" stroke="#880000" stroke-width="1.5" rx="3"/>
+  <text x="577" y="441" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold" fill="white">R</text>
+  <text x="577" y="470" text-anchor="middle" font-family="Arial" font-size="7">GPIO10</text>
+  <rect x="605" y="425" width="35" height="35" fill="#fff" stroke="#888" stroke-width="1.5" rx="3"/>
+  <text x="622" y="441" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold" fill="#333">W</text>
+  <text x="622" y="470" text-anchor="middle" font-family="Arial" font-size="7">GPIO11</text>
+  <rect x="650" y="425" width="35" height="35" fill="#0044CC" stroke="#002288" stroke-width="1.5" rx="3"/>
+  <text x="667" y="441" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold" fill="white">B</text>
+  <text x="667" y="470" text-anchor="middle" font-family="Arial" font-size="7">GPIO12</text>
+  <rect x="695" y="425" width="35" height="35" fill="#FF8800" stroke="#cc5500" stroke-width="1.5" rx="3"/>
+  <text x="712" y="441" text-anchor="middle" font-family="Arial" font-size="8" font-weight="bold" fill="white">O</text>
+  <text x="712" y="470" text-anchor="middle" font-family="Arial" font-size="7">GPIO13</text>
+
+  <!-- Cable gland note -->
+  <text x="560" y="490" font-family="Arial" font-size="8" fill="#666">LED bezels: FastenRight M12 metal IP65 | LEDs: Rabtron Wahwang WW10A3 series</text>
+
+  <!-- Title block -->
+  <rect x="1010" y="560" width="450" height="130" fill="white" stroke="#2a2a2a" stroke-width="1.5"/>
+  <line x1="1010" y1="590" x2="1460" y2="590" stroke="#2a2a2a"/>
+  <line x1="1010" y1="610" x2="1460" y2="610" stroke="#2a2a2a"/>
+  <line x1="1010" y1="630" x2="1460" y2="630" stroke="#2a2a2a"/>
+  <line x1="1010" y1="650" x2="1460" y2="650" stroke="#2a2a2a"/>
+  <line x1="1230" y1="560" x2="1230" y2="690" stroke="#2a2a2a"/>
+  <line x1="1350" y1="560" x2="1350" y2="690" stroke="#2a2a2a"/>
+  <text x="1020" y="577" font-family="Arial" font-size="10" font-weight="bold">Drawing D-04</text>
+  <text x="1240" y="577" font-family="Arial" font-size="10" font-weight="bold">Rev 0.3</text>
+  <text x="1360" y="577" font-family="Arial" font-size="10" font-weight="bold">2026-07-18</text>
+  <text x="1020" y="602" font-family="Arial" font-size="9">Enclosure Layout</text>
+  <text x="1240" y="602" font-family="Arial" font-size="9">Sheet 1 of 1</text>
+  <text x="1360" y="602" font-family="Arial" font-size="9">Misha</text>
+  <text x="1020" y="622" font-family="Arial" font-size="9">Scale 1:2 | Grid 10mm</text>
+  <text x="1020" y="642" font-family="Arial" font-size="9">DAT-WATER-PLC-001 | v0.3-Misha</text>
+
+  <!-- ITEM LIST -->
+  <rect x="40" y="560" width="960" height="280" fill="#f8f8f8" stroke="#2a2a2a" stroke-width="1.5" rx="4"/>
+  <text x="50" y="580" font-family="Arial" font-size="11" font-weight="bold" fill="#2a2a2a">BILL OF MATERIALS — ENCLOSURE + INTERFACE</text>
+  <g font-family="Arial" font-size="9">
+    <rect x="50" y="588" width="940" height="20" fill="#1f3a5f"/>
+    <text x="58" y="602" fill="white" font-weight="bold">#</text>
+    <text x="85" y="602" fill="white" font-weight="bold">Description</text>
+    <text x="310" y="602" fill="white" font-weight="bold">Part Number</text>
+    <text x="480" y="602" fill="white" font-weight="bold">Supplier</text>
+    <text x="620" y="602" fill="white" font-weight="bold">Qty</text>
+    <text x="660" y="602" fill="white" font-weight="bold">Unit ZAR</text>
+    <text x="740" y="602" fill="white" font-weight="bold">Total ZAR</text>
+    <text x="830" y="602" fill="white" font-weight="bold">Source</text>
+
+    <rect x="50" y="608" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="620" font-family="Arial" font-size="9" font-weight="bold">ENC-01</text>
+    <text x="85" y="620" font-family="Arial" font-size="9">Hammond RP1465C ABS Enclosure IP65</text>
+    <text x="310" y="620" font-family="Arial" font-size="9" fill="#666666">RP1465C</text>
+    <text x="480" y="620" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="620" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="620" font-family="Arial" font-size="9">245.00</text>
+    <text x="740" y="620" font-family="Arial" font-size="9" font-weight="bold">245.00</text>
+    <text x="830" y="620" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="626" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="638" font-family="Arial" font-size="9" font-weight="bold">DR-01</text>
+    <text x="85" y="638" font-family="Arial" font-size="9">DIN Rail TS35 slotted 215mm</text>
+    <text x="310" y="638" font-family="Arial" font-size="9" fill="#666666">DR-TS35-215</text>
+    <text x="480" y="638" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="638" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="638" font-family="Arial" font-size="9">28.00</text>
+    <text x="740" y="638" font-family="Arial" font-size="9" font-weight="bold">28.00</text>
+    <text x="830" y="638" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="644" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="656" font-family="Arial" font-size="9" font-weight="bold">DR-02</text>
+    <text x="85" y="656" font-family="Arial" font-size="9">DIN Rail Panel Mount Adapter (for Mornsun)</text>
+    <text x="310" y="656" font-family="Arial" font-size="9" fill="#666666">DR-ADAPT</text>
+    <text x="480" y="656" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="656" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="656" font-family="Arial" font-size="9">18.00</text>
+    <text x="740" y="656" font-family="Arial" font-size="9" font-weight="bold">18.00</text>
+    <text x="830" y="656" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="662" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="674" font-family="Arial" font-size="9" font-weight="bold">EB-01</text>
+    <text x="85" y="674" font-family="Arial" font-size="9">Earth Bar Brass 6-way DIN-rail</text>
+    <text x="310" y="674" font-family="Arial" font-size="9" fill="#666666">EB-6W-DR</text>
+    <text x="480" y="674" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="674" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="674" font-family="Arial" font-size="9">45.00</text>
+    <text x="740" y="674" font-family="Arial" font-size="9" font-weight="bold">45.00</text>
+    <text x="830" y="674" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="680" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="692" font-family="Arial" font-size="9" font-weight="bold">MCB-01</text>
+    <text x="85" y="692" font-family="Arial" font-size="9">MCB 10A 1P C-curve 6kA</text>
+    <text x="310" y="692" font-family="Arial" font-size="9" fill="#666666">S261C10</text>
+    <text x="480" y="692" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="692" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="692" font-family="Arial" font-size="9">125.00</text>
+    <text x="740" y="692" font-family="Arial" font-size="9" font-weight="bold">125.00</text>
+    <text x="830" y="692" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="698" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="710" font-family="Arial" font-size="9" font-weight="bold">MCB-02</text>
+    <text x="85" y="710" font-family="Arial" font-size="9">MCB 6A 1P C-curve 6kA</text>
+    <text x="310" y="710" font-family="Arial" font-size="9" fill="#666666">S261C06</text>
+    <text x="480" y="710" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="710" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="710" font-family="Arial" font-size="9">125.00</text>
+    <text x="740" y="710" font-family="Arial" font-size="9" font-weight="bold">125.00</text>
+    <text x="830" y="710" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="716" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="728" font-family="Arial" font-size="9" font-weight="bold">MCB-03</text>
+    <text x="85" y="728" font-family="Arial" font-size="9">MCB 3A 1P C-curve 6kA</text>
+    <text x="310" y="728" font-family="Arial" font-size="9" fill="#666666">S261C03</text>
+    <text x="480" y="728" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="728" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="728" font-family="Arial" font-size="9">125.00</text>
+    <text x="740" y="728" font-family="Arial" font-size="9" font-weight="bold">125.00</text>
+    <text x="830" y="728" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="734" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="746" font-family="Arial" font-size="9" font-weight="bold">MCB-04</text>
+    <text x="85" y="746" font-family="Arial" font-size="9">MCB 2A DC-rated 1P C-curve 6kA (CRITICAL)</text>
+    <text x="310" y="746" font-family="Arial" font-size="9" fill="#666666">DC2A-C</text>
+    <text x="480" y="746" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="746" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="746" font-family="Arial" font-size="9">185.00</text>
+    <text x="740" y="746" font-family="Arial" font-size="9" font-weight="bold">185.00</text>
+    <text x="830" y="746" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="752" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="764" font-family="Arial" font-size="9" font-weight="bold">E-02</text>
+    <text x="85" y="764" font-family="Arial" font-size="9">Mornsun PSU LM50-23B12R2S 50W 12V</text>
+    <text x="310" y="764" font-family="Arial" font-size="9" fill="#666666">LM50-23B12R2S</text>
+    <text x="480" y="764" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="764" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="764" font-family="Arial" font-size="9">265.00</text>
+    <text x="740" y="764" font-family="Arial" font-size="9" font-weight="bold">265.00</text>
+    <text x="830" y="764" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="770" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="782" font-family="Arial" font-size="9" font-weight="bold">E-03</text>
+    <text x="85" y="782" font-family="Arial" font-size="9">LM2596 Buck Module (ZUN HAS)</text>
+    <text x="310" y="782" font-family="Arial" font-size="9" fill="#666666">LM2596S</text>
+    <text x="480" y="782" font-family="Arial" font-size="9" fill="#555555">Zun has</text>
+    <text x="620" y="782" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="782" font-family="Arial" font-size="9">0.00</text>
+    <text x="740" y="782" font-family="Arial" font-size="9" font-weight="bold">0.00</text>
+    <text x="830" y="782" font-family="Arial" font-size="9" fill="#CC6600">have</text>
+    <rect x="50" y="788" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="800" font-family="Arial" font-size="9" font-weight="bold">E-06</text>
+    <text x="85" y="800" font-family="Arial" font-size="9">HL-52S Relay Module 5V coil</text>
+    <text x="310" y="800" font-family="Arial" font-size="9" fill="#666666">HL-52S</text>
+    <text x="480" y="800" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="800" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="800" font-family="Arial" font-size="9">55.00</text>
+    <text x="740" y="800" font-family="Arial" font-size="9" font-weight="bold">55.00</text>
+    <text x="830" y="800" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="806" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="818" font-family="Arial" font-size="9" font-weight="bold">TB-01</text>
+    <text x="85" y="818" font-family="Arial" font-size="9">Terminal Block 2-way 5mm pitch</text>
+    <text x="310" y="818" font-family="Arial" font-size="9" fill="#666666">TB-2W-5MM</text>
+    <text x="480" y="818" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="818" font-family="Arial" font-size="9">3</text>
+    <text x="660" y="818" font-family="Arial" font-size="9">8.00</text>
+    <text x="740" y="818" font-family="Arial" font-size="9" font-weight="bold">24.00</text>
+    <text x="830" y="818" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="824" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="836" font-family="Arial" font-size="9" font-weight="bold">E-01</text>
+    <text x="85" y="836" font-family="Arial" font-size="9">ESP32-C6 DevKitC-1 N16R8</text>
+    <text x="310" y="836" font-family="Arial" font-size="9" fill="#666666">ESP32-C6-DEV</text>
+    <text x="480" y="836" font-family="Arial" font-size="9" fill="#555555">Micro Robotics</text>
+    <text x="620" y="836" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="836" font-family="Arial" font-size="9">195.00</text>
+    <text x="740" y="836" font-family="Arial" font-size="9" font-weight="bold">195.00</text>
+    <text x="830" y="836" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="842" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="854" font-family="Arial" font-size="9" font-weight="bold">E-04</text>
+    <text x="85" y="854" font-family="Arial" font-size="9">DS3231 RTC Module ZS-042</text>
+    <text x="310" y="854" font-family="Arial" font-size="9" fill="#666666">ZS-042</text>
+    <text x="480" y="854" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="854" font-family="Arial" font-size="9">1</text>
+    <text x="660" y="854" font-family="Arial" font-size="9">85.00</text>
+    <text x="740" y="854" font-family="Arial" font-size="9" font-weight="bold">85.00</text>
+    <text x="830" y="854" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="860" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="872" font-family="Arial" font-size="9" font-weight="bold">L-HS-01</text>
+    <text x="85" y="872" font-family="Arial" font-size="9">M12 Metal LED Bezel Housing</text>
+    <text x="310" y="872" font-family="Arial" font-size="9" fill="#666666">M12-LED-BZ</text>
+    <text x="480" y="872" font-family="Arial" font-size="9" fill="#555555">FastenRight</text>
+    <text x="620" y="872" font-family="Arial" font-size="9">4</text>
+    <text x="660" y="872" font-family="Arial" font-size="9">22.00</text>
+    <text x="740" y="872" font-family="Arial" font-size="9" font-weight="bold">88.00</text>
+    <text x="830" y="872" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="878" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="890" font-family="Arial" font-size="9" font-weight="bold">SW-01</text>
+    <text x="85" y="890" font-family="Arial" font-size="9">3-pos toggle switch OFF/AUTO/MAN</text>
+    <text x="310" y="890" font-family="Arial" font-size="9" fill="#666666">SW-3P-MTU</text>
+    <text x="480" y="890" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="890" font-family="Arial" font-size="9">2</text>
+    <text x="660" y="890" font-family="Arial" font-size="9">35.00</text>
+    <text x="740" y="890" font-family="Arial" font-size="9" font-weight="bold">70.00</text>
+    <text x="830" y="890" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="896" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="908" font-family="Arial" font-size="9" font-weight="bold">SW-02</text>
+    <text x="85" y="908" font-family="Arial" font-size="9">Momentary push-button NO M12</text>
+    <text x="310" y="908" font-family="Arial" font-size="9" fill="#666666">BTN-NO-M12</text>
+    <text x="480" y="908" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="908" font-family="Arial" font-size="9">3</text>
+    <text x="660" y="908" font-family="Arial" font-size="9">18.00</text>
+    <text x="740" y="908" font-family="Arial" font-size="9" font-weight="bold">54.00</text>
+    <text x="830" y="908" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="914" width="940" height="18" fill="#f4f4f4"/>
+    <text x="58" y="926" font-family="Arial" font-size="9" font-weight="bold">GL-01</text>
+    <text x="85" y="926" font-family="Arial" font-size="9">PG9 Cable Gland IP68 nylon</text>
+    <text x="310" y="926" font-family="Arial" font-size="9" fill="#666666">PG9-IP68</text>
+    <text x="480" y="926" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="926" font-family="Arial" font-size="9">2</text>
+    <text x="660" y="926" font-family="Arial" font-size="9">12.00</text>
+    <text x="740" y="926" font-family="Arial" font-size="9" font-weight="bold">24.00</text>
+    <text x="830" y="926" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+    <rect x="50" y="932" width="940" height="18" fill="#ffffff"/>
+    <text x="58" y="944" font-family="Arial" font-size="9" font-weight="bold">GL-02</text>
+    <text x="85" y="944" font-family="Arial" font-size="9">PG7 Cable Gland IP68 nylon</text>
+    <text x="310" y="944" font-family="Arial" font-size="9" fill="#666666">PG7-IP68</text>
+    <text x="480" y="944" font-family="Arial" font-size="9" fill="#555555">Communica</text>
+    <text x="620" y="944" font-family="Arial" font-size="9">4</text>
+    <text x="660" y="944" font-family="Arial" font-size="9">8.00</text>
+    <text x="740" y="944" font-family="Arial" font-size="9" font-weight="bold">32.00</text>
+    <text x="830" y="944" font-family="Arial" font-size="9" fill="#008800">in stock</text>
+  <text x="660" y="962" font-family="Arial" font-size="10" font-weight="bold" fill="#2a2a2a">TOTAL BOM: ~R1,800 (excl. ESP32 and Zun's LM2596)</text>
+  </g>
+  <text x="660" y="962" font-family="Arial" font-size="10" font-weight="bold" fill="#2a2a2a">TOTAL BOM: ~R1,800 (excl. ESP32 and Zun's LM2596)</text>
+</svg>
