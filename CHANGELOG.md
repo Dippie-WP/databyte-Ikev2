@@ -6,6 +6,33 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Pending — post-v2.2.0 not yet tagged
+
+**CORR-rot-audit-2026-07-25: post-v2.2.0 cleanup + CHANGELOG hygiene**
+
+10 commits land on `main` between `v2.2.0` (805ea84, 2026-07-13) and HEAD
+(`f164510`, 2026-07-18), but none were tagged. Of those, 4 are real functional
+changes and 6 are a `water-plc` docs leak + revert saga in the wrong repo.
+
+**Functional changes (4 commits, ready for v2.3.0):**
+
+- `90ae8a1` (2026-07-14) — `fix(quota-exporter): migrate to MariaDB + add RADIUS tiles (Phase 4E follow-up)`. Quota exporter now reads from MariaDB `radius` instead of portal SQLite; new Prometheus tiles for RADIUS counters.
+- `87fd33e` (2026-07-14) — `fix(quota-exporter): bridge radacct.username -> customers via users+devices`. Closes Phase 4E follow-up gap where exported metrics keyed off username but tile labels needed customer name.
+- `ba0adba` (2026-07-14) — `audit(fix): dashboard remediation + satellite/session analytics tiles`. Operator dashboard polished, two new satellite tiles.
+- `3f6e212` (2026-07-16) — `fix(portal): add sha256 hashes for ttyd /panel/ inline script+style`. Inline scripts in `/panel/` now served with sha256 SRI hashes (CSP-grade). Closes a content-security drift.
+
+**Process rot (6 commits, all reverted):**
+
+- `afc8b7a`, `405c1e8`, `65ff784`, `bd628aa`, `b014bd9`, `f164510` (all 2026-07-18) — `water-plc` v0.3 docs leaked into the VPN repo. Added → D-05 added → D-05 reverted → D-05 reapplied → reapply reverted → all reverted. Net state: zero. **Process fix needed:** add a branch-protection rule on `main` that requires CI green + 1 review before merge; the leak only happened because direct push was possible.
+
+**Verified live on vps-01 (2026-07-25 17:06 UTC):**
+
+- All 4 functional changes are deployed (drift-detect last 3 runs SUCCESS, latest 2026-07-25 13:47:38 UTC).
+- Portal `/api/health` → `{"status":"ok","db_ok":true,"db_customers":8,"charon_ok":true}`.
+- 6/6 CORR-2026-07-13-035 fixes still live (sql_user_name, accounting, station_id, sql uncommented, freerad ownership, queries.conf template).
+
+**Next tag:** v2.3.0 (or v2.2.1 if Zun wants a patch-line bump — TBD).
+
 ### v2.2.0 — 2026-07-13
 
 **CORR-2026-07-13-035: FreeRADIUS operator overlay + radacct chain wired end-to-end**
