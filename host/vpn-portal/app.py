@@ -215,11 +215,18 @@ require_session = portal_auth.require_operator_session
 
 
 # ---------- SSH + DB helpers ----------
-def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") -> str:
-    """Run a command on the VPN gateway. cmd_args is a list.
+def _run_remote(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_data=None) -> str:
+    """Low-level SSH primitive on the VPN gateway.
 
-    If stdin_text is provided, it's piped to the remote command's stdin.
+    stdin_data: bytes/str/None. If provided, piped to the remote command's stdin.
+    Returns stdout decoded as UTF-8 (errors=replace).
+
+    This is the injectable transport — tests pass a mock via _ssh parameter
+    to write_rw_eap_conf/read_rw_eap_conf/append_eap_block, OR monkeypatch
+    app._run_remote directly.
     """
+    if isinstance(stdin_data, str):
+        stdin_data = stdin_data.encode()
     # Quote args safely (single-quote wrap, escape internal quotes)
     def shq(s: str) -> str:
         return "'" + s.replace("'", "'\\''") + "'"
@@ -232,10 +239,15 @@ def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") ->
         f"root@{VPN_HOST}",
         remote,
     ]
-    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout, input=stdin_text or None)
+    r = subprocess.run(full, capture_output=True, timeout=timeout, input=stdin_data)
     if r.returncode != 0:
-        raise HTTPException(502, f"VPN gateway error: {r.stderr.strip()[:200]}")
-    return r.stdout
+        raise HTTPException(502, f"VPN gateway error: {r.stderr.decode(errors='replace')[:200]}")
+    return r.stdout.decode(errors="replace")
+
+
+def ssh_903(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_text: str = "") -> str:
+    """Backward-compat wrapper around _run_remote (str stdin only)."""
+    return _run_remote(cmd_args, timeout=timeout, stdin_data=stdin_text)
 
 
 def db_query(sql: str, params=None) -> list:
@@ -682,15 +694,19 @@ def ntlm_hash_bytes(pw: str) -> bytes:
     return r.stdout
 
 
-def read_rw_eap_conf() -> str:
-    """Read rw-eap.conf from VPN_HOST (LXC 903 lab or VPS, via env vars). Returns empty string on failure."""
+def read_rw_eap_conf(_ssh=None) -> str:
+    """Read rw-eap.conf from VPN_HOST. Returns empty string on failure.
+
+    _ssh: injectable transport for tests. Defaults to _run_remote.
+    """
+    ssh = _ssh if _ssh is not None else _run_remote
     try:
-        return ssh_903(["cat", RW_EAP_CONF])
+        return ssh(["cat", RW_EAP_CONF])
     except HTTPException:
         return ""
 
 
-def write_rw_eap_conf(content: str) -> None:
+def write_rw_eap_conf(content: str, _ssh=None) -> None:
     """Atomic write: backup + temp file + size validate + atomic rename.
 
     2026-08-10 fix: the old implementation used 'cat > FILE' via stdin, which
@@ -703,7 +719,11 @@ def write_rw_eap_conf(content: str) -> None:
       4. mv the temp file over the original (POSIX atomic rename on same FS)
       5. Verify the final file size matches what we intended to write
     On any size mismatch we refuse to overwrite the live conf and raise HTTPException.
+
+    _ssh: injectable transport for tests. Defaults to _run_remote (real SSH).
+    Production callers omit it; tests pass a mock that simulates SSH responses.
     """
+    ssh = _ssh if _ssh is not None else _run_remote
     ts = int(time.time())
     backup_path = f"{BACKUP_DIR}/rw-eap.conf.bak-portal-{ts}"
     tmp_path = f"{RW_EAP_CONF}.tmp-{ts}"
@@ -711,29 +731,25 @@ def write_rw_eap_conf(content: str) -> None:
     expected_size = len(content_bytes)
 
     # 1. Backup current file
-    ssh_903(["mkdir", "-p", BACKUP_DIR])
-    ssh_903(["cp", RW_EAP_CONF, backup_path])
+    ssh(["mkdir", "-p", BACKUP_DIR])
+    ssh(["cp", RW_EAP_CONF, backup_path])
 
-    # 2. Write to temp file via SSH (stdin via -i batch mode)
-    r = subprocess.run(
-        ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-         "-o", "StrictHostKeyChecking=accept-new",
-         f"root@{VPN_HOST}", "cat > " + tmp_path],
-        input=content_bytes, capture_output=True, timeout=SSH_TIMEOUT,
-    )
-    if r.returncode != 0:
-        ssh_903(["rm", "-f", tmp_path])  # cleanup
-        raise HTTPException(502, f"temp file write failed: {r.stderr.decode(errors='replace')[:200]}")
+    # 2. Write to temp file via SSH (stdin piped via stdin_data)
+    try:
+        ssh(["cat > " + tmp_path], stdin_data=content_bytes)
+    except HTTPException:
+        ssh(["rm", "-f", tmp_path])  # cleanup on write failure
+        raise
 
     # 3. Validate temp file size matches expected (the critical new check)
     try:
-        stat_out = ssh_903(["stat", "-c", "%s", tmp_path])
+        stat_out = ssh(["stat", "-c", "%s", tmp_path])
         actual_size = int(stat_out.strip())
     except (ValueError, AttributeError, HTTPException) as e:
-        ssh_903(["rm", "-f", tmp_path])
+        ssh(["rm", "-f", tmp_path])
         raise HTTPException(502, f"could not stat temp file: {e!r}")
     if actual_size != expected_size:
-        ssh_903(["rm", "-f", tmp_path])
+        ssh(["rm", "-f", tmp_path])
         raise HTTPException(
             502,
             f"temp file size mismatch: expected {expected_size} bytes, got {actual_size}. "
@@ -741,10 +757,10 @@ def write_rw_eap_conf(content: str) -> None:
         )
 
     # 4. Atomic rename (POSIX guarantees atomicity on same filesystem)
-    ssh_903(["mv", tmp_path, RW_EAP_CONF])
+    ssh(["mv", tmp_path, RW_EAP_CONF])
 
     # 5. Verify final file size on disk
-    final_size = int(ssh_903(["stat", "-c", "%s", RW_EAP_CONF]).strip())
+    final_size = int(ssh(["stat", "-c", "%s", RW_EAP_CONF]).strip())
     if final_size != expected_size:
         raise HTTPException(
             502,
@@ -759,7 +775,7 @@ def reload_charon_creds() -> None:
              "--uri=tcp://127.0.0.1:4502", "--load-creds"])
 
 
-def append_eap_block(identity: str, password: str) -> None:
+def append_eap_block(identity: str, password: str, _ssh=None) -> None:
     """Append a new EAP block to rw-eap.conf if not present (idempotent on id).
 
     2026-08-10 fix: added sanity check. The previous read-modify-write pattern
@@ -768,8 +784,11 @@ def append_eap_block(identity: str, password: str) -> None:
     the 'connections {' block AND the 'secrets {' block — absence of either
     means the file is corrupted and rewriting it would lose the connection
     profile, breaking all iPhone IKEv2 connections.
+
+    _ssh: injectable transport for tests. Defaults to _run_remote.
     """
-    conf = read_rw_eap_conf()
+    ssh = _ssh if _ssh is not None else _run_remote
+    conf = read_rw_eap_conf(_ssh=ssh)
     block_id = f"eap-{identity}"
 
     # Idempotency check
@@ -799,7 +818,7 @@ def append_eap_block(identity: str, password: str) -> None:
         raise HTTPException(500, "rw-eap.conf has unexpected shape (no trailing '}')")
 
     new_conf = conf.rstrip()[:-1].rstrip() + addition + "}\n"
-    write_rw_eap_conf(new_conf)
+    write_rw_eap_conf(new_conf, _ssh=ssh)
 
 
 def eap_block_exists(identity: str) -> bool:
