@@ -116,9 +116,21 @@ def db_path(tmp_path) -> Path:
 
 @pytest.fixture
 def rw_eap_conf(tmp_path) -> Path:
-    """A writable rw-eap.conf starting with the standard strongswan block."""
+    """A writable rw-eap.conf with the full strongswan swanctl.conf structure.
+
+    Both `connections { ... }` and `secrets { ... }` blocks are required:
+      1. strongswan swanctl.conf requires both for a valid config (see
+         docs.strongswan.org/docs/latest/swanctl/swanctlConf.html).
+      2. The 2026-08-10 production hardening in append_eap_block() refuses
+         to write to a file missing either block (prevents the read-modify-
+         write truncation pattern that caused the iPhone auth outage
+         08:39 SAST). Tests that exercise customer creation / EAP rotation
+         need a realistic fixture so the sanity check passes.
+
+    Without both blocks, every test that calls append_eap_block gets HTTP 500.
+    """
     conf = tmp_path / "rw-eap.conf"
-    conf.write_text("""# rw-eap.conf — IKEv2 EAP connections
+    conf.write_text("""# rw-eap.conf — IKEv2 EAP connections + secrets
 connections {
   rw-eap {
     version = 2
@@ -139,6 +151,13 @@ connections {
         esp_proposals = aes256-sha256, aes128-sha256
       }
     }
+  }
+}
+
+secrets {
+  eap-test-fixture {
+    id = test-fixture-user
+    secret = "test-fixture-placeholder-not-used-by-tests"
   }
 }
 """)
@@ -177,12 +196,21 @@ def patch_portal_auth_db(db_path, monkeypatch, rw_eap_conf):
 # ---------- App + TestClient ----------
 
 @pytest.fixture
-def app_module(db_path, rw_eap_conf, request):
-    """The portal FastAPI app with subprocess.run intercepted.
+def app_module(db_path, rw_eap_conf, request, monkeypatch):
+    """The portal FastAPI app with subprocess.run + _run_remote intercepted.
 
-    app.py's body at import time runs installer_tokens.register() which calls
-    ssh_903 (which calls subprocess.run with a `ssh ... sqlite3 ...` argv).
-    We intercept subprocess.run BEFORE app is imported.
+    2026-08-10 refactor (Option A, Zun msg #33815): production code now routes
+    all SSH calls through `app._run_remote` (write_rw_eap_conf, read_rw_eap_conf,
+    append_eap_block all accept an injectable `_ssh` parameter). The conftest
+    mocks at this new injection point — not at subprocess.run — so tests
+    stay clean as production code hardens further.
+
+    Two mocks needed:
+      - subprocess.run: for installer_tokens.register() at app import time
+        (runs before we can monkeypatch the module).
+      - app._run_remote: for all test-time SSH invocations.
+
+    Both share per-command logic via _execute_ssh_simulation() below.
     """
     import subprocess as _subprocess
 
@@ -220,84 +248,102 @@ def app_module(db_path, rw_eap_conf, request):
         except Exception:
             return "", ""
 
-    def fake_run(cmd_args, *args, **kwargs):
+    def _execute_ssh_simulation(cmd_args, stdin_data=None) -> str:
+        """Per-command SSH response simulator. Returns stdout str.
+
+        Used by both _mock_subprocess_run (import-time) and _mock_remote
+        (test-time). Single source of truth for what each SSH command returns.
+        """
         cmd = cmd_args if isinstance(cmd_args, list) else (
             cmd_args.split() if isinstance(cmd_args, str) else []
         )
         cmd_str = " ".join(str(c) for c in cmd)
+        input_text = (
+            stdin_data.decode(errors="replace")
+            if isinstance(stdin_data, bytes)
+            else (stdin_data or "")
+        )
 
-        if cmd and cmd[0] == "ssh":
-            if "sqlite3" in cmd_str:
-                _db_arg, sql = _parse_sqlite_call(cmd_str)
-                c = sqlite3.connect(str(db_path))
-                try:
-                    cur = c.cursor()
-                    if sql.strip().upper().startswith(("SELECT", "PRAGMA", "WITH")):
-                        cur.execute(sql)
-                        cols = [d[0] for d in cur.description] if cur.description else []
-                        rows = cur.fetchall()
-                        # Coerce bytes to hex string (JSON-serializable).
-                        # E.g. users.password (BLOB) becomes hex of the bytes.
-                        def _coerce(v):
-                            if isinstance(v, (bytes, bytearray)):
-                                return v.hex()
-                            return v
-                        out = json.dumps([{k: _coerce(v) for k, v in zip(cols, r)} for r in rows])
+        # sqlite3 queries → run against fixture DB
+        if "sqlite3" in cmd_str:
+            _db_arg, sql = _parse_sqlite_call(cmd_args)
+            c = sqlite3.connect(str(db_path))
+            try:
+                cur = c.cursor()
+                if sql.strip().upper().startswith(("SELECT", "PRAGMA", "WITH")):
+                    cur.execute(sql)
+                    cols = [d[0] for d in cur.description] if cur.description else []
+                    rows = cur.fetchall()
+                    def _coerce(v):
+                        if isinstance(v, (bytes, bytearray)):
+                            return v.hex()
+                        return v
+                    return json.dumps([{k: _coerce(v) for k, v in zip(cols, r)} for r in rows])
+                else:
+                    if ";" in sql and "\n" in sql:
+                        cur.executescript(sql)
                     else:
-                        if ";" in sql and "\n" in sql:
-                            cur.executescript(sql)
-                        else:
-                            cur.execute(sql)
-                        c.commit()
-                        out = ""
-                finally:
-                    c.close()
-                class _R:
-                    returncode = 0
-                    stdout = out
-                    stderr = ""
-                return _R()
-            if "rw-eap.conf" in cmd_str:
-                # write_rw_eap_conf uses subprocess.run directly with "cat > ..." or "tee"
-                # We catch both. The "cat >" form passes content via stdin (input=).
-                if "tee" in cmd_str or "cat >" in cmd_str:
-                    stdin_text = kwargs.get("input") or ""
-                    rw_eap_conf.write_text(
-                        stdin_text if isinstance(stdin_text, str) else stdin_text.decode()
-                    )
-                    class _R:
-                        returncode = 0
-                        stdout = ""
-                        stderr = ""
-                    return _R()
-                # cat (no redirect) / read / mkdir / cp / etc.
-                # The cmd_str has shell-quoted tokens like 'cat' '/path'. Check for
-                # 'cat' as a separate quoted token (not 'cat >' which is write).
-                is_read = bool(re.search(r"'cat'\s+'[^']*rw-eap\.conf'", cmd_str))
-                out = rw_eap_conf.read_text() if is_read else ""
-                class _R:
-                    returncode = 0
-                    stdout = out
-                    stderr = ""
-                return _R()
-            if "swanctl" in cmd_str:
-                class _R:
-                    returncode = 0
-                    stdout = ""
-                    stderr = ""
-                return _R()
-            # Other SSH commands (firewall-cmd, ipban-ctl, etc.) — return empty
+                        cur.execute(sql)
+                    c.commit()
+                    return ""
+            finally:
+                c.close()
+
+        # rw-eap.conf operations
+        if "rw-eap.conf" in cmd_str:
+            # write: cat > path / tee
+            if "cat >" in cmd_str or "tee" in cmd_str:
+                rw_eap_conf.write_text(input_text)
+                return ""
+            # stat -c %s path → return file size as str
+            if "stat -c %s" in cmd_str:
+                return str(rw_eap_conf.stat().st_size)
+            # read: cat path (cmd is ["cat", "/path/to/rw-eap.conf"], no quotes)
+            # The original fake_run matched quoted cmd_str; the new mock receives
+            # the inner args directly (no SSH wrapping). Detect by cmd[0]=="cat"
+            # and any element containing "rw-eap.conf".
+            if cmd and cmd[0] == "cat" and any("rw-eap.conf" in str(c) for c in cmd):
+                return rw_eap_conf.read_text()
+            # mkdir / cp / mv / rm → empty
+            return ""
+
+        # swanctl commands → empty
+        if "swanctl" in cmd_str:
+            return ""
+
+        # Other SSH commands (firewall-cmd, ipban-ctl, etc.) → empty
+        return ""
+
+    # 1. Mock subprocess.run for installer_tokens.register() at app import time.
+    #    Returns CompletedProcess-shaped objects (legacy API used by app body).
+    _orig_run = _subprocess.run
+
+    def _mock_subprocess_run(cmd_args, *args, **kwargs):
+        cmd = cmd_args if isinstance(cmd_args, list) else (
+            cmd_args.split() if isinstance(cmd_args, str) else []
+        )
+        cmd_str = " ".join(str(c) for c in cmd)
+        if cmd and cmd[0] == "ssh":
+            stdout_str = _execute_ssh_simulation(cmd_args, stdin_data=kwargs.get("input"))
             class _R:
                 returncode = 0
-                stdout = ""
+                stdout = stdout_str
                 stderr = ""
             return _R()
-
-        # Not an ssh command — pass through
+        # Non-ssh subprocess calls — pass through
         return _orig_run(cmd_args, *args, **kwargs)
 
-    _orig_run = _subprocess.run
-    _subprocess.run = fake_run
+    def _mock_remote(cmd_args, stdin_data=None, timeout=None) -> str:
+        """Replacement for app._run_remote. Returns stdout str.
+
+        This is the test-time mock for the new injection point — production
+        code routes all SSH calls through _run_remote, so this mock handles
+        every SSH command the app makes after import. `timeout` is accepted
+        (and ignored) so the signature matches _run_remote's exactly.
+        """
+        return _execute_ssh_simulation(cmd_args, stdin_data=stdin_data)
+
+    monkeypatch.setattr(_subprocess, "run", _mock_subprocess_run)
 
     # Drop `app` and `installer_tokens` from sys.modules so app.py body re-runs
     # (its installer_tokens.register() at import time needs the patched subprocess).
@@ -330,10 +376,9 @@ def app_module(db_path, rw_eap_conf, request):
 
     import app
 
-    # Teardown
-    def _restore_subprocess():
-        _subprocess.run = _orig_run
-    request.addfinalizer(_restore_subprocess)
+    # 2. Mock app._run_remote for all test-time SSH invocations. monkeypatch
+    #    handles cleanup automatically (no manual teardown needed).
+    monkeypatch.setattr(app, "_run_remote", _mock_remote)
 
     app.ADMIN_PASS_HASH = portal_auth.hash_operator_password("test-admin-pw-12345")
     app.COOKIE_SECURE = "false"
