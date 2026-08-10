@@ -1,42 +1,38 @@
-# backup-workspace — Daily OpenClaw Workspace Backup to RustFS
+# backup-workspace — OpenClaw Workspace Backup to RustFS
 
 Disaster-recovery backup of `~/.openclaw/workspace` to the LAN-attached
 RustFS (S3-compatible) bucket.
 
+## Policy (current as of 2026-07-29, msg #29460)
+
+- **3x daily** at 06:00, 12:00, 22:00 SAST (= 04:00, 10:00, 20:00 UTC).
+- **Single rolling destination** — always keep latest, overwrite old.
+- **Entire workspace, including credentials** — `credentials/`,
+  `.env`, `*.mobileconfig`, `*.pfx`/`*.p12`, `**/id_rsa*`/`**/id_ed25519*`,
+  `memory/.dreams/`, and `.demo_vpn_creds` are all backed up.
+
 ## Why this exists
 
 OpenClaw holds my long-term state (MEMORY.md, TOOLS.md, HEARTBEAT.md, daily
-memory files, runbooks, project files, skills). Losing the workspace means
-losing months of accumulated context. This is the same pattern as the
-VPN portal backup, applied to the OpenClaw host itself.
+memory files, runbooks, project files, skills, credentials, secrets). Losing
+the workspace means losing months of accumulated context. This is the same
+pattern as the VPN portal backup, applied to the OpenClaw host itself.
 
 ## What's backed up
 
-**Total: ~672 files, ~47 MB** (compressed at S3 level by RustFS).
+**Total:** entire workspace minus regenerable bloat + cruft.
 
-| Category | Count | Notes |
+| Category | Count (approx) | Notes |
 |---|---|---|
-| Top-level state | 30+ | MEMORY.md, TOOLS.md, SOUL.md, AGENTS.md, IDENTITY.md, USER.md, HEARTBEAT.md, DECISIONS.md, etc. |
+| Top-level state | 30+ | MEMORY.md, TOOLS.md, SOUL.md, AGENTS.md, IDENTITY.md, USER.md, HEARTBEAT.md, DECISIONS.md, openclaw.json |
 | Daily memory | 100+ | `memory/YYYY-MM-DD.md` |
-| Project files | varies | `projects/`, `docs/`, `runbooks/`, `scripts/` |
+| Project files | varies | `projects/`, `docs/`, `scripts/` |
 | Skills | 50+ | `skills/*.skill` |
 | References | 7 | PDF + markdown research material |
 | Dashboards | varies | Grafana dashboard JSON |
+| **Credentials** | varies | `credentials/`, `.env`, `*.mobileconfig`, SSH keys, secrets |
 
 ## What's NOT backed up (and why)
-
-### Sensitive (NEVER backup)
-
-| Pattern | Reason |
-|---|---|
-| `credentials/` | Telegram bot tokens |
-| `.demo_vpn_creds` | VPN PSK for the lab |
-| `*.mobileconfig` | VPN profiles (contain PSK / password) |
-| `*.pfx`, `*.p12` | Private key bundles |
-| `.env` | Secret env files |
-| `**/id_rsa*`, `**/id_ed25519*` | SSH private keys (defensive) |
-| `memory/.dreams/` | Old migrated agent memory; contains bot tokens |
-| Any file containing `[0-9]{8,}:[A-Za-z0-9_-]{30,}` regex match | Catches Telegram bot tokens wherever they appear |
 
 ### Regenerable (not source-of-truth)
 
@@ -49,7 +45,6 @@ VPN portal backup, applied to the OpenClaw host itself.
 | `mempalace_env/` (365 MB) | Python venv, regenerable with `pip install -r requirements.txt` |
 | `reports/pdf-tool/` (54 MB) | Old PDF binaries |
 | `reports/weather-beacon-versions/` (187 MB) | Old versioned binaries |
-| `ops-tracker/node_modules/`, `ops-tracker-react/{node_modules,dist}/` | Build deps |
 | `*.log`, `*.log.*` | Regen from running services |
 
 ### Cruft
@@ -58,23 +53,37 @@ VPN portal backup, applied to the OpenClaw host itself.
 |---|---|
 | `tmp.bak-*`, `http.bak-*` | Old backup attempts |
 | `app.py.bak-v13pre` | Old backup of portal app |
-| `zitadel-compose.bak-*` | Abandoned Zitadel experiment |
-| Files with control chars in name | Workspace-root corruption remnants (`,\n    f`, etc.) |
+| Files with control chars in name | Workspace-root corruption remnants |
+
+## Schedule
+
+```
+OnCalendar=*-*-* 04,10,20:00:00 UTC   # 3x daily, rolling
+```
+
+3x daily at 06:00, 12:00, 22:00 SAST. Single rolling destination.
 
 ## How it works
 
 ```
 1. workspace_files_enumerator.py walks /root/.openclaw/workspace
-2. Excludes dirs/files matching EXCLUDE_DIRS / SENSITIVE_NAMES / SENSITIVE_SUFFIXES
-3. Scans text content (≤10 MB) for bot token regex
-4. Outputs a list of safe relative paths
-5. backup-workspace.sh does `rclone copy --files-from=<list>` to RustFS
-6. Post-flight: spot-checks key files + re-scans for sensitive content
+2. Excludes dirs/files matching EXCLUDE_DIRS / EXCLUDE_SUBSTRINGS
+3. Outputs a sorted list of relative paths
+4. backup-workspace.sh does `rclone copy --files-from=<list>` to RustFS
+5. Post-flight: spot-checks key state files + openclaw.json + .gitignore
 ```
 
 The `--files-from` approach (vs `--exclude` patterns) handles weird
 filenames with control characters more robustly — they never get
 enumerated in the first place.
+
+## Destination
+
+```
+rustfs:open-claw-push/workspace-backups/   (FIXED, rolling)
+```
+
+No dated subfolders. Each run overwrites the previous. Latest wins.
 
 ## Install
 
@@ -88,7 +97,7 @@ sudo install -m 0644 backup-workspace.service /etc/systemd/system/
 sudo install -m 0644 backup-workspace.timer /etc/systemd/system/
 sudo install -d -m 0755 /var/log/workspace-backup
 
-# 3. Enable daily run
+# 3. Enable + start
 sudo systemctl daemon-reload
 sudo systemctl enable --now backup-workspace.timer
 ```
@@ -96,37 +105,37 @@ sudo systemctl enable --now backup-workspace.timer
 ## Verify
 
 ```bash
-# Next scheduled run
+# Next scheduled runs (should show 3 daily)
 systemctl list-timers backup-workspace.timer
 
-# Manual one-shot
+# Manual one-shot (logs to journald)
 sudo systemctl start backup-workspace.service
 sudo journalctl -u backup-workspace.service --no-pager
 
-# List today's backup
-rclone lsf rustfs:open-claw-push/workspace-backups/2026-06-23/ | head -10
-rclone size rustfs:open-claw-push/workspace-backups/2026-06-23/
+# Inspect current rolling backup
+rclone lsf rustfs:open-claw-push/workspace-backups/ | head -10
+rclone size rustfs:open-claw-push/workspace-backups/
 ```
 
 ## Restore procedure
 
 ```bash
-# Pull today's backup to a temp dir
+# Pull current snapshot to a temp dir
 mkdir -p /tmp/restore
-rclone copy rustfs:open-claw-push/workspace-backups/2026-06-23/ /tmp/restore/
+rclone copy rustfs:open-claw-push/workspace-backups/ /tmp/restore/
 
 # Inspect (don't overwrite your live workspace blindly!)
 ls /tmp/restore/
 diff -r /tmp/restore/MEMORY.md ~/.openclaw/workspace/MEMORY.md
 
 # If you want to RESTORE OVER existing workspace (destructive!):
-#   1. Backup current workspace first (defensive)
+#   1. Defensive backup of current state FIRST
 #      rclone sync ~/.openclaw/workspace rustfs:open-claw-push/workspace-backups/_pre-restore-$(date -u +%Y-%m-%d)/
 #   2. Restore
 #      rclone sync /tmp/restore/ ~/.openclaw/workspace/
 ```
 
-## Lessons
+## Lessons (historical)
 
 ### #83 — Pre-backup audit caught 4 leaks
 
@@ -137,32 +146,19 @@ A naïve `rclone copy` with no exclusions would have backed up:
 - `memory/.dreams/short-term-recall.json.migrated` (Qwen bot token in old migrated memory)
 - 3 script files with hardcoded Telegram bot tokens in `archives/` and `reports/`
 
-A simple `rclone size` dry-run doesn't surface these — you have to **search
-the source tree for known sensitive patterns** and verify your exclusion
-list catches them all. The post-backup grep check (in the script) is the
-last line of defense.
+These were EXCLUDED from the backup as a SAFETY measure.
 
-### #84 — `set -euo pipefail` + grep returns 1 = script exits 1
+**Reversed 2026-07-29** per Zun directive msg #29460 — credentials are now
+INCLUDED in the backup. The regenerable bloat + cruft excludes remain.
 
-`grep` returns 1 when no match. With `pipefail`, the pipeline returns the
-rightmost non-zero. Combined with `set -e`, an assignment like
-`SENSITIVE_HITS=$(... | grep ...)` exits the script if grep finds nothing.
+### #86 — Content-based scanning was a defense layer
 
-Fix: `SENSITIVE_HITS=$(... | grep ...) || true`. Always think about the
-exit code of every command in a `set -e` script.
+The two-layer safety (pattern-based + content-scan) was robust, but
+no longer needed: Zun has decided the entire workspace, including all
+secrets, belongs in the RustFS rolling backup.
 
-### #85 — `sed -i` creates `.duplicate-tmp` files on some systems
+---
 
-GNU sed (default) replaces in-place, but with a copy-then-rename under the
-hood. If the rename fails (permissions, etc.), you can be left with a
-`.duplicate-tmp` file alongside the original. Always clean these up
-after `sed -i` operations on files with secrets.
-
-### #86 — Content-based scanning catches what pattern-matching misses
-
-Pattern-based exclusion (`*.mobileconfig`) is fast but rigid.
-Content-based scanning (`grep -E "[0-9]{8,}:[A-Za-z0-9_-]{30,}"`) catches
-tokens wherever they appear — even in JSON migration files, archives, or
-unexpected code paths. The enumerator does BOTH: pattern-based for speed
-+ a content scan for safety. The two-layer approach is more robust than
-either alone.
+**Change log:**
+- 2026-07-29 09:39 UTC — Zun directive (msg #29460): 3x daily, full workspace + credentials, rolling.
+- 2026-06-27 — Initial policy: daily 04:00 UTC, credentials excluded.

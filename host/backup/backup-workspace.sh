@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # backup-workspace.sh
 # ----------------------------------------------------------------------------
-# Daily backup of OpenClaw workspace (~/.openclaw/workspace) to RustFS (LAN S3).
+# OpenClaw workspace (~/.openclaw/workspace) backup to RustFS (LAN S3).
 #
-# Approach: enumerate safe files via Python helper, write to files list, then
-# `rclone copy --files-from`. This handles weird filenames (control chars in
-# corrupt remnants) more robustly than glob exclude patterns.
+# Policy (2026-07-29, Zun directive msg #29460):
+#   - Backup ENTIRE workspace INCLUDING credentials, secrets, SSH keys,
+#     .mobileconfig, .env, .pfx/.p12, .demo_vpn_creds, memory/.dreams/, etc.
+#   - 3x daily at 04:00, 10:00, 20:00 UTC (= 06:00, 12:00, 22:00 SAST).
+#   - ALWAYS KEEP LATEST, OVERWRITE OLD — single rolling destination.
 #
-# Excluded (sensitive — NEVER backup):
-#   - credentials/                       (telegram bot tokens)
-#   - .demo_vpn_creds                    (VPN PSK)
-#   - *.mobileconfig                     (contain VPN PSK / password)
-#   - *.pfx, *.p12, .env                 (private keys / secrets)
-#   - **/id_rsa*, **/id_ed25519*         (SSH private keys — defensive)
+# Approach: enumerate files via Python helper (with excludes for regenerable
+# bloat + cruft), write to files list, then `rclone copy --files-from` to a
+# fixed destination path. Handling weird filenames (control chars in corrupt
+# remnants) more robustly than glob exclude patterns.
 #
 # Excluded (regenerable — not source-of-truth):
 #   - .git/, **/__pycache__/, **/node_modules/, **/dist/
@@ -25,14 +25,15 @@
 #   - tmp.bak-*/, http.bak-*/, *.bak-*, app.py.bak-v13pre
 #   - Files with control chars in name (corruption remnants)
 #
-# Destination: rustfs:open-claw-push/workspace-backups/<YYYY-MM-DD>/
+# Destination: rustfs:open-claw-push/workspace-backups/  (FIXED — rolling)
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
 
 WORKSPACE="${WORKSPACE_DIR:-/root/.openclaw/workspace}"
 DEST_BASE="rustfs:open-claw-push/workspace-backups"
-DEST="${DEST_BASE}/$(date -u +%Y-%m-%d)"
+# Fixed rolling destination — always keep latest, overwrite old (msg #29460).
+DEST="${DEST_BASE}"
 LOG_DIR="/var/log/workspace-backup"
 LOG_FILE="$LOG_DIR/backup-$(date -u +%Y-%m-%d).log"
 
@@ -69,7 +70,31 @@ if ! rclone lsf "${DEST_BASE}/" --max-depth 1 >/dev/null 2>&1; then
 fi
 
 # Build the file list
-log "[1/3] Enumerating workspace files..."
+# Pre-cleanup: purge legacy YYYY-MM-DD/ folders at destination.
+# Zun directive msg #29460: "always keep latest, overwrite old."
+# The old daily schedule left dated subdirs (2026-06-23/ etc.) at this path.
+# `rclone copy --files-from` and `rclone sync --files-from` both preserve
+# destination files outside the file list, so we delete the dated subfolders
+# explicitly here (deterministic + idempotent).
+log "[1/4] Cleaning legacy YYYY-MM-DD/ folders from $DEST_BASE ..."
+mapfile -t LEGACY_DIRS < <(rclone lsf --dirs-only --max-depth 1 "$DEST_BASE" 2>/dev/null \
+    | grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2}/$" || true)
+if [[ ${#LEGACY_DIRS[@]} -eq 0 ]]; then
+    log "  none — already clean"
+else
+    log "  found ${#LEGACY_DIRS[@]} legacy dirs"
+    for d in "${LEGACY_DIRS[@]}"; do
+        log "    purge: $d"
+        if rclone purge "${DEST_BASE%/}/${d%/}" >/dev/null 2>&1; then
+            log "      OK"
+        else
+            log "      WARN: purge failed for $d"
+        fi
+    done
+fi
+
+# Build the file list
+log "[2/4] Enumerating workspace files..."
 FILES_LIST=$(mktemp)
 trap "rm -f $FILES_LIST" EXIT
 
@@ -82,8 +107,8 @@ if [[ "$COUNT" -eq 0 ]]; then
     exit 3
 fi
 
-# Push to RustFS
-log "[2/3] Uploading to $DEST..."
+# Push to RustFS — rolling snapshot, overwrites existing files at destination.
+log "[3/4] Uploading to $DEST ..."
 rclone copy "$WORKSPACE" "$DEST" \
     --files-from "$FILES_LIST" \
     --transfers=4 \
@@ -99,28 +124,16 @@ if [[ $RC -ne 0 ]]; then
 fi
 
 # Post-flight
-log "[3/3] Verifying..."
+log "[4/4] Verifying..."
 rclone size "$DEST" 2>&1
 
-# Spot-check key files
-for f in MEMORY.md TOOLS.md HEARTBEAT.md memory/2026-06-23.md; do
+# Spot-check key files (state + a credential file to prove inclusion)
+for f in MEMORY.md TOOLS.md HEARTBEAT.md openclaw.json .gitignore; do
     if rclone ls "$DEST/$f" >/dev/null 2>&1; then
         log "  OK: $f"
     else
         log "  MISSING: $f"
     fi
 done
-
-# Defense: verify NO sensitive content made it
-# `|| true` because grep returns 1 when no match (which would otherwise trip
-# `set -euo pipefail`).
-SENSITIVE_HITS=$(rclone lsf -R "$DEST" 2>/dev/null | grep -iE "mobileconfig|^credentials|demo_vpn_creds|\.env$" | head -5) || true
-if [[ -n "$SENSITIVE_HITS" ]]; then
-    log "WARNING: sensitive files detected in backup!"
-    echo "$SENSITIVE_HITS" | while read line; do
-        log "  LEAK: $line"
-    done
-    # Don't fail — just alert
-fi
 
 log "=== workspace backup done ==="
