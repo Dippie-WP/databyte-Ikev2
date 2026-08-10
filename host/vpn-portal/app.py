@@ -691,20 +691,66 @@ def read_rw_eap_conf() -> str:
 
 
 def write_rw_eap_conf(content: str) -> None:
-    """Atomic write: backup first, then write."""
+    """Atomic write: backup + temp file + size validate + atomic rename.
+
+    2026-08-10 fix: the old implementation used 'cat > FILE' via stdin, which
+    silently truncated the file when the SSH connection was interrupted mid-
+    write (verified — the iPhone auth outage at 08:39 SAST was caused by this).
+    New flow:
+      1. Backup current file to BACKUP_DIR (safety net)
+      2. Write the new content to <FILE>.tmp-<ts> via SSH
+      3. Validate the temp file size matches the expected byte count
+      4. mv the temp file over the original (POSIX atomic rename on same FS)
+      5. Verify the final file size matches what we intended to write
+    On any size mismatch we refuse to overwrite the live conf and raise HTTPException.
+    """
     ts = int(time.time())
     backup_path = f"{BACKUP_DIR}/rw-eap.conf.bak-portal-{ts}"
+    tmp_path = f"{RW_EAP_CONF}.tmp-{ts}"
+    content_bytes = content.encode()
+    expected_size = len(content_bytes)
+
+    # 1. Backup current file
     ssh_903(["mkdir", "-p", BACKUP_DIR])
     ssh_903(["cp", RW_EAP_CONF, backup_path])
-    # Write via stdin over SSH (no shell escaping issues)
+
+    # 2. Write to temp file via SSH (stdin via -i batch mode)
     r = subprocess.run(
         ["ssh", "-i", SSH_KEY, "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
          "-o", "StrictHostKeyChecking=accept-new",
-         f"root@{VPN_HOST}", "cat > " + RW_EAP_CONF],
-        input=content.encode(), capture_output=True, timeout=SSH_TIMEOUT,
+         f"root@{VPN_HOST}", "cat > " + tmp_path],
+        input=content_bytes, capture_output=True, timeout=SSH_TIMEOUT,
     )
     if r.returncode != 0:
-        raise HTTPException(502, f"write conf failed: {r.stderr.decode(errors='replace')[:200]}")
+        ssh_903(["rm", "-f", tmp_path])  # cleanup
+        raise HTTPException(502, f"temp file write failed: {r.stderr.decode(errors='replace')[:200]}")
+
+    # 3. Validate temp file size matches expected (the critical new check)
+    try:
+        stat_out = ssh_903(["stat", "-c", "%s", tmp_path])
+        actual_size = int(stat_out.strip())
+    except (ValueError, AttributeError, HTTPException) as e:
+        ssh_903(["rm", "-f", tmp_path])
+        raise HTTPException(502, f"could not stat temp file: {e!r}")
+    if actual_size != expected_size:
+        ssh_903(["rm", "-f", tmp_path])
+        raise HTTPException(
+            502,
+            f"temp file size mismatch: expected {expected_size} bytes, got {actual_size}. "
+            f"SSH write was likely truncated. Refusing to overwrite production conf."
+        )
+
+    # 4. Atomic rename (POSIX guarantees atomicity on same filesystem)
+    ssh_903(["mv", tmp_path, RW_EAP_CONF])
+
+    # 5. Verify final file size on disk
+    final_size = int(ssh_903(["stat", "-c", "%s", RW_EAP_CONF]).strip())
+    if final_size != expected_size:
+        raise HTTPException(
+            502,
+            f"final file size mismatch: expected {expected_size}, got {final_size}. "
+            f"Atomic rename may have failed silently."
+        )
 
 
 def reload_charon_creds() -> None:
@@ -714,19 +760,44 @@ def reload_charon_creds() -> None:
 
 
 def append_eap_block(identity: str, password: str) -> None:
-    """Append a new EAP block to rw-eap.conf if not present (idempotent on id)."""
+    """Append a new EAP block to rw-eap.conf if not present (idempotent on id).
+
+    2026-08-10 fix: added sanity check. The previous read-modify-write pattern
+    silently truncated the file when the read returned partial content (SSH
+    glitch). We now refuse to write if the read didn't return a file with both
+    the 'connections {' block AND the 'secrets {' block — absence of either
+    means the file is corrupted and rewriting it would lose the connection
+    profile, breaking all iPhone IKEv2 connections.
+    """
     conf = read_rw_eap_conf()
     block_id = f"eap-{identity}"
+
+    # Idempotency check
     if re.search(rf"^\s*{re.escape(block_id)}\s*\{{", conf, re.MULTILINE):
         raise HTTPException(409, f"EAP block '{block_id}' already exists in rw-eap.conf")
+
+    # SANITY CHECK: must contain both top-level blocks
+    if "connections {" not in conf or "secrets {" not in conf:
+        raise HTTPException(
+            500,
+            f"rw-eap.conf is missing the connections {{ or secrets {{ block "
+            f"(read returned {len(conf)} bytes). "
+            f"Refusing to append — file would be truncated further. "
+            f"Restore from backup first: "
+            f"cp /opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf.bak-20260810-083952 "
+            f"/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf"
+        )
+
     addition = (
         f"\n  {block_id} {{\n"
         f"    id     = {identity}\n"
         f'    secret = "{password}"\n'
         f"  }}\n"
     )
+
     if not conf.rstrip().endswith("}"):
         raise HTTPException(500, "rw-eap.conf has unexpected shape (no trailing '}')")
+
     new_conf = conf.rstrip()[:-1].rstrip() + addition + "}\n"
     write_rw_eap_conf(new_conf)
 
