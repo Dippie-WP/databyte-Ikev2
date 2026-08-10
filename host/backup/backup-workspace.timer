@@ -1,10 +1,13 @@
 [Unit]
-Description=Daily OpenClaw workspace backup to RustFS
+Description=OpenClaw workspace backup to RustFS (3x daily, rolling — latest only)
 Documentation=file:///root/projects/strongswan-vpn-gateway/host/backup/backup-workspace.service
 
 [Timer]
-# Daily at 04:00 UTC (06:00 SAST). After VPN portal backup (03:30 UTC) to avoid simultaneous rclone load.
-OnCalendar=*-*-* 04:00:00 UTC
+# 3x daily at 06:00, 12:00, 22:00 SAST (= 04:00, 10:00, 20:00 UTC).
+# Zun directive 2026-07-29 09:39 UTC (msg #29460): full workspace incl. credentials,
+# always keep latest / overwrite old — single rolling destination (no dated folders).
+# After VPN portal backup (03:30 UTC) to avoid simultaneous rclone load.
+OnCalendar=*-*-* 04,10,20:00:00 UTC
 Persistent=true
 Unit=backup-workspace.service
 

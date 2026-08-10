@@ -1,10 +1,11 @@
 [Unit]
-Description=Daily VPN portal config + DB backup to RustFS
+Description=VPN portal config + DB backup to RustFS (2x daily, keep last 2)
 Documentation=file:///root/projects/strongswan-vpn-gateway/host/backup/backup-vpn-portal-config.service
 
 [Timer]
-# Daily at 03:30 UTC (05:30 SAST)
-OnCalendar=*-*-* 03:30:00 UTC
+# 2x daily at 06:00, 12:00 SAST (= 04:00, 10:00 UTC). Zun directive msg #29483, 2026-07-29 10:11 UTC.
+# Always keep last 2 dated snapshots — enforced by [4/4] prune step in backup-vpn-portal-config.sh.
+OnCalendar=*-*-* 04,10:00:00 UTC
 Persistent=true
 Unit=backup-vpn-portal-config.service
 
