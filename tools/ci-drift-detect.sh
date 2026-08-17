@@ -25,20 +25,30 @@ cd "$REPO_ROOT"
 VPS_HOST="${VPS_HOST:-vps-01}"
 VPS_USER="${VPS_USER:-root}"
 
-# Files we want to verify are in sync between LIVE VPS and git HEAD
+# Files we want to verify are in sync between LIVE VPS and git HEAD.
+# Expanded 2026-08-17 to cover the 3 atomic-write callers + backup script that
+# were part of the TKT-002 refactor (previously uncommitted, drift went
+# undetected because they weren't in this list — see runs #187-196).
 FILES=(
   "host/vpn-portal/app.py"
   "host/vpn-portal/www/portal/index.html"
   "quota/quota-monitor.py"
   "quota/bandwidth-monitor.py"
+  "host/backup/backup-vpn-portal-config.sh"
+  "ops/rotate-vpn-credentials.py"
+  "quota/update_rw_eap_conf.py"
 )
 
-# Remote paths on the VPS where these files LIVE
+# Remote paths on the VPS where these files LIVE. If a file isn't deployed
+# yet, its live path is empty and the check SKIPs it (no false-positive).
 declare -A LIVE_PATHS=(
   ["host/vpn-portal/app.py"]="/opt/vpn-portal/app.py"
   ["host/vpn-portal/www/portal/index.html"]="/opt/vpn-portal/www/portal/index.html"
   ["quota/quota-monitor.py"]="/home/zunaid/strongswan/quota/quota-monitor.py"
   ["quota/bandwidth-monitor.py"]="/home/zunaid/strongswan/quota/bandwidth-monitor.py"
+  ["host/backup/backup-vpn-portal-config.sh"]=""
+  ["ops/rotate-vpn-credentials.py"]=""
+  ["quota/update_rw_eap_conf.py"]="/opt/strongswan-vpn-gateway/quota/update_rw_eap_conf.py"
 )
 
 echo "=== Drift detection: $(date -u +%FT%TZ) ==="
@@ -49,6 +59,14 @@ echo "  VPS:          $VPS_USER@$VPS_HOST"
 drift_count=0
 for rel in "${FILES[@]}"; do
   git_md5=$(git show "HEAD:$rel" 2>/dev/null | md5sum | awk '{print $1}')
+  # Skip files that aren't deployed to LIVE yet (empty LIVE_PATHS entry).
+  # Without this, md5sum with no arg hashes empty stdin and reports drift
+  # vs real git content (false positive). Files with no live path yet are
+  # "future drift coverage" — they'll be checked once they're deployed.
+  if [ -z "${LIVE_PATHS[$rel]:-}" ]; then
+    echo "  SKIP:    $rel (no LIVE_PATH configured — file not deployed yet)"
+    continue
+  fi
   live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPS_USER@$VPS_HOST" "md5sum ${LIVE_PATHS[$rel]}" 2>/dev/null | awk '{print $1}')
 
   if [ -z "$git_md5" ] || [ -z "$live_md5" ]; then
