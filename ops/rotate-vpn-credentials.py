@@ -109,7 +109,14 @@ def update_secrets_file(user_name: str, secret_b64: str, dry_run: bool) -> None:
         return
     script = f'''
 import sys
+from pathlib import Path
+# Bootstrap shared helper on the remote VPS (must be deployed alongside)
+sys.path.insert(0, "/opt/strongswan-vpn-gateway/host")
+from safe_write_rw_eap import atomic_write_conf_local, SafeWriteError
+
 path = "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf"
+backup_dir = "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/.backups"
+
 with open(path) as f:
     lines = f.readlines()
 
@@ -133,16 +140,19 @@ if not found:
     sys.stderr.write("SECRET_BLOCK_NOT_FOUND: {user_name}\\n")
     sys.exit(1)
 
-# Backup before write
-import shutil
-shutil.copy2(path, path + ".bak-" + str(int(__import__("time").time())))
-
-with open(path, "w") as f:
-    f.writelines(lines)
+# TKT-002: route the write through the shared atomic helper instead of
+# 'open(path, "w")' which truncates on mid-write failure.
+try:
+    atomic_write_conf_local(
+        "".join(lines), path, backup_dir, caller_label="rotate"
+    )
+except SafeWriteError as e:
+    sys.stderr.write(f"ATOMIC_WRITE_FAILED: {{e}}\\n")
+    sys.exit(2)
 print("OK")
 '''
     ssh_run('sudo python3', stdin=script)
-    print(f"[OK] rw-eap.conf: eap-{user_name} secret rotated")
+    print(f"[OK] rw-eap.conf: eap-{user_name} secret rotated (atomic)")
 
 
 def reload_charon(dry_run: bool) -> None:
