@@ -337,7 +337,15 @@ def log_audit(db, actor: str, action: str, target_type: str,
 # === Kill credentials at 100% (unchanged from v1.7.0) ===
 
 def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
-    """Replace rw-eap.conf secret for `username` with KILLED-<random>."""
+    """Replace rw-eap.conf secret for `username` with KILLED-<random>.
+
+    Canonical (2026-08-17 reconciliation): routes through
+    safe_write_rw_eap.atomic_write_conf_local with shared fcntl.flock on
+    /var/lock/rw-eap.lock. Replaces the prior TKT-010 quota_monitor_atomic_helper
+    (separate module, different API) so we have ONE helper for atomic rw-eap.conf
+    writes — the TKT-002 single source of truth. See host/safe_write_rw_eap.py
+    for the algorithm; TKT-010's flock semantics are folded in there.
+    """
     if not CONF_PATH.exists():
         log.error("rw-eap.conf not found at %s", CONF_PATH)
         return False
@@ -356,12 +364,24 @@ def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
                  "auth via RADIUS only) — rw-eap kill skipped", username)
         return True
 
-    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    bak = CONF_BACKUP_DIR / f"rw-eap.conf.bak-quotamon-{int(time.time())}"
-    bak.write_text(original)
-    log.info("Backed up original to %s", bak)
+    # Atomic write via shared helper (TKT-002 canonical + TKT-010 flock folded in).
+    # Bootstrap sys.path so the helper module is importable from this file.
+    # On VPS the canonical location is /opt/strongswan-vpn-gateway/host/.
+    import sys
+    from pathlib import Path as _Path
+    _helper_dir = "/opt/strongswan-vpn-gateway/host"
+    if _helper_dir not in sys.path:
+        sys.path.insert(0, _helper_dir)
+    from safe_write_rw_eap import atomic_write_conf_local, SafeWriteError
 
-    CONF_PATH.write_text(new_text)
+    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        atomic_write_conf_local(
+            new_text, str(CONF_PATH), str(CONF_BACKUP_DIR), caller_label="quotamon"
+        )
+    except SafeWriteError as e:
+        log.error("atomic write FAILED for %s, live conf untouched: %s", username, e)
+        return False
     log.info("Killed eap-%s secret in %s (subs=%d)", username, CONF_PATH, n_subs)
 
     try:
@@ -373,14 +393,21 @@ def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
     except subprocess.CalledProcessError as e:
         log.error("charon --load-creds FAILED: rc=%s stderr=%s stdout=%s",
                   e.returncode, e.stderr, e.stdout)
-        CONF_PATH.write_text(original)
-        log.warning("Rolled back conf change due to charon reload failure")
+        # ROLLBACK: restore the pre-write content via the SAME atomic helper.
+        # The helper makes its own backup before the temp-write, so passing
+        # `original` through is enough — no extra snapshot file needed.
+        try:
+            atomic_write_conf_local(
+                original, str(CONF_PATH), str(CONF_BACKUP_DIR),
+                caller_label="quotamon-rollback",
+            )
+            log.warning("Rolled back conf change via atomic helper due to charon reload failure")
+        except SafeWriteError as e2:
+            log.error("ROLLBACK write FAILED: %s. Manual restore required (see backup dir).", e2)
         return False
 
     return True
 
-
-# === Phase 5: RADIUS radcheck disable (already MariaDB, unchanged) ===
 
 def disable_customer_radcheck(username: str) -> bool:
     """Replace radcheck Cleartext-Password with DISABLED-<random> marker."""

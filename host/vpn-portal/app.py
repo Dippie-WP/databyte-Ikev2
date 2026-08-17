@@ -180,9 +180,27 @@ async def _start_session_cleanup():
     app.state.session_cleanup_task = asyncio.create_task(_session_cleanup_loop())
     log.info("session cleanup task scheduled (every 5 min)")
 
+    # Telegram bot init (one Application per gunicorn worker) — added 2026-08-10
+    try:
+        from bot import build_application
+        app.state.bot_application = build_application()
+        await app.state.bot_application.initialize()
+        await app.state.bot_application.start()
+        log.info("telegram bot application started (webhook mode)")
+    except Exception as e:
+        log.error(f"telegram bot init failed: {e}")
+
 @app.on_event("shutdown")
 async def _stop_session_cleanup():
     task = getattr(app.state, "session_cleanup_task", None)
+    # Telegram bot shutdown — added 2026-08-10
+    bot_app = getattr(app.state, "bot_application", None)
+    if bot_app:
+        try:
+            await bot_app.stop()
+            await bot_app.shutdown()
+        except Exception as e:
+            log.warning(f"telegram bot shutdown error: {e}")
     if task:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -229,7 +247,12 @@ def _run_remote(cmd_args: list, timeout: int = SSH_TIMEOUT, stdin_data=None) -> 
         stdin_data = stdin_data.encode()
     # Quote args safely (single-quote wrap, escape internal quotes)
     def shq(s: str) -> str:
-        return "'" + s.replace("'", "'\\''") + "'"
+        # No quoting: args are passed as a list to subprocess.run (no shell),
+        # so any quotes we add reach the remote shell verbatim and break
+        # redirect parsing (e.g. `cat > FILE` becomes `'cat > FILE'`, which
+        # the remote shell tries to execute as a single command name).
+        # All paths in this codebase are controlled (no spaces / shell metas).
+        return s
     remote = " ".join(shq(a) for a in cmd_args)
     full = [
         "ssh", "-i", SSH_KEY,
@@ -705,68 +728,58 @@ def read_rw_eap_conf(_ssh=None) -> str:
     except HTTPException:
         return ""
 
-
 def write_rw_eap_conf(content: str, _ssh=None) -> None:
-    """Atomic write: backup + temp file + size validate + atomic rename.
+    """Thin wrapper around the shared atomic-write helper (TKT-002 single source of truth).
 
-    2026-08-10 fix: the old implementation used 'cat > FILE' via stdin, which
-    silently truncated the file when the SSH connection was interrupted mid-
-    write (verified — the iPhone auth outage at 08:39 SAST was caused by this).
-    New flow:
-      1. Backup current file to BACKUP_DIR (safety net)
-      2. Write the new content to <FILE>.tmp-<ts> via SSH
-      3. Validate the temp file size matches the expected byte count
-      4. mv the temp file over the original (POSIX atomic rename on same FS)
-      5. Verify the final file size matches what we intended to write
-    On any size mismatch we refuse to overwrite the live conf and raise HTTPException.
+    2026-08-11: the previous in-line atomic-write logic was copy-pasted into 3
+    OTHER writers (quota-monitor kill, update_rw_eap_conf, rotate-vpn-credentials)
+    — each had subtle differences and most did not match this one's safety
+    guarantees. We now route every writer through one helper. This function:
+      - preserves the `_ssh` injection point for tests (matches conftest mock)
+      - translates SafeWriteError (helper exception) → HTTPException for FastAPI
 
-    _ssh: injectable transport for tests. Defaults to _run_remote (real SSH).
-    Production callers omit it; tests pass a mock that simulates SSH responses.
+    Algorithm (helper does the real work — see host/safe_write_rw_eap.py):
+      1. mkdir backup_dir + cp current → <conf>.bak-<label>-<ts>
+      2. tee content → <conf>.tmp-<label>-<ts>
+      3. stat temp; if size != expected, rm temp + raise (no live write)
+      4. mv temp → conf_path (POSIX atomic rename on same FS)
+      5. stat final; verify size matches
+
+    On any size mismatch the live conf is NEVER opened in 'w' mode.
     """
+    # Bootstrap shared helper import (one-time per import). The portal is
+    # relocated from `host/vpn-portal/` on OC to `/opt/vpn-portal/` on VPS,
+    # so the helper lives at a different relative location — check both.
+    import sys
+    from pathlib import Path as _Path
+    _HELPER_CANDIDATES = (
+        "/opt/strongswan-vpn-gateway/host",                       # VPS canonical
+        str(_Path(__file__).resolve().parent.parent),             # OC dev
+    )
+    for _cand in _HELPER_CANDIDATES:
+        if _Path(_cand, "safe_write_rw_eap.py").exists():
+            if _cand not in sys.path:
+                sys.path.insert(0, _cand)
+            break
+    else:
+        raise ImportError(
+            "safe_write_rw_eap.py not found in: "
+            + ", ".join(_HELPER_CANDIDATES)
+            + " (TKT-002 single source of truth is missing)"
+        )
+    from safe_write_rw_eap import atomic_write_conf_remote, SafeWriteError
+
     ssh = _ssh if _ssh is not None else _run_remote
-    ts = int(time.time())
-    backup_path = f"{BACKUP_DIR}/rw-eap.conf.bak-portal-{ts}"
-    tmp_path = f"{RW_EAP_CONF}.tmp-{ts}"
-    content_bytes = content.encode()
-    expected_size = len(content_bytes)
-
-    # 1. Backup current file
-    ssh(["mkdir", "-p", BACKUP_DIR])
-    ssh(["cp", RW_EAP_CONF, backup_path])
-
-    # 2. Write to temp file via SSH (stdin piped via stdin_data)
     try:
-        ssh(["cat > " + tmp_path], stdin_data=content_bytes)
-    except HTTPException:
-        ssh(["rm", "-f", tmp_path])  # cleanup on write failure
-        raise
-
-    # 3. Validate temp file size matches expected (the critical new check)
-    try:
-        stat_out = ssh(["stat", "-c", "%s", tmp_path])
-        actual_size = int(stat_out.strip())
-    except (ValueError, AttributeError, HTTPException) as e:
-        ssh(["rm", "-f", tmp_path])
-        raise HTTPException(502, f"could not stat temp file: {e!r}")
-    if actual_size != expected_size:
-        ssh(["rm", "-f", tmp_path])
+        atomic_write_conf_remote(
+            content, ssh, RW_EAP_CONF, BACKUP_DIR, caller_label="portal"
+        )
+    except SafeWriteError as e:
         raise HTTPException(
             502,
-            f"temp file size mismatch: expected {expected_size} bytes, got {actual_size}. "
-            f"SSH write was likely truncated. Refusing to overwrite production conf."
+            f"rw-eap.conf write aborted (size mismatch refused): {e}",
         )
 
-    # 4. Atomic rename (POSIX guarantees atomicity on same filesystem)
-    ssh(["mv", tmp_path, RW_EAP_CONF])
-
-    # 5. Verify final file size on disk
-    final_size = int(ssh(["stat", "-c", "%s", RW_EAP_CONF]).strip())
-    if final_size != expected_size:
-        raise HTTPException(
-            502,
-            f"final file size mismatch: expected {expected_size}, got {final_size}. "
-            f"Atomic rename may have failed silently."
-        )
 
 
 def reload_charon_creds() -> None:
@@ -1335,67 +1348,86 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     cust_id = None
     user_id = None
     dev_id  = None
+    eap_block_written = False
     try:
-        db_exec(
-            f"INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
-            f"over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
-            f"bandwidth_down_mbps, bandwidth_up_mbps, "
-            f"created_at, updated_at, notes, billing_id, email) VALUES "
-            f"({_q(cust_name)}, {_q(req.display_name)}, {_q(req.telegram_username)}, 0, 1, "
-            f"0, {int(data_limit)}, 0, {int(tier_id)}, 'active', 1, "
-            f"{int(bandwidth_down_mbps)}, {int(bandwidth_up_mbps)}, "
-            f"{now}, {now}, {_q(req.notes)}, {_q(req.billing_id)}, {_q(req.email)});"
-        )
-        cust_id = db_query(f"SELECT id FROM customers WHERE name = {_q(cust_name)};")[0]["id"]
+        with portal_auth._engine().begin() as _tx_conn:
+            wrapped = portal_auth._Conn(_tx_conn)
+            try:
+                wrapped.execute(
+                    "INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
+                    "over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
+                    "bandwidth_down_mbps, bandwidth_up_mbps, "
+                    "created_at, updated_at, notes, billing_id, email) VALUES "
+                    "(?, ?, ?, 0, 1, 0, ?, 0, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)",
+                    (cust_name, req.display_name, req.telegram_username,
+                     int(data_limit), int(tier_id),
+                     int(bandwidth_down_mbps), int(bandwidth_up_mbps),
+                     now, now, req.notes, req.billing_id, req.email)
+                )
+                cust_id = wrapped.execute(
+                    "SELECT id FROM customers WHERE name = ?", (cust_name,)
+                ).fetchone()["id"]
 
-        db_exec(
-            f"INSERT INTO users (name, password) VALUES ({_q(eap_identity)}, X'{ntlm.hex().upper()}');"
-        )
-        user_id = db_query(f"SELECT id FROM users WHERE name = {_q(eap_identity)};")[0]["id"]
+                wrapped.execute(
+                    "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
+                    (eap_identity, ntlm.hex().upper())
+                )
+                user_id = wrapped.execute(
+                    "SELECT id FROM users WHERE name = ?", (eap_identity,)
+                ).fetchone()["id"]
 
-        db_exec(
-            f"INSERT INTO devices (customer_id, strongswan_user_id, device_name, device_type, "
-            f"os_version, notes, is_active, created_at, updated_at) VALUES "
-            f"({int(cust_id)}, {int(user_id)}, {_q(req.device_name)}, {_q(req.device_type)}, "
-            f"{_q(req.os_version)}, {_q(req.notes)}, 1, {now}, {now});"
-        )
+                wrapped.execute(
+                    "INSERT INTO devices (customer_id, strongswan_user_id, device_name, device_type, "
+                    "os_version, notes, is_active, created_at, updated_at) VALUES "
+                    "(?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    (int(cust_id), int(user_id), req.device_name, req.device_type,
+                     req.os_version, req.notes, now, now)
+                )
 
-        # v1.4.0 — Bug #2: populate customers.user_id with the user's PK.
-        # Operator customers (is_operator=1) have no user and skip this path.
-        db_exec(
-            f"UPDATE customers SET user_id = {int(user_id)} WHERE id = {int(cust_id)};"
-        )
-        dev_id = db_query(f"SELECT id FROM devices WHERE device_name = {_q(req.device_name)} "
-                          f"AND customer_id = {int(cust_id)};")[0]["id"]
+                # v1.4.0 — Bug #2: populate customers.user_id with the user's PK.
+                wrapped.execute(
+                    "UPDATE customers SET user_id = ? WHERE id = ?",
+                    (int(user_id), int(cust_id))
+                )
+                dev_id = wrapped.execute(
+                    "SELECT id FROM devices WHERE device_name = ? AND customer_id = ?",
+                    (req.device_name, int(cust_id))
+                ).fetchone()["id"]
 
-        # Phase 4.3 + 4.7 (RADIUS migration): write radcheck + usergroup rows
-        # for the new customer. Best-effort: if RADIUS DB write fails here, the
-        # customer is still in MariaDB and PSK still works (charon uses
-        # rw-eap.conf for now). Phase 5 cutover will read from FreeRADIUS.
-        try:
-            portal_auth.add_customer_radcheck(
-                eap_identity, password, ntlm.hex().upper()
-            )
-            portal_auth.add_customer_usergroup(eap_identity, "default")
-        except Exception as e:
-            log.warning(
-                f"Phase 4B RADIUS write failed for {eap_identity} "
-                f"(non-fatal until Phase 5 cutover): {e}"
-            )
+                # Phase 4.3 + 4.7 — radcheck + usergroup in the SAME transaction.
+                # Idempotent wipe first (defense in depth).
+                wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
+                wrapped.execute(
+                    "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                    "(?, 'Cleartext-Password', ':=', ?)",
+                    (eap_identity, password)
+                )
+                wrapped.execute(
+                    "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                    "(?, 'NT-Password', ':=', ?)",
+                    (eap_identity, ntlm.hex().upper())
+                )
+                wrapped.execute(
+                    "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, ?, ?)",
+                    (eap_identity, "default", 1)
+                )
 
-        # 7. EAP block
-        append_eap_block(eap_identity, password)
+                # 7. EAP block — if this raises, the with-block rolls back the DB writes
+                append_eap_block(eap_identity, password)
+                eap_block_written = True
 
-        # 8. Reload charon
-        reload_charon_creds()
+                # 8. Reload charon — if this raises, the with-block rolls back
+                reload_charon_creds()
+            except Exception:
+                raise
     except Exception as e:
-        # Best-effort rollback
+        # The with portal_auth._engine().begin() block above rolls back ALL DB
+        # writes (customers/users/devices/radcheck/radusergroup) on any exception
+        # — no manual DELETE needed.
         log.error(f"v1.2.7 create_client failed at sub-step; rolling back: {e}")
-        if dev_id:  db_exec(f"DELETE FROM devices WHERE id = {int(dev_id)};")
-        if user_id: db_exec(f"DELETE FROM users   WHERE id = {int(user_id)};")
-        if cust_id: db_exec(f"DELETE FROM customers WHERE id = {int(cust_id)};")
-        # If we already appended the EAP block, try to remove it (best-effort)
-        if eap_block_exists(eap_identity):
+        # EAP block write is an SSH side-effect outside the DB transaction.
+        # If we wrote it before the failure, try to remove it (best-effort).
+        if eap_block_written:
             try:
                 conf = read_rw_eap_conf()
                 pat = re.compile(
@@ -1403,8 +1435,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                     re.DOTALL,
                 )
                 write_rw_eap_conf(pat.sub("", conf, count=1))
-            except Exception:
-                pass
+            except Exception as cleanup_err:
+                log.warning(f"EAP block cleanup failed for {eap_identity}: {cleanup_err}")
         raise
 
     # 9. Audit
@@ -2027,24 +2059,31 @@ def _q(s: str) -> str:
 
 
 def _audit(actor: str, action: str, payload: dict) -> None:
-    """Write to audit_log on LXC 903.
+    """Write to audit_log.
 
     Schema: actor TEXT, action TEXT, target_type TEXT, target_id INTEGER,
     payload TEXT, created_at INTEGER.
+
+    Uses parameterized queries (not f-string interpolation) so the JSON
+    payload's ':' separators don't get parsed as SQLAlchemy named-param
+    syntax (which produced %(key)s patterns that couldn't be bound).
     """
     import json as _json
-    raw = _json.dumps(payload, separators=(",", ":"))
     target_type = payload.pop("_target_type", None) if isinstance(payload, dict) else None
     target_id   = payload.pop("_target_id",   None) if isinstance(payload, dict) else None
+    raw = _json.dumps(payload, separators=(",", ":"))
     sql = (
-        f"INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
-        f"VALUES ({_q(actor)}, {_q(action)}, "
-        f"{_q(target_type) if target_type is not None else 'NULL'}, "
-        f"{int(target_id) if target_id is not None else 'NULL'}, "
-        f"{_q(raw)}, UNIX_TIMESTAMP());"
+        "INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
+        "VALUES (?, ?, ?, ?, ?, UNIX_TIMESTAMP())"
     )
     try:
-        db_exec(sql)
+        db_exec(sql, (
+            actor,
+            action,
+            target_type,
+            int(target_id) if target_id is not None else None,
+            raw,
+        ))
     except HTTPException:
         pass
 
@@ -2971,3 +3010,51 @@ if __name__ == "__main__":
     if not ADMIN_PASS_HASH:
         log.warning("ADMIN_PASS_HASH not set — /api/login will refuse all requests")
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+
+# ---------------------------------------------------------------------------
+# Telegram bot webhook route — added 2026-08-10 per Zun msg #34000
+# ---------------------------------------------------------------------------
+@app.post("/telegram/webhook/{secret}")
+async def telegram_webhook(secret: str, request: Request):
+    """Receive Telegram updates. Secret in URL prevents unauthorized calls."""
+    import hmac as _hmc
+    from bot import WEBHOOK_SECRET, build_application
+    from telegram import Update
+
+    if not _hmc.compare_digest(secret, WEBHOOK_SECRET):
+        raise HTTPException(404, "not found")
+
+    bot_app = getattr(app.state, "bot_application", None)
+    if bot_app is None:
+        bot_app = build_application()
+        await bot_app.initialize()
+        await bot_app.start()
+        app.state.bot_application = bot_app
+
+    data = await request.json()
+    update = Update.de_json(data, bot_app.bot)
+    # Manual dispatch: bypass PTB v22 dispatcher entirely.
+    # Application.process_update() and update_queue.put() silently return
+    # without invoking handlers in this build — root cause of bot appearing
+    # dead. We iterate handler groups, run check_update on each, and invoke
+    # matching handlers directly.
+    log.info(f"telegram webhook update_id={update.update_id} chat_id={update.effective_chat.id if update.effective_chat else None}")
+    log.info(f"telegram webhook update_id={update.update_id} eff_user={(update.effective_user.id, update.effective_user.username) if update.effective_user else None}")
+    log.info(f"telegram webhook update_id={update.update_id} eff_msg_text={update.effective_message.text if update.effective_message else None}")
+    context = bot_app.context_types.context.from_update(update, bot_app)
+    await context.refresh_data()
+    handlers_fired = 0
+    for handlers in [v.copy() for v in bot_app.handlers.values()]:
+        for handler in handlers:
+            check = handler.check_update(update)
+            log.info(f"telegram webhook update_id={update.update_id} handler={type(handler).__name__} check={check}")
+            if check is None or check is False:
+                continue
+            try:
+                await handler.handle_update(update, bot_app, check, context)
+                handlers_fired += 1
+            except Exception as e:
+                log.exception(f"telegram webhook handler {type(handler).__name__} raised: {e}")
+            break
+    log.info(f"telegram webhook update_id={update.update_id} handlers_fired={handlers_fired}")
+    return {"ok": True, "handlers_fired": handlers_fired}
