@@ -1,0 +1,37 @@
+#!/bin/bash
+# .git/hooks/pre-push — blocks `git push` if drift-detect or pytest fails locally.
+#
+# Why (added 2026-08-17 per Zun msg #36714, "A"):
+# Original 5-day drift started because Phase 4B RADIUS migration was
+# deployed directly to /opt/vpn-portal/app.py without a commit. Today's
+# ci failure was the same gap (LIVE ≠ tests). Catching both pre-push
+# shrinks the silent-detection window from hours to zero.
+#
+# Bypass: `git push --no-verify` (use sparingly — log it in commit body
+# if you do, so we have an audit trail).
+
+set -e
+
+echo "=== pre-push: drift-detect ==="
+if ! ./tools/ci-drift-detect.sh 2>&1 | tail -8; then
+    echo
+    echo "✗ pre-push BLOCKED: drift-detect failed (LIVE files differ from HEAD)."
+    echo "  Either sync LIVE → git (tools/sync-from-live.sh) or revert the drift."
+    echo "  Bypass with --no-verify (and document why in the commit body)."
+    exit 1
+fi
+
+echo
+echo "=== pre-push: pytest ==="
+# Quiet run; only fail on failures. Skip pre-existing skips (xdist-friendly).
+if ! python3 -m pytest tests/ -q --tb=line --color=no -p no:cacheprovider \
+        --ignore-glob='**/__pycache__' 2>&1 | tail -10; then
+    echo
+    echo "✗ pre-push BLOCKED: pytest failed."
+    echo "  Fix the failing tests, or run with --no-verify (and document why)."
+    exit 1
+fi
+
+echo
+echo "✓ pre-push checks passed (drift clean + pytest green)."
+exit 0

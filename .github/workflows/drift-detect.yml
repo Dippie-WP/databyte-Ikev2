@@ -7,8 +7,12 @@ on:
     branches: [main]
   workflow_dispatch:
   schedule:
-    # Every 6 hours — catches drift from manual LIVE edits
-    - cron: "0 */6 * * *"
+    # Every 5 minutes — catches drift from manual LIVE edits fast.
+    # 5min cron is fine for a single SSH + md5sum per file (low load).
+    # Combined with the push trigger (instant), the silent-detection
+    # window is now ~5min instead of the prior 6h. See CONTRIBUTING.md
+    # for the "no LIVE-only edits" policy this guard supports.
+    - cron: "*/5 * * * *"
 
 # Cancel previous runs on new push
 concurrency:
