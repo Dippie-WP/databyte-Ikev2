@@ -75,10 +75,18 @@ for username, password in creds.items():
 if not new_blocks:
     print("Nothing to add — all demo creds already in conf")
 else:
-    # Backup
-    bak = f"{HOST_CONF}.bak-pre-demo-{Path('/root/.demo_vpn_creds').stat().st_mtime:.0f}"
-    Path(bak).write_text(conf)
-    print(f"Backup: {bak}")
+    # Atomic write via shared helper (TKT-002 single source of truth). The
+    # previous code used Path.write_text which truncates the file on failure.
+    import sys as _sys
+    from pathlib import Path as _Path
+    _helper_dir = str(_Path(__file__).resolve().parent.parent / "host")  # ../host/
+    if _helper_dir not in _sys.path:
+        _sys.path.insert(0, _helper_dir)
+    from safe_write_rw_eap import atomic_write_conf_local, SafeWriteError
+
+    # Locate host-side backup dir as sibling of conf
+    host_conf_path = _Path(HOST_CONF)
+    backup_dir = host_conf_path.parent / ".backups"
 
     # Insert before the LAST closing `}` (the secrets block end)
     pattern = re.compile(r'^}\s*$', re.MULTILINE)
@@ -88,8 +96,14 @@ else:
         sys.exit(1)
     insertion = matches[-1].start()
     new_conf = conf[:insertion] + ''.join(new_blocks) + conf[insertion:]
-    Path(HOST_CONF).write_text(new_conf)
-    print(f"Added {len(new_blocks)} secret blocks to {HOST_CONF}")
+    try:
+        atomic_write_conf_local(
+            new_conf, str(host_conf_path), str(backup_dir), caller_label="updaterw"
+        )
+    except SafeWriteError as e:
+        print(f"ATOMIC_WRITE_FAILED: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(f"Added {len(new_blocks)} secret blocks to {HOST_CONF} (atomic, via safe helper)")
 
 # Reload charon secrets (this reads from /etc/swanctl which is the bind-mount)
 print()
