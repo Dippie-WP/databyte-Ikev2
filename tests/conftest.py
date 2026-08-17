@@ -80,6 +80,7 @@ def db_path(tmp_path) -> Path:
     for schema_file in (
         "strongswan-schema.sql",
         "quota-schema.sql",
+        "radius-schema.sql",
         "test-users-extension.sql",
         "portal-schema.sql",
         "portal-customers-extensions.sql",
@@ -355,6 +356,15 @@ def app_module(db_path, rw_eap_conf, request, monkeypatch):
 
     # Patch DB_PATH on the (cached) portal_auth module
     import portal_auth
+    # CRITICAL: invalidate the cached SQLAlchemy engine so the next
+    # _engine() call rebuilds it from the new DB_URL. Without this,
+    # test N reuses the engine from test N-1 — still pointing at the
+    # N-1 tmp DB (now deleted by tmp_path cleanup), so all
+    # `with portal_auth._engine().begin()` writes silently fail and
+    # tests that touch radcheck (create_client / archive) cascade
+    # into "no customer / no audit_log" failures. Repro: tests pass
+    # alone, fail in batch (verified 2026-08-17 during drift fix).
+    portal_auth.__dict__.pop("_ENGINE", None)
     portal_auth.DB_PATH = str(db_path)
     # Phase 4A: portal_auth also has DB_URL (MariaDB SQLAlchemy) + _db() that calls _engine().
     # Tests don't have a real MariaDB, so point DB_URL at a sqlite file + override _db()
