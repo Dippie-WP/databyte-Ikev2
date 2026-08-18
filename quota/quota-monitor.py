@@ -523,103 +523,182 @@ class QuotaMonitor:
         return f"{customer_id}:{vip}"
 
     def run_once(self) -> None:
-        """Single iteration. Returns when done. Safe to call repeatedly."""
+        """Single iteration. Returns when done. Safe to call repeatedly.
+
+        TKT-011 v2.0 restructure:
+          - Data tracking (existing, no data-cap WARN/CUT)
+          - _refresh_session_tracking (NEW: radacct aggregate → 4 cumulative cols)
+          - _kill_expired_customers (NEW: per (c) = #1 Hard-cut + DELETE on expires_at)
+        """
         log.info("=== quota-monitor iteration start ===")
-        leases = list_pool_leases()
-        if not leases:
-            log.info("no pool leases — nothing to bill; clearing sidecar")
-            self._save_session({})
-            return
-
-        counters = sample_counters()
-        if not counters:
-            log.info("no nft meter entries found — nothing to do")
-            return
-
         db = self._open_db()
         try:
-            last_totals = self._last_sampled_bytes()
-            new_totals: dict[str, int] = {}
+            # 1. Existing data tracking via leases (data-cap WARN/CUT removed TKT-011 v2.0)
+            leases = list_pool_leases()
+            if leases:
+                counters = sample_counters()
+                if counters:
+                    last_totals = self._last_sampled_bytes()
+                    new_totals: dict[str, int] = {}
+                    for lease in leases:
+                        vip = lease["vip"]
+                        identity = lease["identity"]
+                        online = lease["online"]
 
-            for lease in leases:
-                vip = lease["vip"]
-                identity = lease["identity"]
-                online = lease["online"]
+                        if vip not in counters:
+                            log.debug("VIP %s (%s): lease held but no meter entry — skipping",
+                                      vip, identity)
+                            continue
 
-                if vip not in counters:
-                    log.debug("VIP %s (%s): lease held but no meter entry — skipping",
-                              vip, identity)
-                    continue
+                        cust = lookup_customer_for_username(db, identity)
+                        if cust is None:
+                            log.debug("VIP %s: identity %s has no customer mapping — skipping",
+                                      vip, identity)
+                            continue
 
-                cust = lookup_customer_for_username(db, identity)
-                if cust is None:
-                    log.debug("VIP %s: identity %s has no customer mapping — skipping",
-                              vip, identity)
-                    continue
+                        _, out_bytes, _, in_bytes = counters[vip]
+                        total_now = out_bytes + in_bytes
+                        customer_id = cust["customer_id"]
+                        is_operator = cust["is_operator"]
+                        data_limit = cust["data_limit_bytes"]
+                        data_used = cust["data_used_bytes"]
+                        key = self._sidecar_key(customer_id, vip)
 
-                _, out_bytes, _, in_bytes = counters[vip]
-                total_now = out_bytes + in_bytes
-                customer_id = cust["customer_id"]
-                is_operator = cust["is_operator"]
-                data_limit = cust["data_limit_bytes"]
-                data_used = cust["data_used_bytes"]
-                key = self._sidecar_key(customer_id, vip)
+                        if is_operator:
+                            log.debug("VIP %s: operator %s — skipping billing, baselining",
+                                      vip, cust["customer_name"])
+                            new_totals[key] = total_now
+                            continue
 
-                if is_operator:
-                    log.debug("VIP %s: operator %s — skipping billing, baselining",
-                              vip, cust["customer_name"])
-                    new_totals[key] = total_now
-                    continue
+                        if not cust["is_active"]:
+                            log.info("VIP %s: customer %s is_active=0 — skipping billing, baselining",
+                                     vip, cust["customer_name"])
+                            new_totals[key] = total_now
+                            continue
 
-                if not cust["is_active"]:
-                    log.info("VIP %s: customer %s is_active=0 — skipping billing, baselining",
-                             vip, cust["customer_name"])
-                    new_totals[key] = total_now
-                    continue
+                        prior = last_totals.get(key)
+                        if prior is None:
+                            log.info("VIP %s (%s/%s): first observation on this (customer,VIP) pair, "
+                                     "baseline meter=%d (DB data_used=%d)",
+                                     vip, cust["customer_name"], cust["device_name"],
+                                     total_now, data_used)
+                            new_totals[key] = total_now
+                            continue
 
-                prior = last_totals.get(key)
-                if prior is None:
-                    log.info("VIP %s (%s/%s): first observation on this (customer,VIP) pair, "
-                             "baseline meter=%d (DB data_used=%d)",
-                             vip, cust["customer_name"], cust["device_name"],
-                             total_now, data_used)
-                    new_totals[key] = total_now
-                    continue
+                        delta = total_now - prior
+                        if delta < 0:
+                            log.warning("VIP %s: meter went backwards (%d → %d), re-baselining",
+                                        vip, prior, total_now)
+                            delta = 0
 
-                delta = total_now - prior
-                if delta < 0:
-                    log.warning("VIP %s: meter went backwards (%d → %d), re-baselining",
-                                vip, prior, total_now)
-                    delta = 0
+                        if delta > 0:
+                            update_used_bytes(db, customer_id, delta)
+                            data_used += delta
+                            log.info("VIP %s (%s/%s) %s: +%d bytes, used=%d / %d",
+                                     vip, cust["customer_name"], cust["device_name"],
+                                     "online" if online else "OFFLINE",
+                                     delta, data_used, data_limit)
 
-                if delta > 0:
-                    update_used_bytes(db, customer_id, delta)
-                    data_used += delta
-                    log.info("VIP %s (%s/%s) %s: +%d bytes, used=%d / %d (%.1f%%)",
-                             vip, cust["customer_name"], cust["device_name"],
-                             "online" if online else "OFFLINE",
-                             delta, data_used, data_limit,
-                             100 * data_used / data_limit if data_limit else 0)
+                        new_totals[key] = total_now
+                    db.commit()
+                    self._save_session(new_totals)
+                else:
+                    log.info("no nft meter entries found — skipping data tracking")
+            else:
+                log.info("no pool leases — clearing sidecar, still running session tracking + kill")
+                self._save_session({})
 
-                new_totals[key] = total_now
-
-                cust["vip"] = vip
-                cust["username"] = identity
-                cust["online"] = online
-
-                if data_limit > 0:
-                    pct = 100 * data_used / data_limit
-                    if pct >= CUT_PCT and not cust["over_quota"]:
-                        self._cut_customer(db, cust, data_used)
-                    elif pct >= WARN_PCT and not alert_already_sent(db, customer_id, WARN_PCT):
-                        self._warn_customer(db, cust, data_used, pct)
-
+            # 2. TKT-011 v2.0 — refresh session tracking from radacct (Option A cumulative)
+            self._refresh_session_tracking(db)
             db.commit()
 
-            self._save_session(new_totals)
+            # 3. TKT-011 v2.0 — kill expired customers (per (c) = #1 Hard-cut + DELETE)
+            self._kill_expired_customers(db)
+            db.commit()
         finally:
             db.close()
         log.info("=== quota-monitor iteration done ===")
+
+    def _refresh_session_tracking(self, db) -> None:
+        """Recompute cumulative time-tracking columns from radacct.
+
+        TKT-011 v2.0 — populates the 4 cumulative columns per #37716 (Option A):
+          - total_session_time_seconds:      SUM(acctsessiontime) per username
+          - active_days_count:               COUNT(DISTINCT DATE(acctstarttime))
+          - last_session_at:                 MAX(acctstoptime)
+          - last_session_duration_seconds:   latest session's acctsessiontime
+
+        Runs every iteration (60s). NOT a kill trigger — kill is time-based via
+        expires_at. data_used_bytes is for visibility only.
+        """
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT
+                username,
+                COALESCE(SUM(acctsessiontime), 0)                                       AS total_seconds,
+                COUNT(DISTINCT DATE(acctstarttime))                                    AS active_days,
+                MAX(acctstoptime)                                                       AS last_session_at,
+                CAST(NULLIF(SUBSTRING_INDEX(
+                    GROUP_CONCAT(acctsessiontime ORDER BY acctstoptime DESC SEPARATOR ','),
+                ',', 1), '') AS UNSIGNED)                                              AS last_duration
+            FROM radacct
+            WHERE acctstoptime IS NOT NULL
+            GROUP BY username
+        """)
+        rows = cursor.fetchall()
+        if not rows:
+            log.debug("no radacct entries — skipping session tracking refresh")
+            return
+        for username, total_seconds, active_days, last_session_at, last_duration in rows:
+            cursor.execute("""
+                UPDATE customers
+                SET total_session_time_seconds     = %s,
+                    active_days_count              = %s,
+                    last_session_at                = %s,
+                    last_session_duration_seconds  = %s
+                WHERE name = %s
+            """, (total_seconds, active_days, last_session_at, last_duration, username))
+        log.info("refreshed session tracking for %d customer(s)", len(rows))
+
+    def _kill_expired_customers(self, db) -> None:
+        """Per (c) = #1 Hard-cut + DELETE: at expires_at, kill VPN + delete customer.
+
+        TKT-011 v2.0 — kill trigger is time-based, NOT data-cap. For each
+        customer with expires_at < NOW() AND is_active=1:
+          1. disable_customer_radcheck  — delete radcheck rows
+          2. kill_customer_credentials   — remove EAP block from rw-eap.conf
+          3. send_dae_disconnect         — DAE Disconnect-Request
+          4. terminate_customer_sas      — terminate active SAs
+          5. DELETE FROM devices WHERE customer_id = ?
+          6. DELETE FROM customers WHERE id = ?
+          7. log_audit                   — audit log entry
+        """
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT id, name FROM customers
+            WHERE expires_at IS NOT NULL
+              AND expires_at < NOW()
+              AND is_active = 1
+        """)
+        expired = cursor.fetchall()
+        if not expired:
+            log.debug("no expired customers")
+            return
+        log.warning("=== %d customer(s) EXPIRED — hard-cut + DELETE per (c) = #1 ===",
+                    len(expired))
+        for customer_id, name in expired:
+            log.warning("customer %s (id=%d) EXPIRED — killing", name, customer_id)
+            radcheck_killed = disable_customer_radcheck(name)
+            rw_eap_killed    = kill_customer_credentials(db, customer_id, name)
+            dae_result       = send_dae_disconnect(name)
+            n_terminated     = terminate_customer_sas(name)
+            cursor.execute("DELETE FROM devices WHERE customer_id = %s", (customer_id,))
+            cursor.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
+            log_audit(db, "quota-monitor", "expired_delete", "customer", customer_id,
+                      f'{{"name": "{name}", "radcheck_killed": {radcheck_killed}, '
+                      f'"rw_eap_killed": {rw_eap_killed}, "sas_terminated": {n_terminated}, '
+                      f'"dae_result": "{dae_result}"}}')
+            log.warning("customer %s (id=%d) EXPIRED — killed and deleted", name, customer_id)
 
     def _warn_customer(self, db, cust: dict, data_used: int, pct: float) -> None:
         customer_id = cust["customer_id"]
