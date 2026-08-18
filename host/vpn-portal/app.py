@@ -1175,6 +1175,8 @@ def list_customers(
                c.over_quota, c.billing_id, c.email, c.max_devices,
                c.bandwidth_down_mbps, c.bandwidth_up_mbps,
                c.expires_at, c.mac_address_1, c.mac_address_2,
+               c.total_session_time_seconds, c.active_days_count,
+               c.last_session_at, c.last_session_duration_seconds,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -1215,6 +1217,11 @@ def list_customers(
             "expires_at":   r["expires_at"],
             "mac_address_1": r["mac_address_1"],
             "mac_address_2": r["mac_address_2"],
+            # TKT-011 v2.0 — time tracking, populated by quota-monitor from radacct (#37716)
+            "total_session_time_seconds":    r["total_session_time_seconds"] or 0,
+            "active_days_count":             r["active_days_count"] or 0,
+            "last_session_at":               r["last_session_at"],
+            "last_session_duration_seconds": r["last_session_duration_seconds"],
         })
     return out
 
@@ -1528,6 +1535,8 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
                c.billing_id, c.email,
                c.bandwidth_down_mbps, c.bandwidth_up_mbps, c.max_devices,
                c.expires_at, c.mac_address_1, c.mac_address_2,
+               c.total_session_time_seconds, c.active_days_count,
+               c.last_session_at, c.last_session_duration_seconds,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
