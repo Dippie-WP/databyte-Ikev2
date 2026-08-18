@@ -58,7 +58,7 @@ import logging
 import asyncio
 import contextlib
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Literal
 import portal_auth  # v1.3.0 customer portal auth + v1.3.1 operator sessions
 
@@ -702,6 +702,7 @@ class WhitelistAddRequest(BaseModel):
 DEVICE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,31}$")
 SLUG_RE        = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$")  # customers.name + users.name
 EMAIL_RE       = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")          # RFC 5322 lite
+MAC_RE         = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")  # TKT-011 v2.0 — 2 MACs per user (#37687 §e)
 RW_EAP_CONF    = os.environ.get("RW_EAP_CONF",        "/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
 BACKUP_DIR     = os.environ.get("RW_EAP_BACKUP_DIR",   "/home/zunaid/strongswan/swanctl/conf.d/.backups")
 ALLOWED_DEVICE_TYPES = {"iOS", "Android", "Windows", "macOS", "Linux", "Other"}
@@ -934,8 +935,13 @@ class ClientCreate(BaseModel):
     email:            Optional[str] = Field(None, max_length=128)
     telegram_username: Optional[str] = Field(None, max_length=64)
     notes:            Optional[str] = Field(None, max_length=1024)
+    # TKT-011 v2.0 — 2 MACs per user for ALL packages (#37687 §e)
+    mac_address_1:    Optional[str] = Field(None, max_length=17,
+                                           description="First registered MAC (XX:XX:XX:XX:XX:XX). Stored in customers.mac_address_1.")
+    mac_address_2:    Optional[str] = Field(None, max_length=17,
+                                           description="Second registered MAC (XX:XX:XX:XX:XX:XX). Stored in customers.mac_address_2.")
     # Tier — either existing tier_name OR 'custom' with custom_cap_mb
-    tier_name:        str           = Field(..., description="Existing tier name (e.g. 'tier_5gb', 'tier_10gb', 'tier_20gb') OR 'custom'")
+    tier_name:        str           = Field(..., description="Existing tier name (e.g. 'paid_7day_10', 'demo_3day_10') OR 'custom'")
     custom_cap_mb:    Optional[int] = Field(None, ge=1, le=1024*1024,
                                            description="Cap in MiB. Required iff tier_name=='custom'")
     # v1.5.0 — Speed plan (per-customer, NOT tier-driven). Two preset options:
@@ -1168,6 +1174,7 @@ def list_customers(
                c.is_active, c.status, c.data_used_bytes, c.data_limit_bytes,
                c.over_quota, c.billing_id, c.email, c.max_devices,
                c.bandwidth_down_mbps, c.bandwidth_up_mbps,
+               c.expires_at, c.mac_address_1, c.mac_address_2,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -1204,6 +1211,10 @@ def list_customers(
             "quota_bytes": quota,
             "pct": round(used / quota * 100, 1) if quota else 0,
             "over_quota": bool(r["over_quota"]),
+            # TKT-011 v2.0 — time-based expiry + 2 MACs per user (#37687 §e)
+            "expires_at":   r["expires_at"],
+            "mac_address_1": r["mac_address_1"],
+            "mac_address_2": r["mac_address_2"],
         })
     return out
 
@@ -1263,6 +1274,12 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     if req.email and not EMAIL_RE.match(req.email):
         raise HTTPException(400, f"email '{req.email}' is not a valid address")
 
+    # TKT-011 v2.0 — MAC validation (2 MACs per user #37687 §e)
+    if req.mac_address_1 and not MAC_RE.match(req.mac_address_1):
+        raise HTTPException(400, f"mac_address_1 '{req.mac_address_1}' is not a valid MAC (XX:XX:XX:XX:XX:XX)")
+    if req.mac_address_2 and not MAC_RE.match(req.mac_address_2):
+        raise HTTPException(400, f"mac_address_2 '{req.mac_address_2}' is not a valid MAC (XX:XX:XX:XX:XX:XX)")
+
     if req.device_type not in ALLOWED_DEVICE_TYPES:
         raise HTTPException(400, f"device_type must be one of {sorted(ALLOWED_DEVICE_TYPES)}")
 
@@ -1318,13 +1335,14 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         data_limit = req.custom_cap_mb * 1024 * 1024  # binary MiB
         tier_id = ensure_tier(tier_name, tier_display, data_limit)
     else:
-        rows = db_query(f"SELECT id, data_limit_bytes, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+        rows = db_query(f"SELECT id, data_limit_bytes, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
         if not rows:
             raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
         if not rows[0].get("is_active"):
             raise HTTPException(400, f"tier '{req.tier_name}' is archived")
         tier_id = rows[0]["id"]
         data_limit = rows[0]["data_limit_bytes"]
+        duration_days = rows[0].get("duration_days")  # TKT-011 v2.0 — for expires_at
         tier_name = req.tier_name
         tier_display = None
 
@@ -1341,6 +1359,11 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     ntlm = ntlm_hash_bytes(password)
     now = int(time.time())
 
+    # TKT-011 v2.0 — expires_at = NOW() + duration_days (Q1=(a) Reset semantics)
+    expires_at = None
+    if duration_days is not None:
+        expires_at = (datetime.utcnow() + timedelta(days=int(duration_days))).strftime("%Y-%m-%d %H:%M:%S")
+
     # We insert customers + users + devices; on failure of 7-8, we need to roll
     # back DB rows. SQLite here is just files via SSH; we have no transaction
     # support over the boundary. Compensate by deleting in reverse on later
@@ -1355,12 +1378,14 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             try:
                 wrapped.execute(
                     "INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
-                    "over_quota, data_limit_bytes, data_used_bytes, tier_id, status, max_devices, "
+                    "over_quota, data_limit_bytes, data_used_bytes, expires_at, mac_address_1, mac_address_2, "
+                    "tier_id, status, max_devices, "
                     "bandwidth_down_mbps, bandwidth_up_mbps, "
                     "created_at, updated_at, notes, billing_id, email) VALUES "
-                    "(?, ?, ?, 0, 1, 0, ?, 0, ?, 'active', 1, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, 0, 1, 0, ?, 0, ?, ?, ?, ?, 'active', 2, ?, ?, ?, ?, ?, ?, ?)",
                     (cust_name, req.display_name, req.telegram_username,
                      int(data_limit), int(tier_id),
+                     expires_at, req.mac_address_1, req.mac_address_2,
                      int(bandwidth_down_mbps), int(bandwidth_up_mbps),
                      now, now, req.notes, req.billing_id, req.email)
                 )
@@ -1467,10 +1492,13 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             "tier_display":   tier_display,
             "is_active":      True,
             "is_operator":    False,
-            "max_devices":    1,
+            "max_devices":    2,  # TKT-011 v2.0 — 2 MACs per user (#37687 §e)
             "status":         "active",
             "data_used_bytes": 0,
             "data_limit_bytes": data_limit,
+            "expires_at":     expires_at,        # TKT-011 v2.0
+            "mac_address_1":  req.mac_address_1, # TKT-011 v2.0
+            "mac_address_2":  req.mac_address_2, # TKT-011 v2.0
             "notes":          req.notes,
             "created_at":     now,
             "updated_at":     now,
@@ -1499,6 +1527,7 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
                c.data_limit_bytes, c.over_quota, c.notes, c.created_at, c.updated_at,
                c.billing_id, c.email,
                c.bandwidth_down_mbps, c.bandwidth_up_mbps, c.max_devices,
+               c.expires_at, c.mac_address_1, c.mac_address_2,
                t.name AS tier_name, t.display_name AS tier_display,
                t.data_limit_bytes AS tier_limit
         FROM customers c
@@ -2236,6 +2265,9 @@ class CustomerUpdate(BaseModel):
     tier_name: Optional[str] = None  # change tier
     custom_cap_mb: Optional[int] = None  # if tier_name='custom'
     max_devices: Optional[int] = None  # 1..10
+    # TKT-011 v2.0 — 2 MACs per user (#37687 §e). Empty string clears the MAC.
+    mac_address_1: Optional[str] = None
+    mac_address_2: Optional[str] = None
     # v1.7.0 — speed_plan in PATCH. Per-customer bandwidth preset.
     # 'standard'         → 20/20 mbps symmetric
     # 'asymmetric_40_20' → 40 down / 20 up
@@ -2313,6 +2345,21 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         if req.email and not EMAIL_RE.match(req.email):
             raise HTTPException(400, f"email '{req.email}' is not a valid address")
         sets.append(f"email = {_q(req.email)}")
+    # TKT-011 v2.0 — MAC validation + write (2 MACs per user #37687 §e)
+    if req.mac_address_1 is not None and req.mac_address_1 and not MAC_RE.match(req.mac_address_1):
+        raise HTTPException(400, f"mac_address_1 '{req.mac_address_1}' is not a valid MAC (XX:XX:XX:XX:XX:XX)")
+    if req.mac_address_2 is not None and req.mac_address_2 and not MAC_RE.match(req.mac_address_2):
+        raise HTTPException(400, f"mac_address_2 '{req.mac_address_2}' is not a valid MAC (XX:XX:XX:XX:XX:XX)")
+    if req.mac_address_1 is not None:
+        if req.mac_address_1:
+            sets.append(f"mac_address_1 = {_q(req.mac_address_1)}")
+        else:
+            sets.append("mac_address_1 = NULL")
+    if req.mac_address_2 is not None:
+        if req.mac_address_2:
+            sets.append(f"mac_address_2 = {_q(req.mac_address_2)}")
+        else:
+            sets.append("mac_address_2 = NULL")
     if req.billing_id is not None:
         sets.append(f"billing_id = {_q(req.billing_id)}")
     if req.notes is not None:
@@ -2356,6 +2403,7 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
 
     # Tier change
     if req.tier_name is not None:
+        duration_days = None  # TKT-011 v2.0 — for expires_at (Q1=(a) Reset)
         if req.tier_name == "custom":
             if req.custom_cap_mb is None or req.custom_cap_mb < 1:
                 raise HTTPException(400, "custom_cap_mb (>=1) is required when tier_name='custom'")
@@ -2364,16 +2412,21 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
             tier_display = f"Custom {req.custom_cap_mb} MiB"
             data_limit = req.custom_cap_mb * 1024 * 1024
             tier_id = ensure_tier(tier_name, tier_display, data_limit)
+            # duration_days stays None — legacy custom tier
         else:
-            rows = db_query(f"SELECT id, data_limit_bytes, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+            rows = db_query(f"SELECT id, data_limit_bytes, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
             if not rows:
                 raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
             if not rows[0].get("is_active"):
                 raise HTTPException(400, f"tier '{req.tier_name}' is archived")
             tier_id = rows[0]["id"]
             data_limit = rows[0]["data_limit_bytes"]
+            duration_days = rows[0].get("duration_days")
         sets.append(f"tier_id = {int(tier_id)}")
         sets.append(f"data_limit_bytes = {int(data_limit)}")
+        # TKT-011 v2.0 — Q1=(a) Reset: expires_at = NOW() + duration_days (treat as new purchase)
+        if duration_days is not None:
+            sets.append(f"expires_at = DATE_ADD(NOW(), INTERVAL {int(duration_days)} DAY)")
 
     if not sets:
         # v1.7.0 — speed_plan='custom' sent standalone is a meaningful no-op
