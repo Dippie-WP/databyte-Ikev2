@@ -1578,14 +1578,33 @@ def get_customer(customer_id: int, _: dict = Depends(require_session)):
 
 @app.get("/api/tiers")
 def list_tiers(_: dict = Depends(require_session)):
+    """List all tiers (active + archived).
+
+    TKT-011 v2.0: returns duration_days + speed_tier (NEW) alongside the legacy
+    quota_bytes (kept for backward compat). New packages:
+      - duration_days IS NOT NULL → v2.0 time-based (3 demo + 6 paid × 3 speeds = 20)
+      - duration_days IS NULL     → legacy data-cap (tier_5gb/10gb/20gb/demo_100mb
+                                     + custom_* tiers)
+    Sort: v2.0 first by duration_days asc, then speed_tier (10_10 → 20_20 → unlimited);
+    legacy data-cap tiers last by data_limit_bytes.
+    """
     rows = db_query("""
-        SELECT id, name, display_name, data_limit_bytes, price_zar, is_active, notes
-        FROM tiers ORDER BY data_limit_bytes;
+        SELECT id, name, display_name, data_limit_bytes, duration_days, speed_tier,
+               price_zar, is_active, notes
+        FROM tiers
+        ORDER BY (duration_days IS NULL) ASC,
+                 duration_days ASC,
+                 FIELD(speed_tier, '10_10', '20_20', 'unlimited'),
+                 data_limit_bytes;
     """)
     return [{
         "id": r["id"],
         "name": r["name"],
         "display_name": r["display_name"],
+        # v2.0 fields (NULL for legacy data-cap tiers) — TKT-011
+        "duration_days": r["duration_days"],
+        "speed_tier": r["speed_tier"],
+        # legacy data-cap quota (kept for backward compat) — TKT-011 deprecated
         "quota_bytes": r["data_limit_bytes"],
         "price_zar": r["price_zar"],
         "is_active": bool(r["is_active"]),
