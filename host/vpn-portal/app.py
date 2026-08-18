@@ -1487,6 +1487,76 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     })
 
     # 10. Return one-shot response
+    # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
+    # bot sends creds to customer's telegram_username. Mock token = no-op.
+    if req.telegram_username:
+        try:
+            import bot as bot_module
+            bot_module.send_credentials_sync(
+                telegram_id=req.telegram_username,
+                eap_identity=eap_identity,
+                password=password,
+                tier_display=tier_display or tier_name,
+            )
+        except Exception as e:
+            log.error(f"bot.send_credentials failed: {e}")
+
+    # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
+    # bot sends creds to customer's telegram_username. Mock token = no-op.
+    if req.telegram_username:
+        try:
+            import bot as bot_module
+            bot_module.send_credentials_sync(
+                telegram_id=req.telegram_username,
+                eap_identity=eap_identity,
+                password=password,
+                tier_display=tier_display or tier_name,
+            )
+        except Exception as e:
+            log.error(f"bot.send_credentials failed: {e}")
+
+    # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
+    # bot sends creds to customer's telegram_username. Mock token = no-op.
+    if req.telegram_username:
+        try:
+            import bot as bot_module
+            bot_module.send_credentials_sync(
+                telegram_id=req.telegram_username,
+                eap_identity=eap_identity,
+                password=password,
+                tier_display=tier_display or tier_name,
+            )
+        except Exception as e:
+            log.error(f"bot.send_credentials failed: {e}")
+
+    # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
+    # bot sends creds to customer's telegram_username. Mock token = no-op.
+    if req.telegram_username:
+        try:
+            import bot as bot_module
+            bot_module.send_credentials_sync(
+                telegram_id=req.telegram_username,
+                eap_identity=eap_identity,
+                password=password,
+                tier_display=tier_display or tier_name,
+            )
+        except Exception as e:
+            log.error(f"bot.send_credentials failed: {e}")
+
+    # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
+    # bot sends creds to customer's telegram_username. Mock token = no-op.
+    if req.telegram_username:
+        try:
+            import bot as bot_module
+            bot_module.send_credentials_sync(
+                telegram_id=req.telegram_username,
+                eap_identity=eap_identity,
+                password=password,
+                tier_display=tier_display or tier_name,
+            )
+        except Exception as e:
+            log.error(f"bot.send_credentials failed: {e}")
+
     return {
         "customer": {
             "id":             cust_id,
@@ -3139,3 +3209,14 @@ async def telegram_webhook(secret: str, request: Request):
             break
     log.info(f"telegram webhook update_id={update.update_id} handlers_fired={handlers_fired}")
     return {"ok": True, "handlers_fired": handlers_fired}
+
+
+# TKT-011 v2.0 — start Telegram bot in background thread (admin-mediated flow).
+# Bot.send_credentials_sync() is called from create_client() after a customer
+# is created. Mock token check: if TELEGRAM_TOKEN starts with 'MOCK_' or
+# contains 'TOKEN_REPLACE_ME', the actual send is skipped (logs only).
+try:
+    import bot
+    bot.start_bot_thread()
+except Exception as e:
+    log.error(f"bot startup failed: {e}")
