@@ -58,8 +58,8 @@ _MARIADB_HOST = "127.0.0.1"
 _MARIADB_USER = "radius"
 _MARIADB_DB = "radius"
 
-CONF_PATH = Path("/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
-CONF_BACKUP_DIR = Path("/home/zunaid/strongswan/swanctl/conf.d/.backups")
+CONF_PATH = Path("/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf")
+CONF_BACKUP_DIR = Path("/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/.backups")
 
 # 10.99.0.0/24 VIP range — must match iptables rules in rules.v4
 VIP_PREFIX = "10.99.0."
@@ -630,6 +630,13 @@ class QuotaMonitor:
 
         Runs every iteration (60s). NOT a kill trigger — kill is time-based via
         expires_at. data_used_bytes is for visibility only.
+
+        FIX (TKT-011 v2.0 close audit 2026-08-19, per Zun #37900):
+        radacct.username is the EAP identity (e.g. 'zun-iphone'), NOT
+        customers.name (e.g. 'zun'). The original `WHERE name = %s`
+        therefore never matched — all 4 cumulative columns stayed NULL.
+        Resolve EAP identity → customer_id via lookup_customer_for_username()
+        (joins users → devices → customers) and UPDATE by id.
         """
         cursor = db.cursor()
         cursor.execute("""
@@ -649,16 +656,28 @@ class QuotaMonitor:
         if not rows:
             log.debug("no radacct entries — skipping session tracking refresh")
             return
-        for username, total_seconds, active_days, last_session_at, last_duration in rows:
+        n_updated = 0
+        for row in rows:
+            username         = row['username']
+            total_seconds    = row['total_seconds']
+            active_days      = row['active_days']
+            last_session_at  = row['last_session_at']
+            last_duration    = row['last_duration']
+            cust = lookup_customer_for_username(db, username)
+            if cust is None:
+                log.debug("radacct username %s: no customer mapping (users/devices/customer join empty) — skipping", username)
+                continue
+            customer_id = cust['customer_id']
             cursor.execute("""
                 UPDATE customers
                 SET total_session_time_seconds     = %s,
                     active_days_count              = %s,
                     last_session_at                = %s,
                     last_session_duration_seconds  = %s
-                WHERE name = %s
-            """, (total_seconds, active_days, last_session_at, last_duration, username))
-        log.info("refreshed session tracking for %d customer(s)", len(rows))
+                WHERE id = %s
+            """, (total_seconds, active_days, last_session_at, last_duration, customer_id))
+            n_updated += 1
+        log.info("refreshed session tracking for %d customer(s) (of %d radacct usernames)", n_updated, len(rows))
 
     def _kill_expired_customers(self, db) -> None:
         """Per (c) = #1 Hard-cut + DELETE: at expires_at, kill VPN + delete customer.
@@ -686,7 +705,9 @@ class QuotaMonitor:
             return
         log.warning("=== %d customer(s) EXPIRED — hard-cut + DELETE per (c) = #1 ===",
                     len(expired))
-        for customer_id, name in expired:
+        for row in expired:
+            customer_id = row['id']
+            name        = row['name']
             log.warning("customer %s (id=%d) EXPIRED — killing", name, customer_id)
             radcheck_killed = disable_customer_radcheck(name)
             rw_eap_killed    = kill_customer_credentials(db, customer_id, name)
