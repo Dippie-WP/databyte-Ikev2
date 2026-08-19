@@ -40,8 +40,7 @@ import logging
 import os
 import re
 import signal
-import pymysql
-import pymysql.cursors
+import sqlite3
 import subprocess
 import sys
 import time
@@ -74,10 +73,7 @@ nft_remove_download_output_rule = _nft_helpers.remove_download_output_rule
 download_output_rule_present = _nft_helpers.download_output_rule_present
 
 # === Config (paths) ===
-_MARIADB_PW_FILE = Path("/root/.mariadb-radius-pw")
-_MARIADB_HOST = "127.0.0.1"
-_MARIADB_USER = "radius"
-_MARIADB_DB = "radius"
+DB_PATH = Path("/var/lib/strongswan/ipsec.db")
 
 # Network interfaces — these are runtime-detected but can be overridden
 EGRESS_IFACE_DEFAULT = "eth0"     # public-facing interface
@@ -506,64 +502,21 @@ def list_active_vips() -> dict[str, dict[str, str]]:
 
 # === DB lookup ===
 
-def _open_mariadb():
-    """Open MariaDB connection. Returns None on failure. Caller must close()."""
-    if not _MARIADB_PW_FILE.exists():
-        log.error("MariaDB password file missing: %s", _MARIADB_PW_FILE)
-        return None
-    try:
-        text = _MARIADB_PW_FILE.read_text()
-    except (PermissionError, OSError) as e:
-        log.error("Cannot read %s: %s", _MARIADB_PW_FILE, e)
-        return None
-    pw = None
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            pw = line
-            break
-    if not pw:
-        return None
-    try:
-        return pymysql.connect(
-            host=_MARIADB_HOST,
-            user=_MARIADB_USER,
-            password=pw,
-            database=_MARIADB_DB,
-            cursorclass=pymysql.cursors.DictCursor,
-            autocommit=True,
-            connect_timeout=5,
-            read_timeout=10,
-            write_timeout=10,
-        )
-    except pymysql.MySQLError as e:
-        log.error("MariaDB connect failed: %s", e)
-        return None
-
-
-def lookup_customer_bandwidth(db, username: str) -> tuple[int, int] | None:
+def lookup_customer_bandwidth(db: sqlite3.Connection, username: str) -> tuple[int, int] | None:
     """Return (down_mbps, up_mbps) for a username, or None if not found.
 
     Resolves username → users → devices → customers.
-
-    CORR-2026-07-11-026 (third instance): charon reports lease identity with
-    whatever case the client sent. MariaDB utf8_general_ci is case-insensitive
-    so VPN auth succeeds. Normalize to lowercase here for symmetry.
-
-    Phase 4E (2026-07-12): MariaDB radius.* schema. Uses DictCursor, returns
-    dict rows.
     """
-    with db.cursor() as cur:
-        cur.execute("""
-            SELECT c.bandwidth_down_mbps, c.bandwidth_up_mbps
-            FROM users u
-            JOIN devices d  ON d.strongswan_user_id = u.id
-            JOIN customers c ON c.id = d.customer_id
-            WHERE u.name = %s
-            LIMIT 1
-        """, (username,))
-        row = cur.fetchone()
-    return (row["bandwidth_down_mbps"], row["bandwidth_up_mbps"]) if row else None
+    cur = db.execute("""
+        SELECT c.bandwidth_down_mbps, c.bandwidth_up_mbps
+        FROM users u
+        JOIN devices d  ON d.strongswan_user_id = u.id
+        JOIN customers c ON c.id = d.customer_id
+        WHERE u.name = ?
+        LIMIT 1
+    """, (username,))
+    row = cur.fetchone()
+    return (row[0], row[1]) if row else None
 
 
 # === Main loop ===
@@ -573,10 +526,7 @@ def run_iteration(iface: str) -> tuple[int, int]:
 
     Returns (added, removed) counts.
     """
-    db = _open_mariadb()
-    if db is None:
-        log.error("Cannot open MariaDB — skipping iteration")
-        return (0, 0)
+    db = sqlite3.connect(str(DB_PATH))
     try:
         active = list_active_vips()
         applied_vips = set()
@@ -589,7 +539,7 @@ def run_iteration(iface: str) -> tuple[int, int]:
                 continue
             username = info["username"]
             remote_ip = info.get("remote_ip")
-            rates = lookup_customer_bandwidth(db, username.lower())
+            rates = lookup_customer_bandwidth(db, username)
             if rates is None:
                 # No customer record — apply a sensible default (20/20)
                 # This handles operator accounts (zun-operator) and legacy users
