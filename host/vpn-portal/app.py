@@ -156,6 +156,15 @@ if os.path.isdir(WWW_DIR):
     def portal_index():
         return FileResponse(os.path.join(WWW_DIR, "portal", "index.html"))
 
+    # TKT-011 v2.0 — Pricing page (deployed to disk 2026-08-19 15:14 UTC,
+    # but the route was missing → 404 publicly). Add the 2 routes so the
+    # public Cloudflare-proxied URL https://vpn-portal.databyte.co.za/pricing
+    # actually serves the page customers need to see tiers + prices.
+    @app.get("/pricing", include_in_schema=False)
+    @app.get("/pricing.html", include_in_schema=False)
+    def pricing_page():
+        return FileResponse(os.path.join(WWW_DIR, "pricing.html"))
+
 # ---------- Session cleanup (HIGH #3 fix) ----------
 # Both purge_expired_sessions() (customer) and purge_expired_operator_sessions()
 # (operator) are defined in portal_auth.py but were never called, so expired
