@@ -29,26 +29,64 @@ VPS_USER="${VPS_USER:-root}"
 # Expanded 2026-08-17 to cover the 3 atomic-write callers + backup script that
 # were part of the TKT-002 refactor (previously uncommitted, drift went
 # undetected because they weren't in this list — see runs #187-196).
+#
+# Expanded 2026-08-20 to cover all 13 deployed files (per #37978 verification):
+# - 4 portal Python files (app.py, portal_auth.py, requirements.txt, bulk_action.py)
+# - 4 portal static assets (www/index.html, www/portal/index.html, www/static/app.css, www/static/app.js, www/static/portal.js)
+# - 1 nginx config (vpn-portal.conf)
+# - 1 quota script (quota-exporter.py)
+# - 2 strongswan charon configs (10-eap-radius.conf, debug.conf)
+# Plus 3 pre-existing files (quota-monitor, bandwidth-monitor, update_rw_eap_conf).
 FILES=(
-  "host/vpn-portal/app.py"
-  "host/vpn-portal/www/portal/index.html"
+  # Files already in CI (3 pre-existing)
   "quota/quota-monitor.py"
   "quota/bandwidth-monitor.py"
-  "host/backup/backup-vpn-portal-config.sh"
-  "ops/rotate-vpn-credentials.py"
   "quota/update_rw_eap_conf.py"
+  # New: portal app (4)
+  "host/vpn-portal/app.py"
+  "host/vpn-portal/portal_auth.py"
+  "host/vpn-portal/requirements.txt"
+  "host/vpn-portal/scripts/bulk_action.py"
+  # New: portal static assets (5)
+  "host/vpn-portal/www/index.html"
+  "host/vpn-portal/www/portal/index.html"
+  "host/vpn-portal/www/static/app.css"
+  "host/vpn-portal/www/static/app.js"
+  "host/vpn-portal/www/static/portal.js"
+  # New: nginx config (1)
+  "host/vpn-portal/nginx/vpn-portal.conf"
+  # New: quota script (1)
+  "quota/quota-exporter.py"
+  # New: strongswan charon configs (2)
+  "docker/strongswan.d/10-eap-radius.conf"
+  "docker/strongswan.d/debug.conf"
 )
 
 # Remote paths on the VPS where these files LIVE. If a file isn't deployed
 # yet, its live path is empty and the check SKIPs it (no false-positive).
 declare -A LIVE_PATHS=(
-  ["host/vpn-portal/app.py"]="/opt/vpn-portal/app.py"
-  ["host/vpn-portal/www/portal/index.html"]="/opt/vpn-portal/www/portal/index.html"
+  # Pre-existing (3)
   ["quota/quota-monitor.py"]="/opt/strongswan-vpn-gateway/quota/quota-monitor.py"
   ["quota/bandwidth-monitor.py"]="/opt/strongswan-vpn-gateway/quota/bandwidth-monitor.py"
-  ["host/backup/backup-vpn-portal-config.sh"]=""
-  ["ops/rotate-vpn-credentials.py"]=""
   ["quota/update_rw_eap_conf.py"]="/opt/strongswan-vpn-gateway/quota/update_rw_eap_conf.py"
+  # Portal app (4)
+  ["host/vpn-portal/app.py"]="/opt/vpn-portal/app.py"
+  ["host/vpn-portal/portal_auth.py"]="/opt/vpn-portal/portal_auth.py"
+  ["host/vpn-portal/requirements.txt"]="/opt/vpn-portal/requirements.txt"
+  ["host/vpn-portal/scripts/bulk_action.py"]="/opt/vpn-portal/scripts/bulk_action.py"
+  # Portal static assets (5)
+  ["host/vpn-portal/www/index.html"]="/opt/vpn-portal/www/index.html"
+  ["host/vpn-portal/www/portal/index.html"]="/opt/vpn-portal/www/portal/index.html"
+  ["host/vpn-portal/www/static/app.css"]="/opt/vpn-portal/www/static/app.css"
+  ["host/vpn-portal/www/static/app.js"]="/opt/vpn-portal/www/static/app.js"
+  ["host/vpn-portal/www/static/portal.js"]="/opt/vpn-portal/www/static/portal.js"
+  # nginx config (1)
+  ["host/vpn-portal/nginx/vpn-portal.conf"]="/opt/vpn-portal/nginx/vpn-portal.conf"
+  # Quota script (1)
+  ["quota/quota-exporter.py"]="/opt/strongswan-vpn-gateway/quota/quota-exporter.py"
+  # strongswan charon configs (2)
+  ["docker/strongswan.d/10-eap-radius.conf"]="/opt/strongswan-vpn-gateway/docker/strongswan.d/10-eap-radius.conf"
+  ["docker/strongswan.d/debug.conf"]="/opt/strongswan-vpn-gateway/docker/strongswan.d/debug.conf"
 )
 
 echo "=== Drift detection: $(date -u +%FT%TZ) ==="
