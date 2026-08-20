@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS tiers (
     display_name     TEXT    NOT NULL,               -- e.g. "5 GB", "10 GB", "20 GB", "Demo 100MB"
     data_limit_bytes INTEGER NOT NULL,                -- tier allowance in bytes
     price_zar        INTEGER,                        -- price in ZAR cents (NULL = not for sale)
+    duration_days    INTEGER,                        -- TKT-011 v2.0 — expiry period (NULL = legacy data-cap)
+    speed_tier       TEXT,                            -- TKT-011 v2.0 — e.g. "10_10", "20_20", "unlimited"
     is_active        INTEGER NOT NULL DEFAULT 1,     -- 1=available, 0=archived
     created_at       INTEGER NOT NULL,                -- Unix epoch seconds
     notes            TEXT
@@ -59,8 +61,30 @@ CREATE TABLE IF NOT EXISTS customers (
     bandwidth_up_mbps   INTEGER NOT NULL DEFAULT 20,    -- Phase 5D: per-user upload cap (Mbps)
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
-    notes            TEXT
+    notes            TEXT,
+    -- v1.3.1+ extensions
+    billing_id       TEXT,                            -- billing reference (e.g. payment ID)
+    email            TEXT,                            -- contact email
+    -- v1.3.2 EAP rotation
+    eap_rotated_at   INTEGER,                         -- Unix epoch of last EAP credential rotation
+    -- v1.4.0 Bug #2 fix: explicit user FK
+    user_id          INTEGER REFERENCES users(id),   -- FK users.id (NULL = unlinked, operators)
+    -- TKT-011 v2.0 — time-based pricing columns
+    expires_at       INTEGER,                         -- Unix epoch when access expires (NULL = no expiry)
+    mac_address_1    TEXT,                            -- first registered MAC (XX:XX:XX:XX:XX:XX)
+    mac_address_2    TEXT,                            -- second registered MAC (NULL = single device tier)
+    total_session_time_seconds    INTEGER DEFAULT 0,  -- cumulative session time for billing
+    active_days_count             INTEGER DEFAULT 0,  -- unique days the customer has connected
+    last_session_at               INTEGER,            -- Unix epoch of last session end
+    last_session_duration_seconds  INTEGER             -- duration of last session in seconds
 );
+
+-- Index for v1.4.0 customers.user_id → users.id lookups (Bug #2 fix).
+-- Added to fixture directly because portal-user-id-fk.sql ALTER TABLE ADD COLUMN
+-- fails silently (column already exists) in conftest.py — it should create the
+-- index in the same CREATE TABLE so the tests see it. portal-user-id-fk.sql in
+-- prod still uses the legacy ALTER TABLE approach for live DBs.
+CREATE INDEX IF NOT EXISTS idx_customers_user_id ON customers(user_id);
 
 -- ----------------------------------------------------------------------------
 -- devices: strongSwan identity <-> customer (1 customer has 1+ devices)

@@ -79,9 +79,9 @@ def db_path(tmp_path) -> Path:
     conn = sqlite3.connect(db)
     for schema_file in (
         "strongswan-schema.sql",
+        "test-users-extension.sql",  # users table — must be BEFORE quota-schema (customers REFERENCES users(id))
         "quota-schema.sql",
         "radius-schema.sql",
-        "test-users-extension.sql",
         "portal-schema.sql",
         "portal-customers-extensions.sql",
         "portal-user-id-fk.sql",
@@ -95,12 +95,16 @@ def db_path(tmp_path) -> Path:
             pass
     now = int(time.time())
     conn.executescript(f"""
-        INSERT INTO tiers (name, display_name, data_limit_bytes, is_active, created_at, notes)
+        INSERT INTO tiers (name, display_name, data_limit_bytes, duration_days, speed_tier, is_active, created_at, notes)
         VALUES
-            ('tier_5gb',  'Tier 1 — 5GB / $3 USD',  5368709120,  1, {now}, 'seed'),
-            ('tier_10gb', 'Tier 2 — 10GB / $5 USD', 10737418240, 1, {now}, 'seed'),
-            ('tier_20gb', 'Tier 3 — 20GB / $8 USD', 21474836480, 1, {now}, 'seed'),
-            ('demo_100mb','Demo 100MB',            104857600,  1, {now}, 'seed');
+            ('tier_5gb',  'Tier 1 — 5GB / $3 USD',  5368709120,  NULL, NULL,     1, {now}, 'seed'),
+            ('tier_10gb', 'Tier 2 — 10GB / $5 USD', 10737418240, NULL, NULL,     1, {now}, 'seed'),
+            ('tier_20gb', 'Tier 3 — 20GB / $8 USD', 21474836480, NULL, NULL,     1, {now}, 'seed'),
+            ('demo_100mb','Demo 100MB',            104857600,  NULL, NULL,     1, {now}, 'seed'),
+            ('demo_3d',   'Demo 3-day / 10Mbps',    5368709120,  3,    '10_10',  1, {now}, 'TKT-011 v2.0 demo'),
+            ('demo_7d',   'Demo 7-day / 10Mbps',    5368709120,  7,    '10_10',  1, {now}, 'TKT-011 v2.0 demo'),
+            ('paid_7d',   '7-day / 20Mbps',         10737418240, 7,    '20_20',  1, {now}, 'TKT-011 v2.0 paid'),
+            ('paid_30d',  '30-day / 20Mbps',        10737418240, 30,   '20_20',  1, {now}, 'TKT-011 v2.0 paid');
 
         INSERT INTO customers (name, display_name, is_operator, is_active, data_limit_bytes,
                                tier_id, status, max_devices, created_at, updated_at, notes)
@@ -174,8 +178,20 @@ def patch_portal_auth_db(db_path, monkeypatch, rw_eap_conf):
 
     Phase 4E removed _sqlite_query (portal data unified into MariaDB), so this
     fixture no longer needs to intercept subprocess.run for portal-auth reads.
+
+    ALSO: reset the cached SQLAlchemy engine so _engine() picks up the patched
+    DB_URL. Without this, the engine is created once with the default MariaDB
+    URL and reused across tests, pointing at the wrong DB.
     """
     import portal_auth
+
+    # 0. Reset cached engine so it picks up the patched DB_URL below.
+    if hasattr(portal_auth, "_ENGINE"):
+        try:
+            portal_auth._ENGINE.dispose()
+        except Exception:
+            pass
+        del portal_auth._ENGINE
 
     # 1. Patch DB_URL + _db() so RADIUS data reads use sqlite.
     monkeypatch.setattr(portal_auth, "DB_URL", f"sqlite:///{db_path}")
