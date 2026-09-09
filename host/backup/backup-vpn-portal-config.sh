@@ -48,7 +48,7 @@ set -euo pipefail
 # SyslogIdentifier=backup-vpn-portal-config in the .service unit) also gets
 # every line. Mirrors the workspace backup's log-file pattern while preserving
 # journald observability. Zun directive msg #29479, shipped 2026-07-29 10:10 UTC.
-LOG_DIR="/var/log/vpn-portal-config-backup"
+LOG_DIR="/root/.openclaw/workspace/databyte-vpn/vpn-portal-config-backup-logs"
 LOG_FILE="$LOG_DIR/backup-$(date -u +%Y-%m-%d).log"
 mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE" >(logger -t backup-vpn-portal-config)) 2>&1
