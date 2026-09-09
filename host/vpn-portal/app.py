@@ -1343,6 +1343,10 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     )
     validate_bandwidth(bandwidth_down_mbps, bandwidth_up_mbps)
 
+    # TKT-011 v2.0 — initialize duration_days so it's defined for both
+    # tier branches (custom tier has no duration; existing tier fills it below).
+    duration_days = None
+
     # 2. Resolve tier
     if req.tier_name == "custom":
         ts = int(time.time())

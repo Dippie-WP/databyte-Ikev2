@@ -1,17 +1,14 @@
--- VPN Portal — customer table extensions (v1.3.1+)
+-- VPN Portal — customer table extensions
 --
--- Idempotent. Safe to re-run.
--- Adds columns referenced by app.py that are NOT in strongSwan's base schema.
+-- NO-OP as of 2026-09-09 (CI fix): the three columns this file used to add
+-- (billing_id, email, eap_rotated_at) are now part of the base schemas:
+--   - billing_id, eap_rotated_at  -> tests/fixtures/quota-schema.sql
+--   - email                        -> tests/fixtures/portal-schema.sql
 --
--- Background: app.py /api/customers SELECTs `billing_id` and `email` (for a
--- planned 5E billing feature). strongSwan's customers schema does not have
--- these columns. The portal must add them itself to keep SELECT queries valid.
+-- ALTER TABLE statements were removed because they were causing
+-- "duplicate column name" parse errors in the DB integrity CI job
+-- (build-test-DB-from-fixtures step).
 --
--- If you ALTER customers here, also keep app.py in sync (do not reference
--- columns this file doesn't add).
-
-ALTER TABLE customers ADD COLUMN billing_id TEXT;
-ALTER TABLE customers ADD COLUMN email TEXT;
--- v1.3.2 — Bug #4 fix: EAP credential rotation
--- Added 2026-06-25 by /api/customers/{id}/rotate_eap endpoint.
-ALTER TABLE customers ADD COLUMN eap_rotated_at INTEGER;
+-- This file is kept as a no-op so the CI workflow's sqlite3 pipe
+-- (see .github/workflows/ci.yml -> "Build test DB from fixtures") does
+-- not need to be modified.
