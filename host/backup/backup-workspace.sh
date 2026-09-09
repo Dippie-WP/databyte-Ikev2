@@ -34,7 +34,7 @@ WORKSPACE="${WORKSPACE_DIR:-/root/.openclaw/workspace}"
 DEST_BASE="rustfs:open-claw-push/workspace-backups"
 # Fixed rolling destination — always keep latest, overwrite old (msg #29460).
 DEST="${DEST_BASE}"
-LOG_DIR="/var/log/workspace-backup"
+LOG_DIR="/root/.openclaw/workspace/dat-ops/workspace-backup-logs"
 LOG_FILE="$LOG_DIR/backup-$(date -u +%Y-%m-%d).log"
 
 # Use repo's helper (falls back to local /tmp if not installed)
