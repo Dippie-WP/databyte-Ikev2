@@ -1400,8 +1400,9 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                     "created_at, updated_at, notes, billing_id, email) VALUES "
                     "(?, ?, ?, 0, 1, 0, ?, 0, ?, ?, ?, ?, 'active', 2, ?, ?, ?, ?, ?, ?, ?)",
                     (cust_name, req.display_name, req.telegram_username,
-                     int(data_limit), int(tier_id),
+                     int(data_limit),
                      expires_at, req.mac_address_1, req.mac_address_2,
+                     int(tier_id),
                      int(bandwidth_down_mbps), int(bandwidth_up_mbps),
                      now, now, req.notes, req.billing_id, req.email)
                 )
