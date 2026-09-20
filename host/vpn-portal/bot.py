@@ -344,7 +344,11 @@ async def create_start(update, context):
 async def ct_tier_chosen(update, context):
     """[1/6] tier selected -> advance to DEVICE_TYPE."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass  # q.answer() can fail with BadRequest("Query is too old") for
+        # synthetic test callbacks or stale query_ids; not critical to flow.
     if q.data == "cx":
         await q.edit_message_text("Cancelled.")
         return ConversationHandler.END
@@ -368,7 +372,10 @@ async def ct_tier_chosen(update, context):
 async def ct_dt_chosen(update, context):
     """[2/6] device_type selected -> advance to DEVICE_NAME."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass
     if q.data == "cx":
         await q.edit_message_text("Cancelled.")
         return ConversationHandler.END
@@ -448,7 +455,10 @@ async def ct_dn_entered(update, context):
 async def ct_sp_chosen(update, context):
     """[4/6] speed plan selected (or skip) -> advance to OPTIONAL."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass
     if q.data == "cx":
         await q.edit_message_text("Cancelled.")
         return ConversationHandler.END
@@ -561,7 +571,10 @@ async def ct_opt_entered(update, context):
 async def ct_confirm(update, context):
     """[6/6] confirm pressed -> call app.create_client + send creds."""
     q = update.callback_query
-    await q.answer()
+    try:
+        await q.answer()
+    except Exception:
+        pass
     if q.data == "cx":
         await q.edit_message_text("Cancelled.")
         return ConversationHandler.END
