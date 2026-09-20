@@ -119,6 +119,32 @@ class MultiWorkerConversationHandler(ConversationHandler):
                 pass
         return new_state
 
+    async def update_persistence(self, context):
+        """v2.6.5 fix: reload conversations from shared persistence BEFORE save.
+
+        PTB's default update_persistence only WRITES self._conversations to the
+        persistence backend — it does NOT read from persistence on every webhook call.
+        In multi-worker gunicorn, each worker has its own Application instance with its
+        own self._conversations cache. By reloading from the shared MariaDB backend
+        here, every webhook call sees the latest state across all workers.
+
+        See github.com/python-telegram-bot/python-telegram-bot/issues/5225.
+        """
+        persistence = getattr(self, "persistence_ref", None)
+        if (
+            getattr(self, "_persistent", False)
+            and getattr(self, "_name", None)
+            and persistence is not None
+        ):
+            try:
+                stored = await persistence.get_conversations(self._name)
+                if isinstance(stored, dict):
+                    # Refresh local cache from shared backend
+                    self._conversations.update(stored)
+            except Exception:
+                pass
+        await super().update_persistence(context)
+
 # Secrets loaded from file (chmod 600, owner vpn-portal:vpn-portal).
 # Never logged, never echoed to chat.
 TELEGRAM_TOKEN = open("/etc/databyte-vpn-bot/telegram_token").read().strip()
