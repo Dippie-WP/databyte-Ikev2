@@ -641,6 +641,8 @@ async def ct_confirm(update, context):
         f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
     )
     msg = await _safe_edit_text(q, text, parse_mode=ParseMode.MARKDOWN)
+    if msg is None:
+        return ConversationHandler.END  # edit failed; credentials not sent but customer was created
     schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
     return ConversationHandler.END
 
