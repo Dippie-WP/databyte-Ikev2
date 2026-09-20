@@ -166,8 +166,8 @@ class MariaDBPersistence(BasePersistence):
                 conn.rollback()
                 raise
 
-    async def refresh_bot_data(self, data: Dict[str, Any]) -> None:
-        self._bot_data_cache = data
+    async def refresh_bot_data(self, bot_data: Dict[str, Any]) -> None:
+        self._bot_data_cache = bot_data
 
     # ----- chat_data -----
 
@@ -204,9 +204,9 @@ class MariaDBPersistence(BasePersistence):
         if self._chat_data_cache is not None:
             self._chat_data_cache[chat_id] = data
 
-    async def refresh_chat_data(self, chat_id: int, data: Dict[str, Any]) -> None:
+    async def refresh_chat_data(self, chat_id: int, chat_data: Dict[str, Any]) -> None:
         if self._chat_data_cache is not None:
-            self._chat_data_cache[chat_id] = data
+            self._chat_data_cache[chat_id] = chat_data
 
     # ----- user_data -----
 
@@ -243,9 +243,9 @@ class MariaDBPersistence(BasePersistence):
         if self._user_data_cache is not None:
             self._user_data_cache[user_id] = data
 
-    async def refresh_user_data(self, user_id: int, data: Dict[str, Any]) -> None:
+    async def refresh_user_data(self, user_id: int, user_data: Dict[str, Any]) -> None:
         if self._user_data_cache is not None:
-            self._user_data_cache[user_id] = data
+            self._user_data_cache[user_id] = user_data
 
     # ----- drop -----
 
