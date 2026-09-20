@@ -3204,7 +3204,7 @@ async def telegram_webhook(secret: str, request: Request):
     # dead. We iterate handler groups, run check_update on each, and invoke
     # matching handlers directly.
     #
-    # NOTE: must call context.update_persistence() at the end so PTB
+    # NOTE: must call bot_app.update_persistence() at the end so PTB
     # ConversationHandler state survives across webhook calls. Without this,
     # state set in handle_update lives only on the Context object (which is
     # recreated per request) and is never flushed to bot_app.persistence.
@@ -3213,6 +3213,12 @@ async def telegram_webhook(secret: str, request: Request):
     # state transition after step 1. PTB's normal Application.process_update()
     # calls update_persistence() automatically; the manual dispatch must do
     # so explicitly.
+    #
+    # NOTE v22.8: Context.update_persistence() does NOT exist (verified via
+    # `hasattr(callback_context, 'update_persistence')` == False on a
+    # CallbackContext instance). The correct API is on the Application:
+    # `bot_app.update_persistence()` with no args (updates all layers:
+    # bot_data, user_data, chat_data).
     log.info(f"telegram webhook update_id={update.update_id} chat_id={update.effective_chat.id if update.effective_chat else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_user={(update.effective_user.id, update.effective_user.username) if update.effective_user else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_msg_text={update.effective_message.text if update.effective_message else None}")
@@ -3231,7 +3237,7 @@ async def telegram_webhook(secret: str, request: Request):
             except Exception as e:
                 log.exception(f"telegram webhook handler {type(handler).__name__} raised: {e}")
             break
-    await context.update_persistence()
+    await bot_app.update_persistence()
     log.info(f"telegram webhook update_id={update.update_id} handlers_fired={handlers_fired}")
     return {"ok": True, "handlers_fired": handlers_fired}
 
