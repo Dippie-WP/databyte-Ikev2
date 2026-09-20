@@ -57,52 +57,67 @@ class MultiWorkerConversationHandler(ConversationHandler):
       immediately via application.create_task (async write, non-blocking).
     """
 
-    def check_update(self, update: object) -> object | None:
+    async def check_update(self, update: object):
+        """Override to force reload from shared persistence on cache miss.
+
+        PTB 22 Application calls check_update synchronously inside an async
+        context (process_update), so we can use asyncio.run_coroutine_threadsafe
+        against the running loop to load state from MariaDB when the per-instance
+        self._conversations dict has a miss.
+        """
+        persistence = getattr(self, "persistence_ref", None)
         if (
             isinstance(update, Update)
             and getattr(self, "_persistent", False)
             and getattr(self, "_name", None)
+            and persistence is not None
         ):
             key = self._get_key(update)
             if key is not None and key not in self._conversations:
-                # Cache miss — load from shared persistence synchronously
                 try:
-                    application = getattr(self, "application", None)
-                    if application is not None:
-                        loop = getattr(application, "_event_loop", None)
-                        if loop is not None:
-                            conversations = _asyncio_MWCH.run_coroutine_threadsafe(
-                                application.persistence.get_conversations(self._name),
-                                loop,
-                            ).result(timeout=1.0)
-                            if isinstance(conversations, dict) and key in conversations:
-                                self._conversations[key] = conversations[key]
+                    loop = _asyncio_MWCH.get_event_loop()
+                    fut = _asyncio_MWCH.run_coroutine_threadsafe(
+                        persistence.get_conversations(self._name),
+                        loop,
+                    )
+                    conversations = fut.result(timeout=1.0)
+                    if isinstance(conversations, dict) and key in conversations:
+                        self._conversations[key] = conversations[key]
                 except Exception:
                     pass
-        return super().check_update(update)
+        return await super().check_update(update)
 
-    def _update_state(
-        self, new_state: object, key, handler=None
-    ) -> None:
-        super()._update_state(new_state, key, handler)
-        # Write through to shared persistence immediately (async, non-blocking)
+    async def handle_update(self, update, application, check_result, context):
+        """Override to write through to shared persistence immediately.
+
+        Default PTB 22 only calls application.persistence.update_* from the
+        generic update_persistence path, which the ConversationHandler does NOT
+        override to flush self._conversations. So conversation state would be
+        lost across workers on application restart or cache eviction.
+        Here we explicitly flush to persistence right after the handler returns.
+        """
+        new_state = await super().handle_update(update, application, check_result, context)
+        persistence = getattr(self, "persistence_ref", None)
         if (
-            getattr(self, "_persistent", False)
+            new_state is not None
+            and getattr(self, "_persistent", False)
             and getattr(self, "_name", None)
-            and new_state is not None
+            and persistence is not None
         ):
             try:
-                application = getattr(self, "application", None)
-                if application is not None:
-                    application.create_task(
-                        application.persistence.update_conversation(
-                            self._name, key, new_state
-                        ),
-                        update=None,
-                        name=f"MWCH:{self._name}:persist",
+                key = self._conversation_key(context)
+                if key is not None:
+                    # Persist synchronously so the next webhook call from any
+                    # worker sees the fresh state via check_update reload.
+                    loop = _asyncio_MWCH.get_event_loop()
+                    fut = _asyncio_MWCH.run_coroutine_threadsafe(
+                        persistence.update_conversation(self._name, key, new_state),
+                        loop,
                     )
+                    fut.result(timeout=1.0)
             except Exception:
                 pass
+        return new_state
 
 # Secrets loaded from file (chmod 600, owner vpn-portal:vpn-portal).
 # Never logged, never echoed to chat.
@@ -972,6 +987,11 @@ def build_application() -> Application:
             CommandHandler("cancel", ct_cancel),
         ],
     )
+    # Wire the shared persistence into the conversation handler so its overrides
+    # can reload + write-through cross-worker (MultiWorkerConversationHandler uses
+    # self.persistence_ref rather than relying on self.application which doesn't exist
+    # in PTB 22 BaseHandler).
+    create_conv.persistence_ref = persistence
     application.add_handler(create_conv)
 
     commands = [
