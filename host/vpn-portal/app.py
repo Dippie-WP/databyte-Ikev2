@@ -3198,6 +3198,12 @@ async def telegram_webhook(secret: str, request: Request):
 
     data = await request.json()
     update = Update.de_json(data, bot_app.bot)
+    # v2.6.4 fix: PTB 22 Application calls check_update synchronously inside an async
+    # context (process_update). When MultiWorkerConversationHandler.check_update is async
+    # (to await the MariaDB persistence load on cache miss), the result is a coroutine.
+    # Await it before passing to handle_update so ConversationHandler.handle_update can
+    # unpack check_result into (current_state, key, handler, handler_check_result)
+    # without TypeError: cannot unpack non-iterable coroutine object.
     log.info(f"telegram webhook update_id={update.update_id} chat_id={update.effective_chat.id if update.effective_chat else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_user={(update.effective_user.id, update.effective_user.username) if update.effective_user else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_msg_text={update.effective_message.text if update.effective_message else None}")
