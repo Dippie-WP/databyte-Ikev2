@@ -101,7 +101,7 @@ class MultiWorkerConversationHandler(ConversationHandler):
         # the coroutine here so ConversationHandler.handle_update can unpack
         # check_result as a 4-tuple (current_state, key, handler, handler_check_result)
         # instead of failing with TypeError: cannot unpack non-iterable coroutine object.
-        if asyncio.iscoroutine(check_result):
+        if _asyncio_MWCH.iscoroutine(check_result):
             check_result = await check_result
         new_state = await super().handle_update(update, application, check_result, context)
         persistence = getattr(self, "persistence_ref", None)
