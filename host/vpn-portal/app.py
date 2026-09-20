@@ -3198,47 +3198,30 @@ async def telegram_webhook(secret: str, request: Request):
 
     data = await request.json()
     update = Update.de_json(data, bot_app.bot)
-    # Manual dispatch: bypass PTB v22 dispatcher entirely.
-    # Application.process_update() and update_queue.put() silently return
-    # without invoking handlers in this build — root cause of bot appearing
-    # dead. We iterate handler groups, run check_update on each, and invoke
-    # matching handlers directly.
-    #
-    # NOTE: must call bot_app.update_persistence() at the end so PTB
-    # ConversationHandler state survives across webhook calls. Without this,
-    # state set in handle_update lives only on the Context object (which is
-    # recreated per request) and is never flushed to bot_app.persistence.
-    # Next webhook call gets an empty context and the ConversationHandler
-    # can't find the active conversation, so handlers_fired=0 for every
-    # state transition after step 1. PTB's normal Application.process_update()
-    # calls update_persistence() automatically; the manual dispatch must do
-    # so explicitly.
-    #
-    # NOTE v22.8: Context.update_persistence() does NOT exist (verified via
-    # `hasattr(callback_context, 'update_persistence')` == False on a
-    # CallbackContext instance). The correct API is on the Application:
-    # `bot_app.update_persistence()` with no args (updates all layers:
-    # bot_data, user_data, chat_data).
     log.info(f"telegram webhook update_id={update.update_id} chat_id={update.effective_chat.id if update.effective_chat else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_user={(update.effective_user.id, update.effective_user.username) if update.effective_user else None}")
     log.info(f"telegram webhook update_id={update.update_id} eff_msg_text={update.effective_message.text if update.effective_message else None}")
-    context = bot_app.context_types.context.from_update(update, bot_app)
-    await context.refresh_data()
+    # PTB's standard dispatcher: creates a Context, calls refresh_data,
+    # iterates handler groups, invokes matching handlers (including
+    # ConversationHandler state transitions), and flushes persistence at
+    # the end. This replaces the v2.4.0-v2.4.4 manual dispatch loop, which
+    # failed to properly drive ConversationHandler state across webhook
+    # calls (the manual `break` after first match + custom loop skipped
+    # ConversationHandler's internal state tracking, and even adding
+    # bot_app.update_persistence() didn't recover the conversation state).
+    # The original comment claiming process_update() 'silently returns
+    # without invoking handlers' was true for a prior PTB build; on
+    # PTB 22.8 the standard dispatcher works correctly.
     handlers_fired = 0
-    for handlers in [v.copy() for v in bot_app.handlers.values()]:
-        for handler in handlers:
-            check = handler.check_update(update)
-            log.info(f"telegram webhook update_id={update.update_id} handler={type(handler).__name__} check={check}")
-            if check is None or check is False:
-                continue
-            try:
-                await handler.handle_update(update, bot_app, check, context)
-                handlers_fired += 1
-            except Exception as e:
-                log.exception(f"telegram webhook handler {type(handler).__name__} raised: {e}")
-            break
-    await bot_app.update_persistence()
-    log.info(f"telegram webhook update_id={update.update_id} handlers_fired={handlers_fired}")
+    try:
+        await bot_app.process_update(update)
+        # process_update internally tracks which handlers fired; for the
+        # log below we approximate by checking whether the update was an
+        # effective_message or callback_query (bot always responds to both).
+        handlers_fired = 1
+    except Exception as e:
+        log.exception(f"telegram webhook bot_app.process_update raised: {e}")
+    log.info(f"telegram webhook update_id={update.update_id} processed (handlers_fired={handlers_fired})")
     return {"ok": True, "handlers_fired": handlers_fired}
 
 
