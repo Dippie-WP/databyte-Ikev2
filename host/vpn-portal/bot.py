@@ -102,12 +102,15 @@ class MultiWorkerConversationHandler(ConversationHandler):
         # iterate handlers and await check_update results itself, instead of relying on
         # bot_app.process_update() which has this bug. With that caller-side fix,
         # check_result will always be a resolved value here.
-        # v2.6.10 fix: PTB 22 Application.process_update does NOT await async
-        # check_update results before passing them to handle_update. MultiWorkerConversationHandler
-        # has async check_update (loads state from MariaDB on cache miss), so check_result
-        # arrives as a coroutine. Await it before passing to super().handle_update. Also handle
-        # None (when no ConversationHandler matched, e.g. entry_points don't match callback_query).
-        # Uses the existing _asyncio_MWCH import alias (line 38: import asyncio as _asyncio_MWCH).
+        # NOTE: v2.6.11 fix: caller (app.py webhook handler) is responsible for
+        # awaiting any coroutine from handler.check_update() before passing to
+        # handler.handle_update(). PTB 22 Application.process_update does NOT await
+        # async check_update results itself. So check_result may arrive as a coroutine
+        # OR as a resolved value (depending on whether the caller awaited it). This
+        # handler handles both cases safely:
+        #   - None (no ConversationHandler matched) → return None
+        #   - coroutine → await it to get the resolved value
+        #   - resolved value (tuple/bool) → pass through as-is
         if check_result is None:
             return None
         if _asyncio_MWCH.iscoroutine(check_result):
