@@ -35,6 +35,75 @@ from telegram.ext import (
     filters,
 )
 
+import asyncio as _asyncio_MWCH
+
+
+class MultiWorkerConversationHandler(ConversationHandler):
+    """PTB v22 ConversationHandler subclass that forces load + write-through
+    to the shared persistence backend (bot_persistence.MariaDBPersistence)
+    on every webhook call.
+
+    The default ConversationHandler caches state in self._conversations on
+    each Application instance. With multi-worker gunicorn (--workers 4),
+    each worker has its own Application instance with its own _conversations
+    dict, so the cache never sees state written by other workers. This causes
+    the 6-step /create ConversationHandler flow to fail across workers.
+
+    Fix:
+    - check_update: on cache miss, synchronously load from
+      application.persistence.get_conversations(self.name) via
+      asyncio.run_coroutine_threadsafe and populate self._conversations.
+    - _update_state: write through to application.persistence.update_conversation
+      immediately via application.create_task (async write, non-blocking).
+    """
+
+    def check_update(self, update: object) -> object | None:
+        if (
+            isinstance(update, Update)
+            and getattr(self, "_persistent", False)
+            and getattr(self, "_name", None)
+        ):
+            key = self._get_key(update)
+            if key is not None and key not in self._conversations:
+                # Cache miss — load from shared persistence synchronously
+                try:
+                    application = getattr(self, "application", None)
+                    if application is not None:
+                        loop = getattr(application, "_event_loop", None)
+                        if loop is not None:
+                            conversations = _asyncio_MWCH.run_coroutine_threadsafe(
+                                application.persistence.get_conversations(self._name),
+                                loop,
+                            ).result(timeout=1.0)
+                            if isinstance(conversations, dict) and key in conversations:
+                                self._conversations[key] = conversations[key]
+                except Exception:
+                    pass
+        return super().check_update(update)
+
+    def _update_state(
+        self, new_state: object, key, handler=None
+    ) -> None:
+        super()._update_state(new_state, key, handler)
+        # Write through to shared persistence immediately (async, non-blocking)
+        if (
+            getattr(self, "_persistent", False)
+            and getattr(self, "_name", None)
+            and new_state is not None
+        ):
+            try:
+                application = getattr(self, "application", None)
+                if application is not None:
+                    application.create_task(
+                        application.persistence.update_conversation(
+                            self._name, key, new_state
+                        ),
+                        update=None,
+                        name=f"MWCH:{self._name}:persist",
+                    )
+            except Exception:
+                pass
+
 # Secrets loaded from file (chmod 600, owner vpn-portal:vpn-portal).
 # Never logged, never echoed to chat.
 TELEGRAM_TOKEN = open("/etc/databyte-vpn-bot/telegram_token").read().strip()
@@ -857,7 +926,11 @@ def build_application() -> Application:
     # /create is now a ConversationHandler (interactive onboarding).
     # It must be registered BEFORE the command loop so it claims /create
     # before the regular CommandHandler does.
-    create_conv = ConversationHandler(
+    # Use MultiWorkerConversationHandler (defined above in imports) instead
+    # of the default ConversationHandler so cross-worker state persistence
+    # works -- the default caches state per-instance, which fragments
+    # across gunicorn --workers 4 workers.
+    create_conv = MultiWorkerConversationHandler(
         entry_points=[
             CommandHandler("create", create_start, filters=whitelist),
         ],
