@@ -280,6 +280,21 @@ def _kb(rows):
     return InlineKeyboardMarkup(rows)
 
 
+async def _safe_edit_text(q, text, **kwargs):
+    """q.edit_message_text() that swallows BadRequest on stale callbacks.
+
+    PTB 22.8 raises BadRequest('Message to edit not found') / 'Query is too
+    old' when callback_query.message_id references a message that no longer
+    exists in the chat (common with synthetic test callbacks, also possible
+    if the user clears chat history between updates). The edit is purely
+    cosmetic — losing it does NOT break the conversation state machine.
+    """
+    try:
+        return await _safe_edit_text(q, text, **kwargs)
+    except Exception:
+        pass
+
+
 def _tier_kb():
     """Build the TIER inline keyboard from live DB query."""
     import app
@@ -350,7 +365,7 @@ async def ct_tier_chosen(update, context):
         pass  # q.answer() can fail with BadRequest("Query is too old") for
         # synthetic test callbacks or stale query_ids; not critical to flow.
     if q.data == "cx":
-        await q.edit_message_text("Cancelled.")
+        await _safe_edit_text(q, "Cancelled.")
         return ConversationHandler.END
     tier = q.data.split(":", 1)[1]
     context.user_data["ct_tier"] = tier
@@ -365,7 +380,7 @@ async def ct_tier_chosen(update, context):
         [InlineKeyboardButton("Back", callback_data="cb"),
          InlineKeyboardButton("Cancel", callback_data="cx")],
     ]
-    await q.edit_message_text("[2/6] Device type?", reply_markup=_kb(rows))
+    await _safe_edit_text(q, "[2/6] Device type?", reply_markup=_kb(rows))
     return DEVICE_TYPE
 
 
@@ -377,17 +392,17 @@ async def ct_dt_chosen(update, context):
     except Exception:
         pass
     if q.data == "cx":
-        await q.edit_message_text("Cancelled.")
+        await _safe_edit_text(q, "Cancelled.")
         return ConversationHandler.END
     if q.data == "cb":
-        await q.edit_message_text("[1/6] Pick a tier:", reply_markup=_tier_kb())
+        await _safe_edit_text(q, "[1/6] Pick a tier:", reply_markup=_tier_kb())
         return TIER
     dt = q.data.split(":", 1)[1]
     if dt not in DEVICE_TYPES:
         await q.answer(f"Unknown type: {dt}")
         return DEVICE_TYPE
     context.user_data["ct_dt"] = dt
-    await q.edit_message_text(
+    await _safe_edit_text(q, 
         "[3/6] Device name?\n"
         "Alphanumeric + dash, 1-32 chars. e.g. `iphone`, `laptop`, `pixel9`.\n"
         "/back or /cancel.",
@@ -460,10 +475,10 @@ async def ct_sp_chosen(update, context):
     except Exception:
         pass
     if q.data == "cx":
-        await q.edit_message_text("Cancelled.")
+        await _safe_edit_text(q, "Cancelled.")
         return ConversationHandler.END
     if q.data == "cb":
-        await q.edit_message_text(
+        await _safe_edit_text(q, 
             "[3/6] Device name?\n"
             "Alphanumeric + dash, 1-32 chars. e.g. `iphone`, `laptop`, `pixel9`.\n"
             "/back or /cancel.",
@@ -472,7 +487,7 @@ async def ct_sp_chosen(update, context):
         return DEVICE_NAME
     if q.data == "csk":
         context.user_data["ct_sp"] = "standard"
-        await q.edit_message_text(
+        await _safe_edit_text(q, 
             "[5/6] Optional fields? Send one line each:\n"
             "  email: user@example.com\n"
             "  telegram: @handle\n"
@@ -485,7 +500,7 @@ async def ct_sp_chosen(update, context):
         await q.answer(f"Unknown plan: {sp}")
         return SPEED_PLAN
     context.user_data["ct_sp"] = sp
-    await q.edit_message_text(
+    await _safe_edit_text(q, 
         "[5/6] Optional fields? Send one line each:\n"
         "  email: user@example.com\n"
         "  telegram: @handle\n"
@@ -576,10 +591,10 @@ async def ct_confirm(update, context):
     except Exception:
         pass
     if q.data == "cx":
-        await q.edit_message_text("Cancelled.")
+        await _safe_edit_text(q, "Cancelled.")
         return ConversationHandler.END
     if q.data == "cb":
-        await q.edit_message_text(
+        await _safe_edit_text(q, 
             "[5/6] Optional fields? Send one line each:\n"
             "  email: user@example.com\n"
             "  telegram: @handle\n"
@@ -610,7 +625,7 @@ async def ct_confirm(update, context):
             req, _user={"name": "bot", "role": "operator"}
         )
     except Exception as e:
-        await q.edit_message_text(f"Create failed: {e}")
+        await _safe_edit_text(q, f"Create failed: {e}")
         return ConversationHandler.END
 
     cust = result.get("customer", {})
@@ -625,7 +640,7 @@ async def ct_confirm(update, context):
         f"Password: `{password}`\n"
         f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
     )
-    msg = await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+    msg = await _safe_edit_text(q, text, parse_mode=ParseMode.MARKDOWN)
     schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
     return ConversationHandler.END
 
