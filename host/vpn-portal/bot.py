@@ -986,6 +986,8 @@ def build_application() -> Application:
         fallbacks=[
             CommandHandler("cancel", ct_cancel),
         ],
+        persistent=True,
+        name="create_conv",
     )
     # Wire the shared persistence into the conversation handler so its overrides
     # can reload + write-through cross-worker (MultiWorkerConversationHandler uses
