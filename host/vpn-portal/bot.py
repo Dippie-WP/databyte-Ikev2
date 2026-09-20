@@ -1,0 +1,875 @@
+"""Databyte VPN Admin Bot — Telegram interface for the VPN portal.
+
+Lives inside the FastAPI app process (no separate service). Whitelist-only:
+chat_id 7748884597 (Zun). Commands call internal portal helpers directly.
+
+Commands:
+  /start /help
+  /status - service health, 24h auth count, live session count
+  /stats - bandwidth today/7d/30d from radacct
+  /sessions - live VPN sessions
+  /customers - all customers
+  /customer <id|name> - drill-down
+  /create <name> [display] - create customer, return creds (auto-delete 60s)
+  /creds <id|name> - fetch current creds from rw-eap.conf (auto-delete 60s)
+  /disable <id|name> - set is_active=0
+  /enable <id|name> - set is_active=1
+  /disconnect <name> - CoA kick via radclient 127.0.0.1:3779
+  /logs <name> [n=20] - last N radpostauth entries
+"""
+import logging
+import os
+import re
+import subprocess
+from datetime import datetime, timezone
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
+
+# Secrets loaded from file (chmod 600, owner vpn-portal:vpn-portal).
+# Never logged, never echoed to chat.
+TELEGRAM_TOKEN = open("/etc/databyte-vpn-bot/telegram_token").read().strip()
+WEBHOOK_SECRET = open("/etc/databyte-vpn-bot/webhook_secret").read().strip()
+
+AUDIT_LOG = "/var/log/vpn-portal/bot-audit.log"
+ALLOWED_CHAT_ID = 7748884597  # Zun
+RW_EAP_CONF = os.environ.get(
+    "RW_EAP_CONF",
+    "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf",
+)
+
+logger = logging.getLogger("vpn-bot")
+
+
+def audit(action: str, **details):
+    """Append-only audit log. No secrets."""
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    parts = " ".join(f"{k}={v}" for k, v in details.items())
+    line = f"{ts} chat_id={ALLOWED_CHAT_ID} action={action} {parts}\n"
+    try:
+        with open(AUDIT_LOG, "a") as f:
+            f.write(line)
+    except Exception as e:
+        logger.error(f"audit log write failed: {e}")
+
+
+async def reject_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Silently reject anything from non-whitelisted chat_ids."""
+    chat = update.effective_chat
+    if chat and chat.id != ALLOWED_CHAT_ID:
+        u = update.effective_user
+        uname = u.username if u else None
+        logger.warning(f"REJECT chat_id={chat.id} user={uname}")
+
+
+async def _auto_delete_job(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    try:
+        await context.bot.delete_message(chat_id=job.chat_id, message_id=job.data)
+    except Exception as e:
+        logger.warning(f"auto-delete failed msg={job.data}: {e}")
+
+
+def schedule_delete(context, chat_id: int, message_id: int, delay: int = 60):
+    """Schedule auto-delete of a message (default 60s).
+
+    No-op if the Application was built without a JobQueue (job_queue is None).
+    The customer creation still succeeds — this just means the success/error
+    message won't be auto-deleted after 60s.
+    """
+    if context.job_queue is None:
+        return
+    context.job_queue.run_once(
+        _auto_delete_job, delay, chat_id=chat_id, data=message_id
+    )
+
+
+# ---------- Commands ----------
+
+async def cmd_start(update, context):
+    audit("start")
+    logger.info("cmd_start fired for chat_id=%s", update.effective_chat.id)
+    await update.message.reply_text(
+        "Databyte VPN Admin Bot\n\n"
+        "/help - list commands\n"
+        "/status - health + activity\n"
+        "/stats - bandwidth today/7d/30d\n"
+        "/sessions - live VPN sessions\n"
+        "/customers - all customers\n"
+        "/customer <id|name> - drill-down\n"
+        "/create <name> [display] - new customer\n"
+        "/creds <id|name> - fetch creds (auto-del 60s)\n"
+        "/disable /enable <id|name>\n"
+        "/disconnect <name> - CoA kick\n"
+        "/logs <name> [n]"
+    )
+
+
+async def cmd_help(update, context):
+    audit("help")
+    await update.message.reply_text(
+        "/status /stats /sessions /customers\n"
+        "/customer <id|name> /create <name> [display]\n"
+        "/creds <id|name> /disable /enable <id|name>\n"
+        "/disconnect <name> /logs <name> [n=20]"
+    )
+
+
+async def cmd_status(update, context):
+    audit("status")
+    import app
+    health = app.health()
+    auth24 = app.db_query(
+        "SELECT COUNT(*) AS n FROM radpostauth "
+        "WHERE authdate >= NOW() - INTERVAL 1 DAY"
+    )
+    n24 = auth24[0]["n"] if auth24 else 0
+    sessions = app.swanctl_parse_sas()
+    live = sum(1 for s in sessions if s.get("state") == "ESTABLISHED")
+    text = (
+        "*Service Health*\n"
+        f"DB: `{health.get('db_ok')}` customers: `{health.get('db_customers')}`\n"
+        f"charon: `{health.get('charon_ok')}`\n\n"
+        "*Activity*\n"
+        f"Auth (24h): `{n24}`\n"
+        f"Live sessions: `{live}`"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_stats(update, context):
+    audit("stats")
+    import app
+
+    def fmt(b):
+        if not b:
+            return "0 B"
+        b = int(b)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} PB"
+
+    def row(interval):
+        r = app.db_query(
+            "SELECT COALESCE(SUM(acctinputoctets),0) AS inb, "
+            "COALESCE(SUM(acctoutputoctets),0) AS outb, COUNT(*) AS n "
+            f"FROM radacct WHERE acctstarttime >= NOW() - INTERVAL {interval}"
+        )
+        return r[0] if r else {"inb": 0, "outb": 0, "n": 0}
+
+    r1, r7, r30 = row("1 DAY"), row("7 DAY"), row("30 DAY")
+    text = (
+        "*Bandwidth*\n"
+        f"Today: {fmt(r1['inb'])} in / {fmt(r1['outb'])} out ({r1['n']} sessions)\n"
+        f"7d:    {fmt(r7['inb'])} in / {fmt(r7['outb'])} out ({r7['n']} sessions)\n"
+        f"30d:   {fmt(r30['inb'])} in / {fmt(r30['outb'])} out ({r30['n']} sessions)"
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_sessions(update, context):
+    audit("sessions")
+    import app
+    sessions = app.swanctl_parse_sas()
+    if not sessions:
+        await update.message.reply_text("No active sessions.")
+        return
+    lines = ["*Active Sessions*"]
+    for s in sessions[:25]:
+        rid = s.get("remote_id") or "?"
+        rip = s.get("remote_ip") or "?"
+        vip = s.get("vip") or "?"
+        st = s.get("state") or "?"
+        bi = s.get("bytes_in", 0)
+        bo = s.get("bytes_out", 0)
+        lines.append(
+            f"- `{rid}` `{rip}` -> `{vip}` `{st}` (in:{bi:,} out:{bo:,})"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_customers(update, context):
+    audit("customers")
+    import app
+    rows = app.db_query(
+        "SELECT id, name, display_name, is_active "
+        "FROM customers WHERE COALESCE(is_operator, 0) = 0 ORDER BY id"
+    )
+    if not rows:
+        await update.message.reply_text("No customers.")
+        return
+    lines = ["*Customers*"]
+    for c in rows:
+        archived = bool(c.get("is_archived"))
+        active = bool(c.get("is_active"))
+        if archived:
+            flag = "Y"  # yellow archived
+        elif active:
+            flag = "G"  # green active
+        else:
+            flag = "R"  # red disabled
+        lines.append(
+            f"[{flag}] `{c['id']}` `{c['name']}` - {c.get('display_name') or ''}"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_customer(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /customer <id|name>")
+        return
+    arg = context.args[0]
+    audit("customer", arg=arg)
+    import app
+    if arg.isdigit():
+        rows = app.db_query("SELECT * FROM customers WHERE id = ?", (int(arg),))
+    else:
+        rows = app.db_query("SELECT * FROM customers WHERE name = ?", (arg,))
+    if not rows:
+        await update.message.reply_text(f"No customer `{arg}`.")
+        return
+    c = rows[0]
+    devs = app.db_query(
+        "SELECT id, device_name, device_type, is_active "
+        "FROM devices WHERE customer_id = ?",
+        (c["id"],),
+    )
+    dev_lines = []
+    for d in devs:
+        flag = "G" if d.get("is_active") else "R"
+        dev_lines.append(
+            f"  [{flag}] `{d['id']}` `{d.get('device_name')}` ({d.get('device_type')})"
+        )
+    text = (
+        f"*Customer #{c['id']}*\n"
+        f"Slug: `{c['name']}`\n"
+        f"Display: {c.get('display_name') or '-'}\n"
+        f"Active: {bool(c.get('is_active'))} "
+        f"Tier: {c.get('tier_id')} Created: {c.get('created_at')}\n"
+        f"Devices:\n" + ("\n".join(dev_lines) if dev_lines else "  (none)")
+    )
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+
+
+# ---------- /create ConversationHandler (interactive onboarding) ----------
+# Replaces the one-shot cmd_create with a 6-step state machine:
+#   TIER -> DEVICE_TYPE -> DEVICE_NAME -> SPEED_PLAN -> OPTIONAL -> CONFIRM
+# Each step uses inline keyboards for choices; free text for typed answers.
+# /back and /cancel work from any state. /skip is honoured at OPTIONAL
+# (and via a dedicated skip button at SPEED_PLAN -> defaults to standard).
+
+# ConversationHandler state IDs
+TIER, DEVICE_TYPE, DEVICE_NAME, SPEED_PLAN, OPTIONAL, CONFIRM = range(6)
+
+DEVICE_TYPES = ["iOS", "Android", "Windows", "macOS", "Linux", "Other"]
+SPEED_PLANS = ["standard", "asymmetric_40_20"]
+
+
+def _kb(rows):
+    return InlineKeyboardMarkup(rows)
+
+
+def _tier_kb():
+    """Build the TIER inline keyboard from live DB query."""
+    import app
+    tiers = app.db_query(
+        "SELECT name, data_limit_bytes, duration_days FROM tiers "
+        "WHERE is_active = 1 ORDER BY data_limit_bytes ASC, id ASC"
+    )
+    if not tiers:
+        return None
+    rows, row = [], []
+    for t in tiers:
+        cap = t["data_limit_bytes"] / 1024 / 1024 if t["data_limit_bytes"] else 0
+        dur = t.get("duration_days") if t.get("duration_days") else "inf"
+        row.append(InlineKeyboardButton(
+            f"{t['name']} ({cap:.0f}MiB/{dur}d)",
+            callback_data=f"ct:{t['name']}",
+        ))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("Cancel", callback_data="cx")])
+    return _kb(rows)
+
+
+async def create_start(update, context):
+    """/create <name> [display] -- ConversationHandler entry."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /create <name> [display_name]\n"
+            'Example: /create zun-acme "Acme Corp"'
+        )
+        return ConversationHandler.END
+
+    name = context.args[0].lower()
+    display = context.args[1] if len(context.args) > 1 else name
+    audit("create", name=name)
+
+    import app
+    if app.db_query("SELECT id FROM customers WHERE name = ?", (name,)):
+        await update.message.reply_text(
+            f"Customer `{name}` already exists. Use /creds to fetch."
+        )
+        return ConversationHandler.END
+
+    kb = _tier_kb()
+    if kb is None:
+        await update.message.reply_text("No active tier configured. Cannot create customer.")
+        return ConversationHandler.END
+
+    context.user_data["ct_name"] = name
+    context.user_data["ct_display"] = display
+
+    await update.message.reply_text(
+        f"Creating `{name}` (display: `{display}`)\n\n[1/6] Pick a tier:",
+        reply_markup=kb,
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return TIER
+
+
+async def ct_tier_chosen(update, context):
+    """[1/6] tier selected -> advance to DEVICE_TYPE."""
+    q = update.callback_query
+    await q.answer()
+    if q.data == "cx":
+        await q.edit_message_text("Cancelled.")
+        return ConversationHandler.END
+    tier = q.data.split(":", 1)[1]
+    context.user_data["ct_tier"] = tier
+
+    rows = [
+        [InlineKeyboardButton("iOS", callback_data="cdt:iOS"),
+         InlineKeyboardButton("Android", callback_data="cdt:Android"),
+         InlineKeyboardButton("Windows", callback_data="cdt:Windows")],
+        [InlineKeyboardButton("macOS", callback_data="cdt:macOS"),
+         InlineKeyboardButton("Linux", callback_data="cdt:Linux"),
+         InlineKeyboardButton("Other", callback_data="cdt:Other")],
+        [InlineKeyboardButton("Back", callback_data="cb"),
+         InlineKeyboardButton("Cancel", callback_data="cx")],
+    ]
+    await q.edit_message_text("[2/6] Device type?", reply_markup=_kb(rows))
+    return DEVICE_TYPE
+
+
+async def ct_dt_chosen(update, context):
+    """[2/6] device_type selected -> advance to DEVICE_NAME."""
+    q = update.callback_query
+    await q.answer()
+    if q.data == "cx":
+        await q.edit_message_text("Cancelled.")
+        return ConversationHandler.END
+    if q.data == "cb":
+        await q.edit_message_text("[1/6] Pick a tier:", reply_markup=_tier_kb())
+        return TIER
+    dt = q.data.split(":", 1)[1]
+    if dt not in DEVICE_TYPES:
+        await q.answer(f"Unknown type: {dt}")
+        return DEVICE_TYPE
+    context.user_data["ct_dt"] = dt
+    await q.edit_message_text(
+        "[3/6] Device name?\n"
+        "Alphanumeric + dash, 1-32 chars. e.g. `iphone`, `laptop`, `pixel9`.\n"
+        "/back or /cancel.",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    return DEVICE_NAME
+
+
+async def ct_dn_entered(update, context):
+    """[3/6] device name entered (free text) -> advance to SPEED_PLAN."""
+    text = update.message.text.strip()
+    if text.lower() == "/cancel":
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+    if text.lower() == "/back":
+        rows = [
+            [InlineKeyboardButton("iOS", callback_data="cdt:iOS"),
+             InlineKeyboardButton("Android", callback_data="cdt:Android"),
+             InlineKeyboardButton("Windows", callback_data="cdt:Windows")],
+            [InlineKeyboardButton("macOS", callback_data="cdt:macOS"),
+             InlineKeyboardButton("Linux", callback_data="cdt:Linux"),
+             InlineKeyboardButton("Other", callback_data="cdt:Other")],
+            [InlineKeyboardButton("Back", callback_data="cb"),
+             InlineKeyboardButton("Cancel", callback_data="cx")],
+        ]
+        await update.message.reply_text("[2/6] Device type?", reply_markup=_kb(rows))
+        return DEVICE_TYPE
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$", text):
+        await update.message.reply_text(
+            f"Invalid `{text}`. Use alphanumeric + dash, 1-32 chars, no leading dash.\n"
+            "/back or /cancel."
+        )
+        return DEVICE_NAME
+    cust = context.user_data["ct_name"]
+    if text.lower() == cust.lower() or text.lower().startswith(cust.lower() + "-"):
+        await update.message.reply_text(
+            f"`{text}` duplicates customer name `{cust}`. Use a different name.\n"
+            "/back or /cancel."
+        )
+        return DEVICE_NAME
+    import app
+    eap = f"{cust}-{text}"
+    if app.db_query("SELECT id FROM users WHERE name = ?", (eap,)):
+        await update.message.reply_text(
+            f"EAP identity `{eap}` already exists. Try a different name.\n"
+            "/back or /cancel."
+        )
+        return DEVICE_NAME
+
+    context.user_data["ct_dn"] = text
+    rows = [
+        [InlineKeyboardButton("standard (20/20)", callback_data="csp:standard"),
+         InlineKeyboardButton("asymmetric_40_20 (40/20)", callback_data="csp:asymmetric_40_20")],
+        [InlineKeyboardButton("Skip -> standard", callback_data="csk"),
+         InlineKeyboardButton("Back", callback_data="cb"),
+         InlineKeyboardButton("Cancel", callback_data="cx")],
+    ]
+    await update.message.reply_text(
+        "[4/6] Speed plan? Or Skip -> standard (20/20).",
+        reply_markup=_kb(rows),
+    )
+    return SPEED_PLAN
+
+
+async def ct_sp_chosen(update, context):
+    """[4/6] speed plan selected (or skip) -> advance to OPTIONAL."""
+    q = update.callback_query
+    await q.answer()
+    if q.data == "cx":
+        await q.edit_message_text("Cancelled.")
+        return ConversationHandler.END
+    if q.data == "cb":
+        await q.edit_message_text(
+            "[3/6] Device name?\n"
+            "Alphanumeric + dash, 1-32 chars. e.g. `iphone`, `laptop`, `pixel9`.\n"
+            "/back or /cancel.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return DEVICE_NAME
+    if q.data == "csk":
+        context.user_data["ct_sp"] = "standard"
+        await q.edit_message_text(
+            "[5/6] Optional fields? Send one line each:\n"
+            "  email: user@example.com\n"
+            "  telegram: @handle\n"
+            "  mac: AA:BB:CC:DD:EE:FF\n"
+            "Or /skip. /back or /cancel."
+        )
+        return OPTIONAL
+    sp = q.data.split(":", 1)[1]
+    if sp not in SPEED_PLANS:
+        await q.answer(f"Unknown plan: {sp}")
+        return SPEED_PLAN
+    context.user_data["ct_sp"] = sp
+    await q.edit_message_text(
+        "[5/6] Optional fields? Send one line each:\n"
+        "  email: user@example.com\n"
+        "  telegram: @handle\n"
+        "  mac: AA:BB:CC:DD:EE:FF\n"
+        "Or /skip. /back or /cancel."
+    )
+    return OPTIONAL
+
+
+async def ct_opt_entered(update, context):
+    """[5/6] optional fields entered (or /skip) -> advance to CONFIRM."""
+    text = update.message.text.strip()
+    if text.lower() == "/cancel":
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+    if text.lower() == "/back":
+        rows = [
+            [InlineKeyboardButton("standard (20/20)", callback_data="csp:standard"),
+             InlineKeyboardButton("asymmetric_40_20 (40/20)", callback_data="csp:asymmetric_40_20")],
+            [InlineKeyboardButton("Skip -> standard", callback_data="csk"),
+             InlineKeyboardButton("Back", callback_data="cb"),
+             InlineKeyboardButton("Cancel", callback_data="cx")],
+        ]
+        await update.message.reply_text(
+            "[4/6] Speed plan? Or Skip -> standard (20/20).",
+            reply_markup=_kb(rows),
+        )
+        return SPEED_PLAN
+    if text.lower() != "/skip":
+        email = telegram = mac = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            if k == "email":
+                email = v
+            elif k == "telegram":
+                telegram = v.lstrip("@")
+            elif k == "mac":
+                mac = v.upper()
+        context.user_data["ct_email"] = email
+        context.user_data["ct_telegram"] = telegram
+        context.user_data["ct_mac"] = mac
+
+    name = context.user_data["ct_name"]
+    display = context.user_data["ct_display"]
+    tier = context.user_data["ct_tier"]
+    dt = context.user_data["ct_dt"]
+    dn = context.user_data["ct_dn"]
+    sp = context.user_data["ct_sp"]
+    eap = f"{name}-{dn}"
+    email = context.user_data.get("ct_email") or "-"
+    telegram = context.user_data.get("ct_telegram") or "-"
+    mac = context.user_data.get("ct_mac") or "-"
+
+    summary = (
+        f"[6/6] Confirm:\n\n"
+        f"  Name: `{name}`\n"
+        f"  Display: `{display}`\n"
+        f"  Tier: `{tier}`\n"
+        f"  Device: `{dt}` / `{dn}`\n"
+        f"  EAP: `{eap}`\n"
+        f"  Speed: `{sp}`\n"
+        f"  Email: `{email}`\n"
+        f"  Telegram: `{telegram}`\n"
+        f"  MAC: `{mac}`\n\n"
+        f"Confirm?"
+    )
+    rows = [
+        [InlineKeyboardButton("Confirm", callback_data="cok")],
+        [InlineKeyboardButton("Back", callback_data="cb"),
+         InlineKeyboardButton("Cancel", callback_data="cx")],
+    ]
+    await update.message.reply_text(
+        summary, reply_markup=_kb(rows), parse_mode=ParseMode.MARKDOWN,
+    )
+    return CONFIRM
+
+
+async def ct_confirm(update, context):
+    """[6/6] confirm pressed -> call app.create_client + send creds."""
+    q = update.callback_query
+    await q.answer()
+    if q.data == "cx":
+        await q.edit_message_text("Cancelled.")
+        return ConversationHandler.END
+    if q.data == "cb":
+        await q.edit_message_text(
+            "[5/6] Optional fields? Send one line each:\n"
+            "  email: user@example.com\n"
+            "  telegram: @handle\n"
+            "  mac: AA:BB:CC:DD:EE:FF\n"
+            "Or /skip. /back or /cancel."
+        )
+        return OPTIONAL
+
+    name = context.user_data["ct_name"]
+    display = context.user_data["ct_display"]
+    tier = context.user_data["ct_tier"]
+    dt = context.user_data["ct_dt"]
+    dn = context.user_data["ct_dn"]
+    sp = context.user_data["ct_sp"]
+    email = context.user_data.get("ct_email")
+    telegram = context.user_data.get("ct_telegram")
+    mac = context.user_data.get("ct_mac")
+
+    try:
+        import app
+        from app import ClientCreate
+        req = ClientCreate(
+            name=name, display_name=display, tier_name=tier,
+            device_name=dn, device_type=dt, speed_plan=sp,
+            email=email, telegram_username=telegram, mac_address_1=mac,
+        )
+        result = app.create_client(
+            req, _user={"name": "bot", "role": "operator"}
+        )
+    except Exception as e:
+        await q.edit_message_text(f"Create failed: {e}")
+        return ConversationHandler.END
+
+    cust = result.get("customer", {})
+    eap_id = result.get("eap_identity")
+    password = result.get("password")
+    text = (
+        f"OK Customer `{name}` created (id=`{cust.get('id')}`)\n"
+        f"Tier: `{tier}`\n\n"
+        f"! *Self-destructs in 60s*\n\n"
+        f"Server: `myvpn.databyte.co.za`\n"
+        f"EAP identity: `{eap_id}`\n"
+        f"Password: `{password}`\n"
+        f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
+    )
+    msg = await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
+    schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+    return ConversationHandler.END
+
+
+async def ct_cancel(update, context):
+    """Fallback: /cancel from any state."""
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
+async def cmd_creds(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /creds <id|name>")
+        return
+    arg = context.args[0]
+    audit("creds", arg=arg)
+    import app
+
+    if arg.isdigit():
+        rows = app.db_query(
+            "SELECT id, name, user_id FROM customers WHERE id = ?", (int(arg),)
+        )
+    else:
+        rows = app.db_query(
+            "SELECT id, name, user_id FROM customers WHERE name = ?", (arg,)
+        )
+    if not rows:
+        await update.message.reply_text(f"No customer `{arg}`.")
+        return
+
+    customer_id = rows[0]["id"]
+    user_id = rows[0].get("user_id")
+    if not user_id:
+        await update.message.reply_text(
+            f"Customer `{rows[0]['name']}` has no EAP user linked."
+        )
+        return
+    u = app.db_query("SELECT name FROM users WHERE id = ?", (user_id,))
+    if not u:
+        await update.message.reply_text(f"users row missing for id={user_id}.")
+        return
+    eap_identity = u[0]["name"]
+
+    try:
+        conf = open(RW_EAP_CONF).read()
+    except Exception as e:
+        await update.message.reply_text(f"Cannot read {RW_EAP_CONF}: {e}")
+        return
+
+    block_id = f"eap-{eap_identity}"
+    block_pat = re.compile(
+        rf"^\s*{re.escape(block_id)}\s*\{{[^}}]*?secret\s*=\s*\"([^\"]+)\"",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = block_pat.search(conf)
+    if not m:
+        await update.message.reply_text(
+            f"No EAP block `{block_id}` in rw-eap.conf."
+        )
+        return
+    password = m.group(1)
+
+    text = (
+        f"Creds for `{rows[0]['name']}` (id=`{customer_id}`)\n\n"
+        f"! *Self-destructs in 60s*\n\n"
+        f"Server: `myvpn.databyte.co.za`\n"
+        f"EAP identity: `{eap_identity}`\n"
+        f"Password: `{password}`"
+    )
+    msg = await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+
+
+async def cmd_disable(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /disable <id|name>")
+        return
+    arg = context.args[0]
+    audit("disable", arg=arg)
+    import app
+    if arg.isdigit():
+        cid = int(arg)
+    else:
+        rows = app.db_query("SELECT id FROM customers WHERE name = ?", (arg,))
+        if not rows:
+            await update.message.reply_text(f"No customer `{arg}`.")
+            return
+        cid = rows[0]["id"]
+    app.db_exec("UPDATE customers SET is_active = 0 WHERE id = ?", (cid,))
+    await update.message.reply_text(f"Disabled customer id=`{cid}`.")
+
+
+async def cmd_enable(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /enable <id|name>")
+        return
+    arg = context.args[0]
+    audit("enable", arg=arg)
+    import app
+    if arg.isdigit():
+        cid = int(arg)
+    else:
+        rows = app.db_query("SELECT id FROM customers WHERE name = ?", (arg,))
+        if not rows:
+            await update.message.reply_text(f"No customer `{arg}`.")
+            return
+        cid = rows[0]["id"]
+    app.db_exec("UPDATE customers SET is_active = 1 WHERE id = ?", (cid,))
+    await update.message.reply_text(f"Enabled customer id=`{cid}`.")
+
+
+async def cmd_disconnect(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /disconnect <name>")
+        return
+    arg = context.args[0]
+    audit("disconnect", arg=arg)
+    import app
+
+    rows = app.db_query(
+        "SELECT u.name AS eap_identity FROM customers c "
+        "JOIN users u ON c.user_id = u.id "
+        "WHERE c.id = ? OR c.name = ? LIMIT 1",
+        (int(arg) if arg.isdigit() else 0, arg),
+    )
+    if not rows:
+        await update.message.reply_text(f"No customer matches `{arg}`.")
+        return
+    eap_identity = rows[0]["eap_identity"]
+
+    cmd = [
+        "sudo", "radclient", "127.0.0.1:3799", "coa",
+        "b305c63a5010d2c309e29df7bab0fe66",
+        f"User-Name={eap_identity}",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            await update.message.reply_text(
+                f"CoA disconnect sent for `{eap_identity}`."
+            )
+        else:
+            await update.message.reply_text(
+                f"Disconnect failed:\n`{(res.stderr or res.stdout).strip()[:500]}`"
+            )
+    except subprocess.TimeoutExpired:
+        await update.message.reply_text("Disconnect timed out after 10s.")
+    except Exception as e:
+        await update.message.reply_text(f"Disconnect error: {e}")
+
+
+async def cmd_logs(update, context):
+    if not context.args:
+        await update.message.reply_text("Usage: /logs <name> [n=20]")
+        return
+    name = context.args[0]
+    n = 20
+    if len(context.args) > 1 and context.args[1].isdigit():
+        n = int(context.args[1])
+    audit("logs", name=name, n=n)
+    import app
+
+    rows = app.db_query("SELECT user_id FROM customers WHERE name = ?", (name,))
+    eap_id = name
+    if rows and rows[0].get("user_id"):
+        u = app.db_query("SELECT name FROM users WHERE id = ?", (rows[0]["user_id"],))
+        if u:
+            eap_id = u[0]["name"]
+
+    auths = app.db_query(
+        "SELECT authdate, reply, class "
+        "FROM radpostauth WHERE username = ? "
+        "ORDER BY authdate DESC LIMIT ?",
+        (eap_id, n),
+    )
+    if not auths:
+        await update.message.reply_text(f"No auth events for `{eap_id}`.")
+        return
+    lines = [f"*Last {len(auths)} auth events for `{eap_id}`*"]
+    for r in auths:
+        lines.append(
+            f"`{r['authdate']}` {r['reply']} "
+            f"class=`{r.get('class') or '-'}`"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# ---------- Build Application ----------
+
+def build_application() -> Application:
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    whitelist = filters.User(user_id=ALLOWED_CHAT_ID)
+    application.add_handler(MessageHandler(~whitelist, reject_non_admin))
+
+    # /create is now a ConversationHandler (interactive onboarding).
+    # It must be registered BEFORE the command loop so it claims /create
+    # before the regular CommandHandler does.
+    create_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("create", create_start, filters=whitelist),
+        ],
+        states={
+            TIER: [
+                CallbackQueryHandler(ct_tier_chosen, pattern=r"^ct:"),
+                CallbackQueryHandler(ct_tier_chosen, pattern=r"^cx$"),
+            ],
+            DEVICE_TYPE: [
+                CallbackQueryHandler(ct_dt_chosen, pattern=r"^cdt:"),
+                CallbackQueryHandler(ct_dt_chosen, pattern=r"^cb$"),
+                CallbackQueryHandler(ct_dt_chosen, pattern=r"^cx$"),
+            ],
+            DEVICE_NAME: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    ct_dn_entered,
+                ),
+            ],
+            SPEED_PLAN: [
+                CallbackQueryHandler(ct_sp_chosen, pattern=r"^csp:"),
+                CallbackQueryHandler(ct_sp_chosen, pattern=r"^csk$"),
+                CallbackQueryHandler(ct_sp_chosen, pattern=r"^cb$"),
+                CallbackQueryHandler(ct_sp_chosen, pattern=r"^cx$"),
+            ],
+            OPTIONAL: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND,
+                    ct_opt_entered,
+                ),
+            ],
+            CONFIRM: [
+                CallbackQueryHandler(ct_confirm, pattern=r"^cok$"),
+                CallbackQueryHandler(ct_confirm, pattern=r"^cb$"),
+                CallbackQueryHandler(ct_confirm, pattern=r"^cx$"),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", ct_cancel),
+        ],
+    )
+    application.add_handler(create_conv)
+
+    commands = [
+        ("start", cmd_start),
+        ("help", cmd_help),
+        ("status", cmd_status),
+        ("stats", cmd_stats),
+        ("sessions", cmd_sessions),
+        ("customers", cmd_customers),
+        ("customer", cmd_customer),
+        ("creds", cmd_creds),
+        ("disable", cmd_disable),
+        ("enable", cmd_enable),
+        ("disconnect", cmd_disconnect),
+        ("logs", cmd_logs),
+    ]
+    for cmd, handler in commands:
+        application.add_handler(CommandHandler(cmd, handler, filters=whitelist))
+
+    return application
