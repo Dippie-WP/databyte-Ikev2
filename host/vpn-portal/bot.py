@@ -96,13 +96,12 @@ class MultiWorkerConversationHandler(ConversationHandler):
         lost across workers on application restart or cache eviction.
         Here we explicitly flush to persistence right after the handler returns.
         """
-        # v2.6.6 fix: PTB 22 Application.process_update does NOT await async
-        # check_update results before passing them to handle_update. Resolve
-        # the coroutine here so ConversationHandler.handle_update can unpack
-        # check_result as a 4-tuple (current_state, key, handler, handler_check_result)
-        # instead of failing with TypeError: cannot unpack non-iterable coroutine object.
-        if _asyncio_MWCH.iscoroutine(check_result):
-            check_result = await check_result
+        # NOTE: PTB 22 Application.process_update does NOT await async
+        # check_update results before passing them to handle_update. To work around this,
+        # the proper fix is in the caller (app.py webhook handler) which must manually
+        # iterate handlers and await check_update results itself, instead of relying on
+        # bot_app.process_update() which has this bug. With that caller-side fix,
+        # check_result will always be a resolved value here.
         new_state = await super().handle_update(update, application, check_result, context)
         persistence = getattr(self, "persistence_ref", None)
         if (
