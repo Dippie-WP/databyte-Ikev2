@@ -831,7 +831,23 @@ async def cmd_logs(update, context):
 # ---------- Build Application ----------
 
 def build_application() -> Application:
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    from urllib.parse import urlparse
+    from bot_persistence import MariaDBPersistence
+
+    # Parse DB connection from /etc/vpn-portal.env DB_URL.
+    # Format: mysql+pymysql://user:password@host:port/database
+    db_url = os.environ.get("DB_URL", "mysql+pymysql://portal@127.0.0.1:3306/radius")
+    parsed = urlparse(db_url)
+    db_config = {
+        "host": parsed.hostname or "127.0.0.1",
+        "port": int(parsed.port) if parsed.port else 3306,
+        "user": parsed.username or "portal",
+        "password": parsed.password or "",
+        "database": (parsed.path or "/radius").lstrip("/") or "radius",
+    }
+    persistence = MariaDBPersistence(db_config)
+
+    application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
 
     whitelist = filters.User(user_id=ALLOWED_CHAT_ID)
     application.add_handler(MessageHandler(~whitelist, reject_non_admin))
