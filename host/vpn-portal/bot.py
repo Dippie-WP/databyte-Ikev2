@@ -1061,6 +1061,7 @@ def build_application() -> Application:
                     filters.TEXT & ~filters.COMMAND,
                     ct_dn_entered,
                 ),
+                CommandHandler("back", ct_dn_entered),
             ],
             SPEED_PLAN: [
                 CallbackQueryHandler(ct_sp_chosen, pattern=r"^csp:"),
@@ -1073,6 +1074,8 @@ def build_application() -> Application:
                     filters.TEXT & ~filters.COMMAND,
                     ct_opt_entered,
                 ),
+                CommandHandler("skip", ct_opt_entered),
+                CommandHandler("back", ct_opt_entered),
             ],
             CONFIRM: [
                 CallbackQueryHandler(ct_confirm, pattern=r"^cok$"),
