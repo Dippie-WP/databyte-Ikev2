@@ -445,18 +445,25 @@ def _kb(rows):
 
 
 async def _safe_edit_text(q, text, **kwargs):
-    """q.edit_message_text() that swallows BadRequest on stale callbacks.
+    """q.edit_message_text() that logs+swallows BadRequest on stale callbacks.
 
     PTB 22.8 raises BadRequest('Message to edit not found') / 'Query is too
     old' when callback_query.message_id references a message that no longer
     exists in the chat (common with synthetic test callbacks, also possible
     if the user clears chat history between updates). The edit is purely
     cosmetic — losing it does NOT break the conversation state machine.
+
+    NOTE (TKT-028, 2026-09-22 00:15 UTC): the prior version called itself
+    recursively instead of q.edit_message_text — every ct_*_chosen handler
+    silently stack-overflowed. Never recurse; always call the real API.
+    Unexpected (non-BadRequest) exceptions are now logged at WARNING so the
+    next silent-failure class is visible in journalctl without changes.
     """
     try:
-        return await _safe_edit_text(q, text, **kwargs)
-    except Exception:
-        pass
+        return await q.edit_message_text(text, **kwargs)
+    except Exception as exc:
+        logger.warning("_safe_edit_text suppressed: %s", exc)
+        return None
 
 
 def _tier_kb():
