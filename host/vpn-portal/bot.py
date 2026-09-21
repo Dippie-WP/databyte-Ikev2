@@ -57,13 +57,17 @@ class MultiWorkerConversationHandler(ConversationHandler):
       immediately via application.create_task (async write, non-blocking).
     """
 
-    async def check_update(self, update: object):
+    def check_update(self, update: object):
         """Override to force reload from shared persistence on cache miss.
 
+        HOT-253 (applied 2026-09-21 15:07 UTC): sync (drop async/await) because
         PTB 22 Application calls check_update synchronously inside an async
-        context (process_update), so we can use asyncio.run_coroutine_threadsafe
-        against the running loop to load state from MariaDB when the per-instance
-        self._conversations dict has a miss.
+        context (process_update). Use asyncio.run_coroutine_threadsafe against
+        the running loop to load state from MariaDB on cache miss. Reordered so
+        super().check_update() runs FIRST, stale-state-clear only triggers if
+        super returns None (the v2.6.11 FIX-1 block cleared state for EVERY
+        /-prefixed update, breaking /create at step 5/6 by killing /skip and
+        /back before the OPTIONAL state handler could match them).
         """
         persistence = getattr(self, "persistence_ref", None)
         if (
@@ -72,7 +76,10 @@ class MultiWorkerConversationHandler(ConversationHandler):
             and getattr(self, "_name", None)
             and persistence is not None
         ):
-            key = self._get_key(update)
+            try:
+                key = self._get_key(update)
+            except Exception:
+                return None
             if key is not None and key not in self._conversations:
                 try:
                     loop = _asyncio_MWCH.get_event_loop()
@@ -85,7 +92,35 @@ class MultiWorkerConversationHandler(ConversationHandler):
                         self._conversations[key] = conversations[key]
                 except Exception:
                     pass
-        return await super().check_update(update)
+        # HOT-253 (corrected): only clear stale ConvH state if super() does NOT
+        # match this update. The v2.6.11 version cleared state for EVERY
+        # /-prefixed message, including /skip, /back, /cancel which the
+        # OPTIONAL state expects to handle -- that broke the /create flow at
+        # step 5/6. Strip is a no-op if no match.
+        _super_result = super().check_update(update)
+        if (
+            _super_result is None
+            and update.message
+            and update.message.text
+            and update.message.text.startswith('/')
+        ):
+            try:
+                _stale_key = self._get_key(update)
+                if _stale_key is not None and _stale_key in self._conversations:
+                    self._conversations.pop(_stale_key, None)
+                    if persistence is not None:
+                        try:
+                            _sl = _asyncio_MWCH.get_event_loop()
+                            _sf = _asyncio_MWCH.run_coroutine_threadsafe(
+                                persistence.update_conversation(self._name, _stale_key, None),
+                                _sl,
+                            )
+                            _sf.result(timeout=1.0)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        return _super_result
 
     async def handle_update(self, update, application, check_result, context):
         """Override to write through to shared persistence immediately.
