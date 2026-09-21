@@ -486,37 +486,47 @@ def _tier_kb():
 
 async def create_start(update, context):
     """/create <name> [display] -- ConversationHandler entry."""
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: /create <name> [display_name]\n"
-            'Example: /create zun-acme "Acme Corp"'
-        )
-        return ConversationHandler.END
-
-    name = context.args[0].lower()
-    display = context.args[1] if len(context.args) > 1 else name
-    audit("create", name=name)
-
-    import app
-    if app.db_query("SELECT id FROM customers WHERE name = ?", (name,)):
-        await update.message.reply_text(
-            f"Customer `{name}` already exists. Use /creds to fetch."
-        )
-        return ConversationHandler.END
-
-    kb = _tier_kb()
-    if kb is None:
-        await update.message.reply_text("No active tier configured. Cannot create customer.")
-        return ConversationHandler.END
-
-    context.user_data["ct_name"] = name
-    context.user_data["ct_display"] = display
-
-    await update.message.reply_text(
-        f"Creating `{name}` (display: `{display}`)\n\n[1/6] Pick a tier:",
-        reply_markup=kb,
-        parse_mode=ParseMode.MARKDOWN,
+    # TKT-028 diagnostic: surface exactly where /create breaks (logger v22 logger name = vpn-bot)
+    logger.info(
+        "create_start ENTERED chat_id=%s args=%r",
+        update.effective_chat.id if update.effective_chat else None,
+        context.args,
     )
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "Usage: /create <name> [display_name]\n"
+                'Example: /create zun-acme "Acme Corp"'
+            )
+            return ConversationHandler.END
+
+        name = context.args[0].lower()
+        display = context.args[1] if len(context.args) > 1 else name
+        audit("create", name=name)
+
+        import app
+        if app.db_query("SELECT id FROM customers WHERE name = ?", (name,)):
+            await update.message.reply_text(
+                f"Customer `{name}` already exists. Use /creds to fetch."
+            )
+            return ConversationHandler.END
+
+        kb = _tier_kb()
+        if kb is None:
+            await update.message.reply_text("No active tier configured. Cannot create customer.")
+            return ConversationHandler.END
+
+        context.user_data["ct_name"] = name
+        context.user_data["ct_display"] = display
+
+        await update.message.reply_text(
+            f"Creating `{name}` (display: `{display}`)\n\n[1/6] Pick a tier:",
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as exc:
+        logger.exception("create_start RAISED %s: %s", type(exc).__name__, exc)
+        raise
     return TIER
 
 
