@@ -483,7 +483,7 @@ def _tier_kb():
             f"{t['name']} ({cap:.0f}MiB/{dur}d)",
             callback_data=f"ct:{t['name']}",
         ))
-        if len(row) == 2:
+        if len(row) == 1:        # one tier per row → one-column picker layout (Zun msg #41189, 2026-09-22 04:35 UTC)
             rows.append(row); row = []
     if row:
         rows.append(row)
