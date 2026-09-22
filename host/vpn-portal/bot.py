@@ -257,6 +257,38 @@ def schedule_delete(context, chat_id: int, message_id: int, delay: int = 60):
     )
 
 
+def send_credentials_sync(
+    *,
+    telegram_id: str,
+    eap_identity: str,
+    password: str,
+    tier_display: str = "",
+) -> None:
+    """Mock: send credentials via Telegram. No-op.
+
+    In production the bot runs in webhook mode (HOT-260); credentials are
+    surfaced via:
+    - the API return dict that ct_confirm formats into the success message
+    - the audit log entry that records the /create action
+    - the operator via /api/customers GET
+
+    This function exists as a placeholder that app.create_client / update_customer
+    call (5 places in app.py:1513-1569) so those code paths don't AttributeError.
+    Real Telegram push happens at user-initiated onboarding, not at bot /create.
+
+    STAGE CODE: CT_CRED_SEND_FAIL -- if this raises, app.py:1513-1569 catches it.
+    """
+    audit(
+        "send_credentials",
+        telegram_id=telegram_id,
+        eap_identity=eap_identity,
+    )
+    logger.info(
+        "send_credentials_sync called telegram_id=%s eap_identity=%s tier=%s (no-op mock)",
+        telegram_id, eap_identity, tier_display,
+    )
+
+
 # ---------- Commands ----------
 
 async def cmd_start(update, context):
