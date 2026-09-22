@@ -470,17 +470,16 @@ def _tier_kb():
     """Build the TIER inline keyboard from live DB query."""
     import app
     tiers = app.db_query(
-        "SELECT name, data_limit_bytes, duration_days FROM tiers "
-        "WHERE is_active = 1 ORDER BY data_limit_bytes ASC, id ASC"
+        "SELECT name, duration_days FROM tiers "
+        "WHERE is_active = 1 ORDER BY name ASC, id ASC"
     )
     if not tiers:
         return None
     rows, row = [], []
     for t in tiers:
-        cap = t["data_limit_bytes"] / 1024 / 1024 if t["data_limit_bytes"] else 0
         dur = t.get("duration_days") if t.get("duration_days") else "inf"
         row.append(InlineKeyboardButton(
-            f"{t['name']} ({cap:.0f}MiB/{dur}d)",
+            f"{t['name']} ({dur}d)",
             callback_data=f"ct:{t['name']}",
         ))
         if len(row) == 1:        # one tier per row → one-column picker layout (Zun msg #41189, 2026-09-22 04:35 UTC)
