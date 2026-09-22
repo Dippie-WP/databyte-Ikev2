@@ -805,7 +805,9 @@ async def ct_confirm(update, context):
             req, _user={"name": "bot", "role": "operator"}
         )
     except Exception as e:
-        await _safe_edit_text(q, f"Create failed: {e}")
+        err_code = "CT_CONFIRM_DBM_FAIL"
+        logger.exception("[%s] /create failed at ct_confirm: %s", err_code, e)
+        await _safe_edit_text(q, f"Create failed [{err_code}]: {{e}}".format(e=e))
         return ConversationHandler.END
 
     cust = result.get("customer", {})

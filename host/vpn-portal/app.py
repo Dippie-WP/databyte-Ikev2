@@ -1510,7 +1510,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                 tier_display=tier_display or tier_name,
             )
         except Exception as e:
-            log.error(f"bot.send_credentials failed: {e}")
+            log.error(f"[CT_CRED_SEND_FAIL] bot.send_credentials failed: {e}")
+            log.exception("bot.send_credentials full traceback:")
 
     # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
     # bot sends creds to customer's telegram_username. Mock token = no-op.
@@ -1524,7 +1525,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                 tier_display=tier_display or tier_name,
             )
         except Exception as e:
-            log.error(f"bot.send_credentials failed: {e}")
+            log.error(f"[CT_CRED_SEND_FAIL] bot.send_credentials failed: {e}")
+            log.exception("bot.send_credentials full traceback:")
 
     # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
     # bot sends creds to customer's telegram_username. Mock token = no-op.
@@ -1538,7 +1540,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                 tier_display=tier_display or tier_name,
             )
         except Exception as e:
-            log.error(f"bot.send_credentials failed: {e}")
+            log.error(f"[CT_CRED_SEND_FAIL] bot.send_credentials failed: {e}")
+            log.exception("bot.send_credentials full traceback:")
 
     # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
     # bot sends creds to customer's telegram_username. Mock token = no-op.
@@ -1552,7 +1555,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                 tier_display=tier_display or tier_name,
             )
         except Exception as e:
-            log.error(f"bot.send_credentials failed: {e}")
+            log.error(f"[CT_CRED_SEND_FAIL] bot.send_credentials failed: {e}")
+            log.exception("bot.send_credentials full traceback:")
 
     # TKT-011 v2.0 — admin-mediated flow: Zun creates customer via portal →
     # bot sends creds to customer's telegram_username. Mock token = no-op.
@@ -1566,7 +1570,8 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
                 tier_display=tier_display or tier_name,
             )
         except Exception as e:
-            log.error(f"bot.send_credentials failed: {e}")
+            log.error(f"[CT_CRED_SEND_FAIL] bot.send_credentials failed: {e}")
+            log.exception("bot.send_credentials full traceback:")
 
     return {
         "customer": {
@@ -1583,7 +1588,6 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             "max_devices":    2,  # TKT-011 v2.0 — 2 MACs per user (#37687 §e)
             "status":         "active",
             "data_used_bytes": 0,
-            "data_limit_bytes": data_limit,
             "expires_at":     expires_at,        # TKT-011 v2.0
             "mac_address_1":  req.mac_address_1, # TKT-011 v2.0
             "mac_address_2":  req.mac_address_2, # TKT-011 v2.0
