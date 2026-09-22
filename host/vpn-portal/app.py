@@ -850,7 +850,7 @@ def eap_block_exists(identity: str) -> bool:
     return bool(re.search(rf"^\s*{re.escape(block_id)}\s*\{{", conf, re.MULTILINE))
 
 
-def ensure_tier(name: str, display_name: str, data_limit_bytes: int) -> int:
+def ensure_tier(name: str, display_name: str) -> int:
     """Look up tier by name; if missing, create it. Return tier_id.
 
     Used by POST /api/customers when the operator picks a custom cap on the fly.
@@ -863,8 +863,8 @@ def ensure_tier(name: str, display_name: str, data_limit_bytes: int) -> int:
         return rows[0]["id"]
     ts = int(time.time())
     db_exec(
-        f"INSERT INTO tiers (name, display_name, data_limit_bytes, price_zar, is_active, created_at, notes) "
-        f"VALUES ({_q(name)}, {_q(display_name)}, {int(data_limit_bytes)}, NULL, 1, {ts}, "
+        f"INSERT INTO tiers (name, display_name, price_zar, is_active, created_at, notes) "
+        f"VALUES ({_q(name)}, {_q(display_name)}, NULL, 1, {ts}, "
         f"{_q('auto-created by v1.2.7 portal onboarding')});"
     )
     new = db_query(f"SELECT id FROM tiers WHERE name = {_q(name)};")
@@ -1352,16 +1352,14 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
         ts = int(time.time())
         tier_name = f"custom_{req.custom_cap_mb}mb_{ts}"
         tier_display = f"Custom {req.custom_cap_mb} MiB"
-        data_limit = req.custom_cap_mb * 1024 * 1024  # binary MiB
-        tier_id = ensure_tier(tier_name, tier_display, data_limit)
+        tier_id = ensure_tier(tier_name, tier_display)
     else:
-        rows = db_query(f"SELECT id, data_limit_bytes, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+        rows = db_query(f"SELECT id, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
         if not rows:
             raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
         if not rows[0].get("is_active"):
             raise HTTPException(400, f"tier '{req.tier_name}' is archived")
         tier_id = rows[0]["id"]
-        data_limit = rows[0]["data_limit_bytes"]
         duration_days = rows[0].get("duration_days")  # TKT-011 v2.0 — for expires_at
         tier_name = req.tier_name
         tier_display = None
@@ -1398,13 +1396,12 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
             try:
                 wrapped.execute(
                     "INSERT INTO customers (name, display_name, telegram_username, is_operator, is_active, "
-                    "over_quota, data_limit_bytes, data_used_bytes, expires_at, mac_address_1, mac_address_2, "
+                    "data_used_bytes, expires_at, mac_address_1, mac_address_2, "
                     "tier_id, status, max_devices, "
                     "bandwidth_down_mbps, bandwidth_up_mbps, "
                     "created_at, updated_at, notes, billing_id, email) VALUES "
-                    "(?, ?, ?, 0, 1, 0, ?, 0, ?, ?, ?, ?, 'active', 2, ?, ?, ?, ?, ?, ?, ?)",
+                    "(?, ?, ?, 0, 1, 0, ?, ?, ?, ?, 'active', 2, ?, ?, ?, ?, ?, ?, ?)",
                     (cust_name, req.display_name, req.telegram_username,
-                     int(data_limit),
                      expires_at, req.mac_address_1, req.mac_address_2,
                      int(tier_id),
                      int(bandwidth_down_mbps), int(bandwidth_up_mbps),
@@ -2503,20 +2500,17 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
             ts = int(time.time())
             tier_name = f"custom_{req.custom_cap_mb}mb_{ts}"
             tier_display = f"Custom {req.custom_cap_mb} MiB"
-            data_limit = req.custom_cap_mb * 1024 * 1024
-            tier_id = ensure_tier(tier_name, tier_display, data_limit)
+            tier_id = ensure_tier(tier_name, tier_display)
             # duration_days stays None — legacy custom tier
         else:
-            rows = db_query(f"SELECT id, data_limit_bytes, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
+            rows = db_query(f"SELECT id, duration_days, is_active FROM tiers WHERE name = {_q(req.tier_name)};")
             if not rows:
                 raise HTTPException(400, f"tier '{req.tier_name}' does not exist")
             if not rows[0].get("is_active"):
                 raise HTTPException(400, f"tier '{req.tier_name}' is archived")
             tier_id = rows[0]["id"]
-            data_limit = rows[0]["data_limit_bytes"]
             duration_days = rows[0].get("duration_days")
         sets.append(f"tier_id = {int(tier_id)}")
-        sets.append(f"data_limit_bytes = {int(data_limit)}")
         # TKT-011 v2.0 — Q1=(a) Reset: expires_at = NOW() + duration_days (treat as new purchase)
         if duration_days is not None:
             sets.append(f"expires_at = DATE_ADD(NOW(), INTERVAL {int(duration_days)} DAY)")
