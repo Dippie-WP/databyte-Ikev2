@@ -79,8 +79,10 @@ class TestCreateCustomer:
         body = r.json()
         # tier_name is auto-generated custom_<N>mb_<ts>
         assert body["customer"]["tier"].startswith("custom_250mb_")
-        # data_limit_bytes = 250 * 1024 * 1024
-        assert body["customer"]["data_limit_bytes"] == 250 * 1024 * 1024
+        # v3.0 (commit 111da4b): data_limit_bytes removed from tiers + customers
+        # tables and from /create response. Kill mechanism moved to
+        # expires_at < NOW() per HOT-211. No assertion on data quota here.
+        # (Previously: assert body["customer"]["data_limit_bytes"] == 250 * 1024 * 1024)
 
     def test_create_customer_no_auth_returns_401_or_403(self, client):
         r = client.post(
@@ -922,10 +924,14 @@ class TestSpeedPlan:
         assert "1000" in r.text
 
     def test_speed_plan_does_not_override_tier(self, client, operator_login, db_path):
-        """Tier drives DATA QUOTA (data_limit_bytes), speed_plan drives BANDWIDTH (mbps).
-        Per Zun's directive: speed_plan is per-customer, NOT tier-based. This test
-        proves the two are independent: tier_10gb + asymmetric_40_20 → 10 GiB quota,
-        40/20 mbps bandwidth.
+        """Speed plan drives BANDWIDTH (mbps), independent of tier.
+        Per Zun's directive: speed_plan is per-customer, NOT tier-based.
+        This test proves the two are independent: tier_10gb + asymmetric_40_20
+        → 40/20 mbps bandwidth.
+
+        v3.0 (commit 111da4b): tiers no longer carry data_limit_bytes. Kill
+        mechanism moved to expires_at < NOW() per HOT-211. The previous
+        10 GiB quota assertion is gone — tier is now about duration, not quota.
         """
         r = self._create(client, operator_login,
                          display_name="Indep Co",
@@ -935,11 +941,7 @@ class TestSpeedPlan:
         body = r.json()
         cust_id = body["customer"]["id"]
 
-        # Tier quota is 10 GiB (10737418240 bytes)
-        assert body["customer"]["data_limit_bytes"] == 10737418240, (
-            f"tier 10GB quota lost: got {body['customer']['data_limit_bytes']}"
-        )
-        # Speed plan is 40/20 (independent)
+        # Speed plan is 40/20 (independent of tier)
         down, up = self._read_bandwidth(db_path, cust_id)
         assert (down, up) == (40, 20)
 
