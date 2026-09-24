@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS tiers (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     name             TEXT    NOT NULL UNIQUE,        -- e.g. "tier_5gb", "tier_10gb", "tier_20gb", "demo_100mb"
     display_name     TEXT    NOT NULL,               -- e.g. "5 GB", "10 GB", "20 GB", "Demo 100MB"
-    data_limit_bytes INTEGER NOT NULL,                -- tier allowance in bytes
+    data_limit_bytes INTEGER,                         -- tier allowance in bytes (v3.0: deprecated, NULL in v3.0+)
     price_zar        INTEGER,                        -- price in ZAR cents (NULL = not for sale)
     duration_days    INTEGER,                        -- TKT-011 v2.0 — expiry period (NULL = legacy data-cap)
     speed_tier       TEXT,                            -- TKT-011 v2.0 — e.g. "10_10", "20_20", "unlimited"
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS customers (
     is_operator      INTEGER NOT NULL DEFAULT 0,      -- 1 = bypass ALL quota checks (Zun only)
     is_active        INTEGER NOT NULL DEFAULT 1,      -- 0 = admin-suspended, all devices refused
     over_quota       INTEGER NOT NULL DEFAULT 0,      -- 1 = hit 100%, hard cut in effect
-    data_limit_bytes INTEGER NOT NULL DEFAULT 0,      -- current allowance (tier + manual extensions)
+    data_limit_bytes INTEGER DEFAULT 0,               -- current allowance (v3.0: deprecated, kept for backward compat in tests)
     data_used_bytes  INTEGER NOT NULL DEFAULT 0,      -- cumulative used since last reset
     tier_id          INTEGER,                         -- FK tiers.id (NULL for operator)
     status           TEXT    NOT NULL DEFAULT 'active', -- 'active'|'suspended'|'expired'
