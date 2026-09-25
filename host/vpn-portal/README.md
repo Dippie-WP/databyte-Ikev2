@@ -13,7 +13,7 @@ FastAPI backend for the databyte VPN. Single-file MVP.
 ssh root@192.168.10.210 'pct push 902 /tmp/vpn-portal.tar.gz /tmp/vpn-portal.tar.gz'
 # or rsync directly:
 rsync -av --delete \
-  /root/projects/strongswan-vpn-gateway/host/vpn-portal/ \
+  /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/host/vpn-portal/ \
   root@192.168.10.210:/var/lib/lxc/902/rootfs/opt/vpn-portal/
 
 # 2. Install on LXC 902 (via pve2)

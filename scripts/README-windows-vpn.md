@@ -75,7 +75,7 @@ Per-customer files served from `/opt/vpn-portal/www/static/baked/` on VPS.
 
 1. Copy the template:
    ```bash
-   cp /root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1 /tmp/setup-databyte-vpn-acme-corp-laptop01.ps1
+   cp /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1 /tmp/setup-databyte-vpn-acme-corp-laptop01.ps1
    ```
 2. Pull the customer's credentials from the portal operator page.
 3. Pull the current LE cert SHA-256 fingerprint:

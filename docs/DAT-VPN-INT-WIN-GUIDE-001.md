@@ -73,7 +73,7 @@ This document covers the **complete procedure**, every **variation** we've encou
 
 | Property | Value |
 |---|---|
-| Repo path | `/root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1` |
+| Repo path | `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1` |
 | Git commit (HEAD) | `1dea754` (rename from `setup-databyte-vpn-baked-v1.0.0.ps1`) |
 | Template MD5 | `5541343b9c5efe3b3b9257dbd3332805` |
 | Template size | 22,644 bytes / 476 lines |
@@ -205,7 +205,7 @@ Format with colons (lowercase) — that's what `$ServerCertSha256` expects.
 ### 4.3 Copy the template to a working file
 
 ```bash
-cp /root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1 \
+cp /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1 \
    /tmp/setup-databyte-vpn-<customer>-<device>.ps1
 ```
 

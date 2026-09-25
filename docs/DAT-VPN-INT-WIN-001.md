@@ -1200,7 +1200,7 @@ The script **refuses to run** if any value still contains `REPLACE-ME` — sanit
 
 1. Copy template to working dir:
    ```
-   cp /root/projects/strongswan-vpn-gateway/scripts/setup-databyte-vpn-windows.ps1 /tmp/bake-<customer>-<device>.ps1
+   cp /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1 /tmp/bake-<customer>-<device>.ps1
    ```
 2. Pull the customer's credentials from the portal operator page (`https://vpn-portal.databyte.co.za/admin` → customer → device).
 3. Pull the current LE cert SHA-256 fingerprint:
