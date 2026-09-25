@@ -156,7 +156,7 @@ Zun asked for git versioning of all the work. Decisions:
 Work:
 1. Created GitHub repo `Dippie-WP/strongswan-vpn-gateway` (Zun clicked "new repo" on github.com)
 2. Generated PAT, tested scope (could not create-repo, fine-grained token; Zun created the repo manually)
-3. Created local repo at `/root/projects/strongswan-vpn-gateway/`
+3. Created local repo at `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/`
 4. Migrated all source files from LXC 902 `/home/zunaid/strongswan/` (stripping live certs/keys, keeping structure)
 5. Wrote 5 docs: README, ROADMAP, ARCHITECTURE, DEPLOYMENT, ISSUES-LOG, SESSION-HISTORY (this)
 6. Wrote 5 scripts: gen-certs, seed-db, build-image, db-backup, rollback-v1.1

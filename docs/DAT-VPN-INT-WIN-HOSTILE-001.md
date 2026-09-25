@@ -392,7 +392,7 @@ ssh root@vps-01 'docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --lis
 
 # 3. Update VPN Tracker (Changes sheet)
 # 4. Push tracker to rustfs
-rclone copy /root/projects/strongswan-vpn-gateway/tracker/databyte-vpn-tracker.xlsx rustfs:open-claw-push/vpn/
+rclone copy /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/tracker/databyte-vpn-tracker.xlsx rustfs:open-claw-push/vpn/
 ```
 
 ---
@@ -509,4 +509,4 @@ This applies to BOTH the skill (`windows-vpn-hostile-network-setup`) AND this de
 - **strongSwan server config**: `aes128-sha256-modp2048-ecp256` proposals, eap-radius plugin
 - **Live SAs**: rw-eap #5 (zun-iphone), #14 (zunaid-new-win11), #19 (zunaid-test2-win11)
 - **Audit dirs**: `/root/audit-bk/2026-07-10-zunaid-new-win11-onboard/`, `/root/audit-bk/2026-07-10-zunaid-test2-onboard/`
-- **Tracker**: `/root/projects/strongswan-vpn-gateway/tracker/databyte-vpn-tracker.xlsx` rows 33-39
+- **Tracker**: `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/tracker/databyte-vpn-tracker.xlsx` rows 33-39

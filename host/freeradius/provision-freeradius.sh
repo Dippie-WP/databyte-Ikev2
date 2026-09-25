@@ -33,7 +33,7 @@ elif [[ -n "${REPO_ROOT:-}" ]]; then
     REPO_ROOT="${REPO_ROOT}"
 else
     # Standard vps-01 install location
-    for candidate in /opt/strongswan-vpn-gateway /root/projects/strongswan-vpn-gateway; do
+    for candidate in /opt/strongswan-vpn-gateway /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal; do
         if [[ -d "$candidate/host/freeradius" ]]; then
             REPO_ROOT="$candidate"
             break
@@ -47,7 +47,7 @@ if [[ -z "${REPO_ROOT:-}" ]] || [[ ! -d "$REPO_ROOT/host/freeradius" ]]; then
     echo "  /usr/local/bin/provision-freeradius.sh with REPO_ROOT set." >&2
     echo "  Common locations:" >&2
     echo "    /opt/strongswan-vpn-gateway/host/freeradius/provision-freeradius.sh" >&2
-    echo "    /root/projects/strongswan-vpn-gateway/host/freeradius/provision-freeradius.sh" >&2
+    echo "    /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/host/freeradius/provision-freeradius.sh" >&2
     exit 1
 fi
 

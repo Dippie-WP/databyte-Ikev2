@@ -17,7 +17,7 @@ We fix this at the workflow level, not by adding more drift-detect alarms.
 ## The rule
 
 1. **Edit in your working tree first.** All code changes start in
-   `/root/projects/strongswan-vpn-gateway/` (or whatever local clone).
+   `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/` (or whatever local clone).
 2. **Commit + push** before the change is deployed to LIVE.
 3. **Deploy FROM git** — never from a hand-edited LIVE file. Use `git pull`
    on the LIVE box (or your normal deploy mechanism) to pull the new HEAD.
