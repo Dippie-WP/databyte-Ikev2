@@ -392,7 +392,20 @@ async def cmd_sessions(update, context):
         lines.append(
             f"- `{rid}` `{rip}` -> `{vip}` `{st}` (in:{bi:,} out:{bo:,})"
         )
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    # Inline keyboard: one [Disconnect] button per session row.
+    # callback_data fits 64-byte Telegram limit ("disc:" + EAP identity).
+    keyboard = [
+        [InlineKeyboardButton(
+            f"⛔ {s.get('remote_id') or '?'}",
+            callback_data=f"disc:{s.get('remote_id') or '?'}",
+        )]
+        for s in sessions[:25]
+    ]
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def cmd_customers(update, context):
@@ -968,7 +981,87 @@ async def cmd_enable(update, context):
     await update.message.reply_text(f"Enabled customer id=`{cid}`.")
 
 
+def disconnect_via_coa(eap_identity: str) -> tuple[bool, str]:
+    """Send a Disconnect-Request to charon's DAE plugin (UDP 127.0.0.1:3799).
+
+    Shared between /disconnect (typed) and cb_disconnect (inline button).
+
+    Architecture (verified 2026-09-22 13:36 UTC):
+    - charon (NOT FreeRADIUS) owns UDP 3799. FreeRADIUS has NO `coa`
+      virtual server enabled; sites-enabled/ has only `default` +
+      `inner-tunnel`. So CoA/Disconnect packets hit charon's DAE plugin
+      directly, with secret `REDACTED`
+      (stored in /root/.strongswan-dae-secret, mounted into the
+      strongswan container via 10-eap-radius.conf).
+    - charon's DAE plugin (RFC 5176) matches Disconnect-Request
+      against active IKE_SAs by EITHER Acct-Session-Id OR
+      Framed-IP-Address. User-Name alone does NOT match (charon
+      doesn't keep a User-Name -> IKE_SA index). Calling-Station-Id
+      also doesn't match. This is why the v2.4.0/v2.4.1 bot got
+      CoA-NAK: it sent User-Name only.
+    - Command must be "disconnect" (RFC 5176 Disconnect-Request,
+      code 40), NOT "coa" (CoA-Request, code 43). charon's DAE
+      just NAKs CoA-Request without processing it. quota-monitor.py
+      uses the same Disconnect-Request + Acct-Session-Id pattern.
+
+    Sync subprocess blocks the event loop briefly (~10s max) — acceptable
+    for an admin tool with infrequent disconnects.
+    """
+    if not eap_identity or eap_identity == "?":
+        return False, "Invalid EAP identity (empty or '?'). Button data malformed."
+    secret = "REDACTED"
+
+    # Build attributes for charon DAE matching. Start with User-Name
+    # (charon uses it for the audit log entry, even if it doesn't match
+    # the IKE_SA). Then look up Acct-Session-Id + Framed-IP-Address
+    # from radacct where the session is still active (acctstoptime IS NULL).
+    attrs = [f"User-Name={eap_identity}"]
+    try:
+        import app
+        rows = app.db_query(
+            "SELECT acctsessionid, framedipaddress FROM radacct "
+            "WHERE username = %s AND acctstoptime IS NULL "
+            "ORDER BY acctstarttime DESC LIMIT 1",
+            (eap_identity,),
+        )
+        if rows:
+            row = rows[0]
+            if row.get("acctsessionid"):
+                attrs.append(f"Acct-Session-Id={row['acctsessionid']}")
+            if row.get("framedipaddress"):
+                attrs.append(f"Framed-IP-Address={row['framedipaddress']}")
+            logger.info(
+                f"disconnect_via_coa: {eap_identity} -> "
+                f"session_id={row.get('acctsessionid')!r} vip={row.get('framedipaddress')!r}"
+            )
+        else:
+            logger.warning(f"disconnect_via_coa: no active radacct row for {eap_identity!r} (will NAK)")
+    except Exception as e:
+        logger.warning(f"disconnect_via_coa: radacct lookup failed: {e}")
+
+    cmd = ["/usr/bin/sudo", "/usr/bin/radclient", "127.0.0.1:3799", "disconnect", secret]
+    try:
+        res = subprocess.run(
+            cmd,
+            input="\n".join(attrs) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if res.returncode == 0:
+            return True, f"Disconnect sent for `{eap_identity}`."
+        # Non-zero exit. Capture stderr (preferred) or stdout for the cause.
+        # Disconnect-NAK (no matching IKE_SA, etc) shows up here.
+        out = (res.stderr or res.stdout or "<empty>").strip()[:500]
+        return False, f"Disconnect `{eap_identity}` failed (rc={res.returncode}):\n`{out}`"
+    except subprocess.TimeoutExpired:
+        return False, "Disconnect timed out after 10s."
+    except Exception as e:
+        return False, f"Disconnect error: {e}"
+
+
 async def cmd_disconnect(update, context):
+    """Disconnect an active customer session via CoA (typed command)."""
     if not context.args:
         await update.message.reply_text("Usage: /disconnect <name>")
         return
@@ -986,26 +1079,23 @@ async def cmd_disconnect(update, context):
         await update.message.reply_text(f"No customer matches `{arg}`.")
         return
     eap_identity = rows[0]["eap_identity"]
+    ok, msg = disconnect_via_coa(eap_identity)
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-    cmd = [
-        "sudo", "radclient", "127.0.0.1:3799", "coa",
-        "REDACTED",
-        f"User-Name={eap_identity}",
-    ]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        if res.returncode == 0:
-            await update.message.reply_text(
-                f"CoA disconnect sent for `{eap_identity}`."
-            )
-        else:
-            await update.message.reply_text(
-                f"Disconnect failed:\n`{(res.stderr or res.stdout).strip()[:500]}`"
-            )
-    except subprocess.TimeoutExpired:
-        await update.message.reply_text("Disconnect timed out after 10s.")
-    except Exception as e:
-        await update.message.reply_text(f"Disconnect error: {e}")
+
+async def cb_disconnect(update, context):
+    """Handle [Disconnect] button press on /sessions inline keyboard.
+
+    callback_data format: "disc:<eap_identity>".
+    """
+    query = update.callback_query
+    await query.answer("Disconnecting…")  # dismisses Telegram loading spinner
+    parts = query.data.split(":", 1)
+    eap_identity = parts[1] if len(parts) > 1 else ""
+    audit("disconnect_inline", eap_identity=eap_identity)
+    ok, msg = disconnect_via_coa(eap_identity)
+    # Edit the original message so the button disappears after action.
+    await _safe_edit_text(query, msg, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_logs(update, context):
@@ -1145,5 +1235,9 @@ def build_application() -> Application:
     ]
     for cmd, handler in commands:
         application.add_handler(CommandHandler(cmd, handler, filters=whitelist))
+
+    # Inline keyboard callback for /sessions [Disconnect] buttons.
+    # Pattern matches callback_data starting with "disc:" (eap_identity follows).
+    application.add_handler(CallbackQueryHandler(cb_disconnect, pattern=r"^disc:"))
 
     return application
