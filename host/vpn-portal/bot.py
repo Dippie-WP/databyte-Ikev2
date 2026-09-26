@@ -308,7 +308,7 @@ def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
                     [
                         "iptables", "-I", "INPUT",
                         "-s", source_ip,
-                        "-p", "udp", "--dport", "500,4500",
+                        "-p", "udp", "-m", "multiport", "--dports", "500,4500",
                         "-j", "DROP",
                     ],
                     capture_output=True, text=True, timeout=5,
@@ -394,7 +394,7 @@ def _unblock_user(eap_identity: str, source_ip: str) -> None:
                     [
                         "iptables", "-D", "INPUT",
                         "-s", source_ip,
-                        "-p", "udp", "--dport", "500,4500",
+                        "-p", "udp", "-m", "multiport", "--dports", "500,4500",
                         "-j", "DROP",
                     ],
                     capture_output=True, text=True, timeout=5,
