@@ -17,10 +17,12 @@ Commands:
   /disconnect <name> - CoA kick via radclient 127.0.0.1:3779
   /logs <name> [n=20] - last N radpostauth entries
 """
+import base64
 import logging
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -211,6 +213,17 @@ RW_EAP_CONF = os.environ.get(
     "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf",
 )
 
+# Feature flag: freeze radcheck.Cleartext-Password after Disconnect-ACK
+# to block Android strongSwan client auto-reconnect. The Android client
+# re-establishes the IKE_SA within ~5s of a server-initiated Disconnect-Request;
+# freezing the user's password forces Access-Reject on reconnect. After
+# freeze_seconds the password is restored (threading.Timer + base64 marker
+# so the original value survives a bot restart - _startup_recover_orphaned_freezes
+# restores any orphaned FREEZE-BASE64:* markers on next startup).
+# Set DISCONNECT_FREEZE_SECONDS=N (e.g. 30) on prod to enable.
+# Default 0 = disabled (preserves existing behavior).
+DISCONNECT_FREEZE_SECONDS = int(os.environ.get("DISCONNECT_FREEZE_SECONDS", "0"))
+
 logger = logging.getLogger("vpn-bot")
 
 
@@ -224,6 +237,80 @@ def audit(action: str, **details):
             f.write(line)
     except Exception as e:
         logger.error(f"audit log write failed: {e}")
+
+
+def _restore_password_job(eap_identity: str, attr: str, original_value: str) -> None:
+    """Restore a single radcheck attribute after the freeze window expires.
+
+    Runs on a daemon thread via threading.Timer (one per attr per freeze).
+    Only touches rows where value LIKE 'FREEZE-BASE64:%' so a manual admin
+    edit between the freeze and the timer firing is not overwritten.
+    """
+    try:
+        import app
+        app.db_exec(
+            "UPDATE radcheck SET value = ? "
+            "WHERE username = ? AND attribute = ? "
+            "AND value LIKE 'FREEZE-BASE64:%'",
+            (original_value, eap_identity, attr),
+        )
+        audit("disconnect_freeze_restore", eap_identity=eap_identity, attr=attr)
+        logger.info(
+            f"disconnect_freeze_restore: {eap_identity}/{attr} restored"
+        )
+    except Exception as e:
+        logger.error(
+            f"disconnect_freeze_restore: FAILED for {eap_identity}/{attr}: {e}"
+        )
+
+
+def _startup_recover_orphaned_freezes() -> None:
+    """Find any orphaned FREEZE-BASE64:* markers left by a crashed bot.
+
+    Called once at build_application() startup. The marker is base64 of the
+    original value, so we can decode it without any out-of-band state. Scans
+    every password-like attribute (Cleartext-Password, NT-Password, etc.)
+    so a crash mid-freeze doesn't strand the user on any auth path.
+    """
+    try:
+        import app
+        rows = app.db_query(
+            "SELECT username, attribute, value FROM radcheck "
+            "WHERE value LIKE 'FREEZE-BASE64:%' "
+            "AND attribute IN ('Cleartext-Password','NT-Password',"
+            "'Crypt-Password','User-Password','SHA-Password',"
+            "'MD5-Password','SMD5-Password','SSHA-Password')",
+            (),
+        )
+        for row in rows:
+            marker = row["value"]
+            username = row["username"]
+            attr = row["attribute"]
+            try:
+                original = base64.b64decode(
+                    marker.replace("FREEZE-BASE64:", "").encode()
+                ).decode()
+                app.db_exec(
+                    "UPDATE radcheck SET value = ? "
+                    "WHERE username = ? AND attribute = ?",
+                    (original, username, attr),
+                )
+                audit(
+                    "disconnect_freeze_orphan_recovered",
+                    eap_identity=username, attr=attr,
+                )
+                logger.warning(
+                    f"startup_recover_orphaned_freezes: "
+                    f"restored {username}/{attr}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"startup_recover_orphaned_freezes: decode/restore "
+                    f"failed for {username}/{attr}: {e}"
+                )
+    except Exception as e:
+        logger.error(f"startup_recover_orphaned_freezes: query failed: {e}")
+
 
 
 async def reject_non_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -981,7 +1068,7 @@ async def cmd_enable(update, context):
     await update.message.reply_text(f"Enabled customer id=`{cid}`.")
 
 
-def disconnect_via_coa(eap_identity: str) -> tuple[bool, str]:
+def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool, str]:
     """Send a Disconnect-Request to charon's DAE plugin (UDP 127.0.0.1:3799).
 
     Shared between /disconnect (typed) and cb_disconnect (inline button).
@@ -1048,6 +1135,67 @@ def disconnect_via_coa(eap_identity: str) -> tuple[bool, str]:
             text=True,
             timeout=10,
         )
+        if res.returncode == 0 and freeze_seconds > 0:
+            # Block Android strongSwan client auto-reconnect by temporarily
+            # invalidating the user's radcheck password rows. The Android
+            # client (and any client) re-tries EAP auth within seconds; for
+            # MSCHAPv2 (strongSwan default) FreeRADIUS checks NT-Password,
+            # so we must freeze ALL password attrs for the user, not just
+            # Cleartext-Password. Each row gets its own base64 marker +
+            # restore Timer so the originals come back independently.
+            try:
+                import app
+                saved = app.db_query(
+                    "SELECT attribute, value FROM radcheck "
+                    "WHERE username = ? "
+                    "AND attribute IN ('Cleartext-Password','NT-Password',"
+                    "'Crypt-Password','User-Password','SHA-Password',"
+                    "'MD5-Password','SMD5-Password','SSHA-Password')",
+                    (eap_identity,),
+                )
+                if saved:
+                    frozen_count = 0
+                    for row in saved:
+                        attr = row["attribute"]
+                        original = row["value"]
+                        marker = "FREEZE-BASE64:" + base64.b64encode(
+                            original.encode()
+                        ).decode()
+                        app.db_exec(
+                            "UPDATE radcheck SET value = ? "
+                            "WHERE username = ? AND attribute = ?",
+                            (marker, eap_identity, attr),
+                        )
+                        threading.Timer(
+                            freeze_seconds,
+                            _restore_password_job,
+                            args=(eap_identity, attr, original),
+                        ).start()
+                        frozen_count += 1
+                    audit(
+                        "disconnect_freeze",
+                        eap_identity=eap_identity,
+                        freeze_seconds=freeze_seconds,
+                        frozen_attrs=frozen_count,
+                    )
+                    logger.info(
+                        f"disconnect_freeze: {eap_identity} "
+                        f"frozen {frozen_count} radcheck attr(s) "
+                        f"for {freeze_seconds}s"
+                    )
+                    return True, (
+                        f"Disconnect sent + {frozen_count} radcheck "
+                        f"attr(s) frozen for {freeze_seconds}s "
+                        f"(Android auto-reconnect blocked)."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"disconnect_freeze: failed to freeze radcheck "
+                    f"for {eap_identity}: {e}"
+                )
+                # Fall through to the plain success message - disconnect
+                # itself succeeded, only the freeze didn't apply.
+
         if res.returncode == 0:
             return True, f"Disconnect sent for `{eap_identity}`."
         # Non-zero exit. Capture stderr (preferred) or stdout for the cause.
@@ -1079,7 +1227,7 @@ async def cmd_disconnect(update, context):
         await update.message.reply_text(f"No customer matches `{arg}`.")
         return
     eap_identity = rows[0]["eap_identity"]
-    ok, msg = disconnect_via_coa(eap_identity)
+    ok, msg = disconnect_via_coa(eap_identity, freeze_seconds=DISCONNECT_FREEZE_SECONDS)
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1093,7 +1241,7 @@ async def cb_disconnect(update, context):
     parts = query.data.split(":", 1)
     eap_identity = parts[1] if len(parts) > 1 else ""
     audit("disconnect_inline", eap_identity=eap_identity)
-    ok, msg = disconnect_via_coa(eap_identity)
+    ok, msg = disconnect_via_coa(eap_identity, freeze_seconds=DISCONNECT_FREEZE_SECONDS)
     # Edit the original message so the button disappears after action.
     await _safe_edit_text(query, msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -1138,6 +1286,10 @@ async def cmd_logs(update, context):
 
 def build_application() -> Application:
     from urllib.parse import urlparse
+
+    # Recover any orphaned freeze markers from a previous bot crash
+    # (see _startup_recover_orphaned_freezes docstring).
+    _startup_recover_orphaned_freezes()
     from bot_persistence import MariaDBPersistence
 
     # Parse DB connection from /etc/vpn-portal.env DB_URL.
