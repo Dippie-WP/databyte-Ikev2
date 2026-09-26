@@ -72,3 +72,4 @@ host/vpn-portal/test-credentials/
 
 # Debug backups (created during manual debugging sessions)
 quota-backup-*/
+host/vpn-portal/bot.py.live-prod-*
