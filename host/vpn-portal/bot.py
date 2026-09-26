@@ -263,7 +263,7 @@ def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
         # regardless of stored credentials)
         app.db_exec(
             "INSERT INTO radcheck (username, attribute, op, value) "
-            "VALUES (%s, 'Auth-Type', ':=', 'Reject') "
+            "VALUES (?, 'Auth-Type', ':=', 'Reject') "
             "ON DUPLICATE KEY UPDATE value='Reject'",
             (eap_identity,),
         )
