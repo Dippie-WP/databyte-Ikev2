@@ -17,7 +17,6 @@ Commands:
   /disconnect <name> - CoA kick via radclient 127.0.0.1:3779
   /logs <name> [n=20] - last N radpostauth entries
 """
-import base64
 import logging
 import os
 import re
@@ -213,16 +212,18 @@ RW_EAP_CONF = os.environ.get(
     "/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf",
 )
 
-# Feature flag: freeze radcheck.Cleartext-Password after Disconnect-ACK
-# to block Android strongSwan client auto-reconnect. The Android client
-# re-establishes the IKE_SA within ~5s of a server-initiated Disconnect-Request;
-# freezing the user's password forces Access-Reject on reconnect. After
-# freeze_seconds the password is restored (threading.Timer + base64 marker
-# so the original value survives a bot restart - _startup_recover_orphaned_freezes
-# restores any orphaned FREEZE-BASE64:* markers on next startup).
-# Set DISCONNECT_FREEZE_SECONDS=N (e.g. 30) on prod to enable.
+# Feature flag: block user for N seconds after Disconnect-Request. Layered
+# block via two independent mechanisms (so either alone would defeat Android's
+# auto-reconnect, both together is bulletproof):
+#   1. INSERT radcheck row (username, 'Auth-Type', ':=', 'Reject') — checked
+#      BEFORE password attrs in FreeRADIUS authorize section, so Access-Reject
+#      is immediate regardless of stored credentials.
+#   2. iptables -I INPUT -s <calling_station_id> -p udp --dport 500,4500 -j
+#      DROP — Android client can't even reach charon to retry EAP.
+# Both layers revert via threading.Timer after block_seconds.
+# Set DISCONNECT_BLOCK_SECONDS=N (e.g. 300 = 5 min) on prod to enable.
 # Default 0 = disabled (preserves existing behavior).
-DISCONNECT_FREEZE_SECONDS = int(os.environ.get("DISCONNECT_FREEZE_SECONDS", "0"))
+DISCONNECT_BLOCK_SECONDS = int(os.environ.get("DISCONNECT_BLOCK_SECONDS", "0"))
 
 logger = logging.getLogger("vpn-bot")
 
@@ -239,77 +240,154 @@ def audit(action: str, **details):
         logger.error(f"audit log write failed: {e}")
 
 
-def _restore_password_job(eap_identity: str, attr: str, original_value: str) -> None:
-    """Restore a single radcheck attribute after the freeze window expires.
+def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
+    """Block user via two independent layers for N seconds.
 
-    Runs on a daemon thread via threading.Timer (one per attr per freeze).
-    Only touches rows where value LIKE 'FREEZE-BASE64:%' so a manual admin
-    edit between the freeze and the timer firing is not overwritten.
+    Layer 1 (RADIUS): INSERT radcheck row (username, 'Auth-Type', ':=', 'Reject').
+    FreeRADIUS checks Auth-Type BEFORE password attrs in the authorize
+    section, so Access-Reject is immediate regardless of stored creds.
+
+    Layer 2 (network): iptables -I INPUT -s <source_ip> -p udp --dport
+    500,4500 -j DROP. Android client can't even reach charon to retry EAP.
+
+    Either layer alone would block reconnection; both together defeat
+    Android's auto-reconnect storm reliably. Both layers revert via a
+    single threading.Timer after block_seconds (started inside this fn).
+
+    Failures in either layer are logged and don't propagate — the
+    disconnect itself already succeeded, only the block might not apply.
     """
     try:
         import app
+        # Layer 1: FreeRADIUS Auth-Type=Reject (immediate Access-Reject
+        # regardless of stored credentials)
         app.db_exec(
-            "UPDATE radcheck SET value = ? "
-            "WHERE username = ? AND attribute = ? "
-            "AND value LIKE 'FREEZE-BASE64:%'",
-            (original_value, eap_identity, attr),
+            "INSERT INTO radcheck (username, attribute, op, value) "
+            "VALUES (%s, 'Auth-Type', ':=', 'Reject') "
+            "ON DUPLICATE KEY UPDATE value='Reject'",
+            (eap_identity,),
         )
-        audit("disconnect_freeze_restore", eap_identity=eap_identity, attr=attr)
+        # Layer 2: iptables DROP for source IP (block at network layer).
+        # We use -I (insert at top) so the rule is evaluated first. Only
+        # attempt if source_ip is non-empty (caller may not have it).
+        if source_ip:
+            try:
+                subprocess.run(
+                    [
+                        "iptables", "-I", "INPUT",
+                        "-s", source_ip,
+                        "-p", "udp", "--dport", "500,4500",
+                        "-j", "DROP",
+                    ],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception as ipt_err:
+                logger.warning(
+                    f"_block_user: iptables DROP failed for "
+                    f"{eap_identity}/{source_ip}: {ipt_err}"
+                )
+        # Schedule revert (one Timer, reverts both layers atomically)
+        threading.Timer(
+            block_seconds,
+            _unblock_user,
+            args=(eap_identity, source_ip),
+        ).start()
+        audit(
+            "disconnect_block",
+            eap_identity=eap_identity,
+            block_seconds=block_seconds,
+            source_ip=source_ip or "none",
+        )
         logger.info(
-            f"disconnect_freeze_restore: {eap_identity}/{attr} restored"
+            f"_block_user: {eap_identity} blocked for {block_seconds}s"
+            f"{f' (src IP {source_ip})' if source_ip else ''}"
         )
     except Exception as e:
-        logger.error(
-            f"disconnect_freeze_restore: FAILED for {eap_identity}/{attr}: {e}"
+        logger.warning(f"_block_user: failed to block {eap_identity}: {e}")
+
+
+def _unblock_user(eap_identity: str, source_ip: str) -> None:
+    """Revert the block: DELETE Auth-Type=Reject row + remove iptables DROP rule.
+
+    Runs on a daemon thread via threading.Timer (one per block, started
+    inside _block_user). Safe to call even if the block partially failed —
+    each operation is idempotent (DELETE matches the row we created,
+    iptables -D matches the rule we added).
+    """
+    try:
+        import app
+        # Layer 1 revert: DELETE the Auth-Type=Reject row
+        app.db_exec(
+            "DELETE FROM radcheck "
+            "WHERE username = ? AND attribute = 'Auth-Type' "
+            "AND value = 'Reject'",
+            (eap_identity,),
         )
+        # Layer 2 revert: remove iptables DROP rule
+        if source_ip:
+            try:
+                subprocess.run(
+                    [
+                        "iptables", "-D", "INPUT",
+                        "-s", source_ip,
+                        "-p", "udp", "--dport", "500,4500",
+                        "-j", "DROP",
+                    ],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception as ipt_err:
+                logger.warning(
+                    f"_unblock_user: iptables -D failed for "
+                    f"{eap_identity}/{source_ip}: {ipt_err}"
+                )
+        audit(
+            "disconnect_unblock",
+            eap_identity=eap_identity,
+            source_ip=source_ip or "none",
+        )
+        logger.info(f"_unblock_user: {eap_identity} unblocked")
+    except Exception as e:
+        logger.error(f"_unblock_user: FAILED for {eap_identity}: {e}")
 
 
-def _startup_recover_orphaned_freezes() -> None:
-    """Find any orphaned FREEZE-BASE64:* markers left by a crashed bot.
+def _startup_recover_orphaned_blocks() -> None:
+    """Clean up any orphaned Auth-Type=Reject rows left by a crashed bot.
 
-    Called once at build_application() startup. The marker is base64 of the
-    original value, so we can decode it without any out-of-band state. Scans
-    every password-like attribute (Cleartext-Password, NT-Password, etc.)
-    so a crash mid-freeze doesn't strand the user on any auth path.
+    Called once at build_application() startup. In steady state, no
+    Auth-Type=Reject rows should exist — they're removed by _unblock_user
+    Timer after block_seconds. If any are found, they belong to a previous
+    bot session that crashed mid-block — delete them so the user can auth.
+
+    iptables rules are kernel-state and survive bot restart, so they
+    are not cleaned here. (iptables rules inserted via iptables -I are
+    lost on reboot anyway.)
     """
     try:
         import app
         rows = app.db_query(
-            "SELECT username, attribute, value FROM radcheck "
-            "WHERE value LIKE 'FREEZE-BASE64:%' "
-            "AND attribute IN ('Cleartext-Password','NT-Password',"
-            "'Crypt-Password','User-Password','SHA-Password',"
-            "'MD5-Password','SMD5-Password','SSHA-Password')",
+            "SELECT username FROM radcheck "
+            "WHERE attribute = 'Auth-Type' AND value = 'Reject'",
             (),
         )
         for row in rows:
-            marker = row["value"]
             username = row["username"]
-            attr = row["attribute"]
-            try:
-                original = base64.b64decode(
-                    marker.replace("FREEZE-BASE64:", "").encode()
-                ).decode()
-                app.db_exec(
-                    "UPDATE radcheck SET value = ? "
-                    "WHERE username = ? AND attribute = ?",
-                    (original, username, attr),
-                )
-                audit(
-                    "disconnect_freeze_orphan_recovered",
-                    eap_identity=username, attr=attr,
-                )
-                logger.warning(
-                    f"startup_recover_orphaned_freezes: "
-                    f"restored {username}/{attr}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"startup_recover_orphaned_freezes: decode/restore "
-                    f"failed for {username}/{attr}: {e}"
-                )
+            app.db_exec(
+                "DELETE FROM radcheck "
+                "WHERE username = ? AND attribute = 'Auth-Type' "
+                "AND value = 'Reject'",
+                (username,),
+            )
+            audit(
+                "disconnect_block_orphan_recovered",
+                eap_identity=username,
+            )
+            logger.warning(
+                f"startup_recover_orphaned_blocks: restored {username}"
+            )
     except Exception as e:
-        logger.error(f"startup_recover_orphaned_freezes: query failed: {e}")
+        logger.error(
+            f"startup_recover_orphaned_blocks: query failed: {e}"
+        )
 
 
 
@@ -1068,7 +1146,7 @@ async def cmd_enable(update, context):
     await update.message.reply_text(f"Enabled customer id=`{cid}`.")
 
 
-def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool, str]:
+def disconnect_via_coa(eap_identity: str, block_seconds: int = 0) -> tuple[bool, str]:
     """Send a Disconnect-Request to charon's DAE plugin (UDP 127.0.0.1:3799).
 
     Shared between /disconnect (typed) and cb_disconnect (inline button).
@@ -1090,6 +1168,11 @@ def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool
       code 40), NOT "coa" (CoA-Request, code 43). charon's DAE
       just NAKs CoA-Request without processing it. quota-monitor.py
       uses the same Disconnect-Request + Acct-Session-Id pattern.
+    - If block_seconds > 0, ALSO inserts an Auth-Type=Reject row in
+      radcheck (immediate Access-Reject at FreeRADIUS layer) and adds
+      an iptables DROP rule for the source IP (blocks UDP 500/4500 at
+      network layer). Both layers revert via threading.Timer after
+      block_seconds. See _block_user docstring.
 
     Sync subprocess blocks the event loop briefly (~10s max) — acceptable
     for an admin tool with infrequent disconnects.
@@ -1097,16 +1180,20 @@ def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool
     if not eap_identity or eap_identity == "?":
         return False, "Invalid EAP identity (empty or '?'). Button data malformed."
     secret = "b305c63a5010d2c309e29df7bab0fe66"
+    calling_station_id = ""
 
     # Build attributes for charon DAE matching. Start with User-Name
     # (charon uses it for the audit log entry, even if it doesn't match
-    # the IKE_SA). Then look up Acct-Session-Id + Framed-IP-Address
-    # from radacct where the session is still active (acctstoptime IS NULL).
+    # the IKE_SA). Then look up Acct-Session-Id + Framed-IP-Address +
+    # Calling-Station-Id from radacct where the session is still active
+    # (acctstoptime IS NULL). Calling-Station-Id is used by the block
+    # layer (iptables DROP) but NOT by charon DAE (which only matches
+    # on Acct-Session-Id OR Framed-IP-Address).
     attrs = [f"User-Name={eap_identity}"]
     try:
         import app
         rows = app.db_query(
-            "SELECT acctsessionid, framedipaddress FROM radacct "
+            "SELECT acctsessionid, framedipaddress, callingstationid FROM radacct "
             "WHERE username = %s AND acctstoptime IS NULL "
             "ORDER BY acctstarttime DESC LIMIT 1",
             (eap_identity,),
@@ -1117,9 +1204,12 @@ def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool
                 attrs.append(f"Acct-Session-Id={row['acctsessionid']}")
             if row.get("framedipaddress"):
                 attrs.append(f"Framed-IP-Address={row['framedipaddress']}")
+            calling_station_id = row.get("callingstationid", "") or ""
             logger.info(
                 f"disconnect_via_coa: {eap_identity} -> "
-                f"session_id={row.get('acctsessionid')!r} vip={row.get('framedipaddress')!r}"
+                f"session_id={row.get('acctsessionid')!r} "
+                f"vip={row.get('framedipaddress')!r} "
+                f"src_ip={calling_station_id!r}"
             )
         else:
             logger.warning(f"disconnect_via_coa: no active radacct row for {eap_identity!r} (will NAK)")
@@ -1135,66 +1225,28 @@ def disconnect_via_coa(eap_identity: str, freeze_seconds: int = 0) -> tuple[bool
             text=True,
             timeout=10,
         )
-        if res.returncode == 0 and freeze_seconds > 0:
-            # Block Android strongSwan client auto-reconnect by temporarily
-            # invalidating the user's radcheck password rows. The Android
-            # client (and any client) re-tries EAP auth within seconds; for
-            # MSCHAPv2 (strongSwan default) FreeRADIUS checks NT-Password,
-            # so we must freeze ALL password attrs for the user, not just
-            # Cleartext-Password. Each row gets its own base64 marker +
-            # restore Timer so the originals come back independently.
+        if res.returncode == 0 and block_seconds > 0:
+            # Two-layer block: Auth-Type=Reject (RADIUS) + iptables DROP
+            # (network). Either alone would defeat Android's auto-reconnect;
+            # both together is bulletproof. See _block_user docstring.
             try:
-                import app
-                saved = app.db_query(
-                    "SELECT attribute, value FROM radcheck "
-                    "WHERE username = ? "
-                    "AND attribute IN ('Cleartext-Password','NT-Password',"
-                    "'Crypt-Password','User-Password','SHA-Password',"
-                    "'MD5-Password','SMD5-Password','SSHA-Password')",
-                    (eap_identity,),
+                _block_user(eap_identity, calling_station_id, block_seconds)
+                src_note = (
+                    f" (src IP {calling_station_id})"
+                    if calling_station_id else ""
                 )
-                if saved:
-                    frozen_count = 0
-                    for row in saved:
-                        attr = row["attribute"]
-                        original = row["value"]
-                        marker = "FREEZE-BASE64:" + base64.b64encode(
-                            original.encode()
-                        ).decode()
-                        app.db_exec(
-                            "UPDATE radcheck SET value = ? "
-                            "WHERE username = ? AND attribute = ?",
-                            (marker, eap_identity, attr),
-                        )
-                        threading.Timer(
-                            freeze_seconds,
-                            _restore_password_job,
-                            args=(eap_identity, attr, original),
-                        ).start()
-                        frozen_count += 1
-                    audit(
-                        "disconnect_freeze",
-                        eap_identity=eap_identity,
-                        freeze_seconds=freeze_seconds,
-                        frozen_attrs=frozen_count,
-                    )
-                    logger.info(
-                        f"disconnect_freeze: {eap_identity} "
-                        f"frozen {frozen_count} radcheck attr(s) "
-                        f"for {freeze_seconds}s"
-                    )
-                    return True, (
-                        f"Disconnect sent + {frozen_count} radcheck "
-                        f"attr(s) frozen for {freeze_seconds}s "
-                        f"(Android auto-reconnect blocked)."
-                    )
+                return True, (
+                    f"Disconnect sent + user blocked for {block_seconds}s"
+                    f"{src_note} (Auth-Type=Reject + iptables DROP, "
+                    f"both revert in {block_seconds}s)."
+                )
             except Exception as e:
                 logger.warning(
-                    f"disconnect_freeze: failed to freeze radcheck "
-                    f"for {eap_identity}: {e}"
+                    f"disconnect_via_coa: failed to block "
+                    f"{eap_identity} after disconnect: {e}"
                 )
-                # Fall through to the plain success message - disconnect
-                # itself succeeded, only the freeze didn't apply.
+                # Fall through — disconnect itself succeeded, only
+                # the block didn't apply.
 
         if res.returncode == 0:
             return True, f"Disconnect sent for `{eap_identity}`."
@@ -1227,7 +1279,7 @@ async def cmd_disconnect(update, context):
         await update.message.reply_text(f"No customer matches `{arg}`.")
         return
     eap_identity = rows[0]["eap_identity"]
-    ok, msg = disconnect_via_coa(eap_identity, freeze_seconds=DISCONNECT_FREEZE_SECONDS)
+    ok, msg = disconnect_via_coa(eap_identity, block_seconds=DISCONNECT_BLOCK_SECONDS)
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1241,7 +1293,7 @@ async def cb_disconnect(update, context):
     parts = query.data.split(":", 1)
     eap_identity = parts[1] if len(parts) > 1 else ""
     audit("disconnect_inline", eap_identity=eap_identity)
-    ok, msg = disconnect_via_coa(eap_identity, freeze_seconds=DISCONNECT_FREEZE_SECONDS)
+    ok, msg = disconnect_via_coa(eap_identity, block_seconds=DISCONNECT_BLOCK_SECONDS)
     # Edit the original message so the button disappears after action.
     await _safe_edit_text(query, msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -1287,9 +1339,9 @@ async def cmd_logs(update, context):
 def build_application() -> Application:
     from urllib.parse import urlparse
 
-    # Recover any orphaned freeze markers from a previous bot crash
-    # (see _startup_recover_orphaned_freezes docstring).
-    _startup_recover_orphaned_freezes()
+    # Recover any orphaned block markers from a previous bot crash
+    # (see _startup_recover_orphaned_blocks docstring).
+    _startup_recover_orphaned_blocks()
     from bot_persistence import MariaDBPersistence
 
     # Parse DB connection from /etc/vpn-portal.env DB_URL.
