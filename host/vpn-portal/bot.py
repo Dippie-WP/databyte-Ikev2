@@ -243,33 +243,65 @@ def audit(action: str, **details):
 def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
     """Block user via two independent layers for N seconds.
 
+    Option 2 (TKT-030): direct pymysql + iptables subprocess with check=True.
+    Replaces the earlier SQLAlchemy _db()/app.db_exec path which had a
+    connection-pool visibility bug on the LXC 909 dry run (INSERT was
+    committed inside the worker process but invisible to other mariadb
+    sessions). Direct pymysql.connect() bypasses the pool entirely.
+
     Layer 1 (RADIUS): INSERT radcheck row (username, 'Auth-Type', ':=', 'Reject').
     FreeRADIUS checks Auth-Type BEFORE password attrs in the authorize
     section, so Access-Reject is immediate regardless of stored creds.
 
     Layer 2 (network): iptables -I INPUT -s <source_ip> -p udp --dport
     500,4500 -j DROP. Android client can't even reach charon to retry EAP.
+    Uses check=True so iptables errors surface (previously silently failed).
 
-    Either layer alone would block reconnection; both together defeat
-    Android's auto-reconnect storm reliably. Both layers revert via a
-    single threading.Timer after block_seconds (started inside this fn).
+    Either layer alone blocks reconnection; both is bulletproof.
+    Both revert via a single threading.Timer after block_seconds.
 
-    Failures in either layer are logged and don't propagate — the
-    disconnect itself already succeeded, only the block might not apply.
+    Failures in either layer are logged and don't propagate. The
+    disconnect itself already succeeded; only the block might not apply.
     """
+    # Parse DB_URL for direct pymysql connection (pattern from rotate_eap_credentials)
+    db_url = os.environ.get("DB_URL", "")
+    # Expected: mysql+pymysql://user:password@host:port/database
+    db_user = db_pass = db_host = db_port = db_name = ""
     try:
-        import app
-        # Layer 1: FreeRADIUS Auth-Type=Reject (immediate Access-Reject
-        # regardless of stored credentials)
-        app.db_exec(
-            "INSERT INTO radcheck (username, attribute, op, value) "
-            "VALUES (?, 'Auth-Type', ':=', 'Reject') "
-            "ON DUPLICATE KEY UPDATE value='Reject'",
-            (eap_identity,),
+        from urllib.parse import urlparse
+        parsed = urlparse(db_url)
+        db_user = parsed.username or ""
+        db_pass = parsed.password or ""
+        db_host = parsed.hostname or "127.0.0.1"
+        db_port = str(parsed.port or 3306)
+        db_name = (parsed.path or "/radius").lstrip("/") or "radius"
+    except Exception:
+        pass
+
+    try:
+        import pymysql
+        conn = pymysql.connect(
+            host=db_host, port=int(db_port),
+            user=db_user, password=db_pass,
+            database=db_name, connect_timeout=5,
+            autocommit=True,  # critical: write is immediately visible
         )
+        try:
+            with conn.cursor() as cur:
+                # Layer 1: FreeRADIUS Auth-Type=Reject
+                # Uses ? placeholders (pymysql native)
+                cur.execute(
+                    "INSERT INTO radcheck (username, attribute, op, value) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON DUPLICATE KEY UPDATE value=%s",
+                    (eap_identity, "Auth-Type", ":=", "Reject", "Reject"),
+                )
+        finally:
+            conn.close()
+
         # Layer 2: iptables DROP for source IP (block at network layer).
-        # We use -I (insert at top) so the rule is evaluated first. Only
-        # attempt if source_ip is non-empty (caller may not have it).
+        # Uses -I (insert at top) so the rule is evaluated first. Uses
+        # check=True so iptables errors surface instead of silently failing.
         if source_ip:
             try:
                 subprocess.run(
@@ -280,12 +312,19 @@ def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
                         "-j", "DROP",
                     ],
                     capture_output=True, text=True, timeout=5,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as ipt_err:
+                logger.warning(
+                    f"_block_user: iptables DROP failed for "
+                    f"{eap_identity}/{source_ip}: {ipt_err.stderr}"
                 )
             except Exception as ipt_err:
                 logger.warning(
-                    f"_block_user: iptables DROP failed for "
+                    f"_block_user: iptables DROP error for "
                     f"{eap_identity}/{source_ip}: {ipt_err}"
                 )
+
         # Schedule revert (one Timer, reverts both layers atomically)
         threading.Timer(
             block_seconds,
@@ -309,20 +348,45 @@ def _block_user(eap_identity: str, source_ip: str, block_seconds: int) -> None:
 def _unblock_user(eap_identity: str, source_ip: str) -> None:
     """Revert the block: DELETE Auth-Type=Reject row + remove iptables DROP rule.
 
+    Option 2 (TKT-030): direct pymysql + iptables subprocess with check=True.
+    Mirrors _block_user's Option 2 pattern. Idempotent: each operation
+    matches what _block_user created, so a partial-block revert is safe.
+
     Runs on a daemon thread via threading.Timer (one per block, started
-    inside _block_user). Safe to call even if the block partially failed —
-    each operation is idempotent (DELETE matches the row we created,
-    iptables -D matches the rule we added).
+    inside _block_user).
     """
+    db_url = os.environ.get("DB_URL", "")
+    db_user = db_pass = db_host = db_port = db_name = ""
     try:
-        import app
-        # Layer 1 revert: DELETE the Auth-Type=Reject row
-        app.db_exec(
-            "DELETE FROM radcheck "
-            "WHERE username = ? AND attribute = 'Auth-Type' "
-            "AND value = 'Reject'",
-            (eap_identity,),
+        from urllib.parse import urlparse
+        parsed = urlparse(db_url)
+        db_user = parsed.username or ""
+        db_pass = parsed.password or ""
+        db_host = parsed.hostname or "127.0.0.1"
+        db_port = str(parsed.port or 3306)
+        db_name = (parsed.path or "/radius").lstrip("/") or "radius"
+    except Exception:
+        pass
+
+    try:
+        import pymysql
+        conn = pymysql.connect(
+            host=db_host, port=int(db_port),
+            user=db_user, password=db_pass,
+            database=db_name, connect_timeout=5,
+            autocommit=True,
         )
+        try:
+            with conn.cursor() as cur:
+                # Layer 1 revert: DELETE the Auth-Type=Reject row
+                cur.execute(
+                    "DELETE FROM radcheck "
+                    "WHERE username = %s AND attribute = %s AND value = %s",
+                    (eap_identity, "Auth-Type", "Reject"),
+                )
+        finally:
+            conn.close()
+
         # Layer 2 revert: remove iptables DROP rule
         if source_ip:
             try:
@@ -334,12 +398,19 @@ def _unblock_user(eap_identity: str, source_ip: str) -> None:
                         "-j", "DROP",
                     ],
                     capture_output=True, text=True, timeout=5,
+                    check=True,
+                )
+            except subprocess.CalledProcessError as ipt_err:
+                logger.warning(
+                    f"_unblock_user: iptables -D failed for "
+                    f"{eap_identity}/{source_ip}: {ipt_err.stderr}"
                 )
             except Exception as ipt_err:
                 logger.warning(
-                    f"_unblock_user: iptables -D failed for "
+                    f"_unblock_user: iptables -D error for "
                     f"{eap_identity}/{source_ip}: {ipt_err}"
                 )
+
         audit(
             "disconnect_unblock",
             eap_identity=eap_identity,
@@ -348,7 +419,6 @@ def _unblock_user(eap_identity: str, source_ip: str) -> None:
         logger.info(f"_unblock_user: {eap_identity} unblocked")
     except Exception as e:
         logger.error(f"_unblock_user: FAILED for {eap_identity}: {e}")
-
 
 def _startup_recover_orphaned_blocks() -> None:
     """Clean up any orphaned Auth-Type=Reject rows left by a crashed bot.
