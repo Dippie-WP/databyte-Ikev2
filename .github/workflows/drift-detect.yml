@@ -48,7 +48,7 @@ jobs:
 
       - name: Run drift detector
         env:
-          VPS_HOST: ${{ vars.VPS_HOST || 'vps-01' }}
+          VPS_HOST: ${{ vars.VPS_HOST || 'vpn-prod-01' }}
           VPS_USER: ${{ vars.VPS_USER || 'root' }}
         run: |
           ./tools/ci-drift-detect.sh
