@@ -311,6 +311,45 @@ def db_exec(sql: str, params=None) -> None:
         conn.execute(sql, params or ())
         conn.commit()
 
+def recent_sessions(limit: int = 2, exclude_usernames=None, lookback_days: int = 7) -> list:
+    """Return the N most recently closed sessions from radacct, with each
+    distinct username represented at most once (latest session only).
+    Excludes any usernames in exclude_usernames (live users).
+    Limited to sessions whose AcctStopTime is within the last lookback_days
+    (default 7). Cutoff uses AcctStopTime (when the session ended).
+
+    Used by /sessions bot command to show recent history without
+    duplicating users when one has multiple recent sessions.
+    Returns list of dicts with: UserName, FramedIPAddress, AcctStartTime,
+    AcctStopTime, AcctSessionTime, AcctInputOctets, AcctOutputOctets.
+    """
+    from datetime import datetime, timezone, timedelta
+    exclude_usernames = exclude_usernames or []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).replace(tzinfo=None)
+    base_select = (
+        "SELECT r.UserName, r.FramedIPAddress, r.AcctStartTime, r.AcctStopTime, "
+        "       r.AcctSessionTime, r.AcctInputOctets, r.AcctOutputOctets "
+        "FROM radacct r "
+        "INNER JOIN ("
+        "    SELECT UserName, MAX(AcctStopTime) AS latest_stop "
+        "    FROM radacct "
+        "    WHERE AcctStopTime IS NOT NULL AND AcctStopTime >= ? "
+        "    GROUP BY UserName"
+        ") latest "
+        "  ON r.UserName = latest.UserName AND r.AcctStopTime = latest.latest_stop "
+        "WHERE r.AcctStopTime IS NOT NULL AND r.AcctStopTime >= ? "
+    )
+    if exclude_usernames:
+        placeholders = ",".join("?" * len(exclude_usernames))
+        sql = base_select + f"AND r.UserName NOT IN ({placeholders}) " + "ORDER BY r.AcctStopTime DESC LIMIT ?"
+        params = (cutoff, cutoff) + tuple(exclude_usernames) + (int(limit),)
+    else:
+        sql = base_select + "ORDER BY r.AcctStopTime DESC LIMIT ?"
+        params = (cutoff, cutoff, int(limit))
+    return db_query(sql, params)
+
+
+
 
 # ---------- charon / ipBan / firewalld wrappers ----------
 def leases_active() -> list:

@@ -42,8 +42,9 @@ FILES=(
   "quota/quota-monitor.py"
   "quota/bandwidth-monitor.py"
   "quota/update_rw_eap_conf.py"
-  # New: portal app (4)
+  # New: portal app (5) — bot.py added 2026-10-09 per TKT-029 + 3 amendments
   "host/vpn-portal/app.py"
+  "host/vpn-portal/bot.py"
   "host/vpn-portal/portal_auth.py"
   "host/vpn-portal/requirements.txt"
   "host/vpn-portal/scripts/bulk_action.py"
@@ -69,8 +70,9 @@ declare -A LIVE_PATHS=(
   ["quota/quota-monitor.py"]="/opt/strongswan-vpn-gateway/quota/quota-monitor.py"
   ["quota/bandwidth-monitor.py"]="/opt/strongswan-vpn-gateway/quota/bandwidth-monitor.py"
   ["quota/update_rw_eap_conf.py"]="/opt/strongswan-vpn-gateway/quota/update_rw_eap_conf.py"
-  # Portal app (4)
+  # Portal app (5) — bot.py added 2026-10-09
   ["host/vpn-portal/app.py"]="/opt/vpn-portal/app.py"
+  ["host/vpn-portal/bot.py"]="/opt/vpn-portal/bot.py"
   ["host/vpn-portal/portal_auth.py"]="/opt/vpn-portal/portal_auth.py"
   ["host/vpn-portal/requirements.txt"]="/opt/vpn-portal/requirements.txt"
   ["host/vpn-portal/scripts/bulk_action.py"]="/opt/vpn-portal/scripts/bulk_action.py"
@@ -124,12 +126,57 @@ done
 
 echo
 echo "=== Summary ==="
-echo "  files checked: ${#FILES[@]}"
-echo "  drift count:   $drift_count"
+echo "  databyte-Ikev2 files checked: ${#FILES[@]}"
+echo "  databyte-Ikev2 drift count:   $drift_count"
+echo "  vpn-admin-bot files checked:  ${#VPN_ADMIN_BOT_FILES[@]}"
+echo "  vpn-admin-bot drift count:    $vpn_admin_drift"
+echo "  TOTAL drift:                   $((drift_count + vpn_admin_drift))"
 
-if [ $drift_count -gt 0 ]; then
+# ---------- Cross-repo check: vpn-admin-bot vs prod ----------
+# Added 2026-10-09 — the VPN bot code is also tracked in Dippie-WP/vpn-admin-bot
+# (a separate public repo that holds the "vpn-admin-bot" subset for the Telegram
+# admin UI). This section verifies the public repo's files match what runs on
+# the LIVE VPS, so all 3 sources (databyte-Ikev2, vpn-admin-bot, prod) are
+# mutually consistent. Files are fetched from raw.githubusercontent.com — no
+# auth needed (public repo). Catches: someone editing prod without committing
+# to EITHER repo, or one repo drifting from the other.
+VPN_ADMIN_BOT_REPO="Dippie-WP/vpn-admin-bot"
+VPN_ADMIN_BOT_BRANCH="${VPN_ADMIN_BOT_BRANCH:-main}"
+VPN_ADMIN_BOT_FILES=(
+  "app.py"
+  "bot.py"
+)
+vpn_admin_drift=0
+for rel in "${VPN_ADMIN_BOT_FILES[@]}"; do
+  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPS_USER@$VPS_HOST" "md5sum /opt/vpn-portal/$rel" 2>/dev/null | awk '{print $1}')
+  if [ -z "$live_md5" ]; then
+    echo "  SKIP (vpn-admin-bot): $rel (could not hash live file)"
+    continue
+  fi
+  remote_md5=$(curl -sSL "https://raw.githubusercontent.com/$VPN_ADMIN_BOT_REPO/$VPN_ADMIN_BOT_BRANCH/$rel" 2>/dev/null | md5sum | awk '{print $1}')
+  if [ -z "$remote_md5" ]; then
+    echo "  SKIP (vpn-admin-bot): $rel (could not fetch from $VPN_ADMIN_BOT_REPO)"
+    continue
+  fi
+  if [ "$live_md5" = "$remote_md5" ]; then
+    echo "  MATCH (vpn-admin-bot): $rel  ($live_md5)"
+  else
+    echo "  DRIFT!! (vpn-admin-bot): $rel"
+    echo "    vpn-admin-bot: $remote_md5  ($VPN_ADMIN_BOT_REPO/$rel)"
+    echo "    live:          $live_md5  (/opt/vpn-portal/$rel)"
+    vpn_admin_drift=$((vpn_admin_drift + 1))
+  fi
+done
+
+if [ $vpn_admin_drift -gt 0 ]; then
   echo
-  echo "::error::$drift_count file(s) on LIVE VPS differ from git HEAD. Run tools/sync-from-live.sh to re-sync."
+  echo "::error::$vpn_admin_drift vpn-admin-bot file(s) on LIVE VPS differ from $VPN_ADMIN_BOT_REPO HEAD. Sync prod -> vpn-admin-bot."
+fi
+
+total_drift=$((drift_count + vpn_admin_drift))
+if [ $total_drift -gt 0 ]; then
+  echo
+  echo "::error::$total_drift file(s) on LIVE VPS differ from git HEAD(s). Run tools/sync-from-live.sh to re-sync."
   exit 1
 fi
 
