@@ -124,14 +124,6 @@ for rel in "${FILES[@]}"; do
   fi
 done
 
-echo
-echo "=== Summary ==="
-echo "  databyte-Ikev2 files checked: ${#FILES[@]}"
-echo "  databyte-Ikev2 drift count:   $drift_count"
-echo "  vpn-admin-bot files checked:  ${#VPN_ADMIN_BOT_FILES[@]}"
-echo "  vpn-admin-bot drift count:    $vpn_admin_drift"
-echo "  TOTAL drift:                   $((drift_count + vpn_admin_drift))"
-
 # ---------- Cross-repo check: vpn-admin-bot vs prod ----------
 # Added 2026-10-09 — the VPN bot code is also tracked in Dippie-WP/vpn-admin-bot
 # (a separate public repo that holds the "vpn-admin-bot" subset for the Telegram
@@ -172,6 +164,14 @@ if [ $vpn_admin_drift -gt 0 ]; then
   echo
   echo "::error::$vpn_admin_drift vpn-admin-bot file(s) on LIVE VPS differ from $VPN_ADMIN_BOT_REPO HEAD. Sync prod -> vpn-admin-bot."
 fi
+
+echo
+echo "=== Summary ==="
+echo "  databyte-Ikev2 files checked: ${#FILES[@]}"
+echo "  databyte-Ikev2 drift count:   $drift_count"
+echo "  vpn-admin-bot files checked:  ${#VPN_ADMIN_BOT_FILES[@]}"
+echo "  vpn-admin-bot drift count:    $vpn_admin_drift"
+echo "  TOTAL drift:                   $((drift_count + vpn_admin_drift))"
 
 total_drift=$((drift_count + vpn_admin_drift))
 if [ $total_drift -gt 0 ]; then
