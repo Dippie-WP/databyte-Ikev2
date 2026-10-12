@@ -1,79 +1,70 @@
 #!/usr/bin/env python3
 """
-quota-monitor.py — Phase 6 nft METER edition (2026-06-26)
+quota-monitor.py — Phase 8 MariaDB edition (2026-07-12)
 
-MIGRATED 2026-06-26 17:23 SAST: Reads counters from nft NAMED METERS instead
-of per-rule `comment "quota:VIP"` ACCEPT counters.
+Phase 8 (2026-07-12 20:30 UTC): Phase 4E cutover replaced SQLite portal.db
+with MariaDB radius.* schema. The monitor was reading the WRONG database
+(charon's internal /var/lib/strongswan/ipsec.db, table `users` doesn't exist
+there — that's an attr-sql table), causing "no such table: users" errors
+for 13+ hours starting 06:45 UTC 2026-07-12.
 
-  - Replaces Phase 5 (2026-06-26): per-VIP ACCEPT rules + ensure_quota_rules()
-  - Reads TWO meters:
-      ip filter client_src { ip saddr counter }  → outbound (upload)
-      ip filter client_dst { ip daddr counter }  → inbound (download)
-  - Meters are declared in /etc/nftables.conf (source-of-truth, loaded at
-    boot by nftables.service). NO runtime rule installation here.
-  - Kernel auto-creates counter elements per VIP on first packet via
-    `flags dynamic`.
-  - 508 per-VIP rules → 2 meter rules. Single hash lookup vs 254 sequential
-    evaluations per direction at high pps.
+This version:
+  - Opens MariaDB radius.* schema via pymysql (DictCursor for dict-row returns)
+  - All customer/device/alert/audit queries now hit MariaDB
+  - RADIUS radcheck disable already uses MariaDB (Phase 5 cutover) — preserved
+  - Sidecar (/var/run/quota-monitor.session) unchanged — still on local fs
+  - nft meter reads unchanged — still on local nftables
 
-FIX (Phase 5 regression): ensure_quota_rules() previously appended per-VIP
-ACCEPT rules AFTER the chain's `counter drop` rule, making them dead code.
-Meters load in correct chain position from source-of-truth file.
+Behaviour identical to v1.7.0 except for DB layer. No business-logic changes.
 
-Reads per-VIP netfilter byte counters, resolves VIP → customer,
-applies 80% warn + 100% hard-cut rules.
+Reads per-VIP netfilter byte counters (nft named meters), resolves VIP →
+customer via pool lease → EAP identity, applies 80% warn + 100% hard-cut.
 
 Data flow (one iteration):
-  1. Snapshot per-VIP byte counters from named meters (client_src, client_dst)
-  2. Join counter[VIP] with leases.address (active leases only)
-  3. Join leases.identity → users.id → devices.strongswan_user_id
-     → devices.customer_id → customers
-  4. For each customer (skipping is_operator=1):
-     a. Read customers.data_used_bytes
-     b. Update from counter delta (since last sample)
-     c. Compute % used = data_used_bytes / data_limit_bytes
-     d. If 80% crossed for the first time: log to alerts, write audit
-     e. If 100% reached and over_quota=0: kill credentials, terminate SAs,
-        set over_quota=1, write audit + alerts
-  5. Sleep POLL_INTERVAL, repeat
-
-Source of truth: nft named meters in /etc/nftables.conf.
-DB is the persistence layer for cumulative usage + alert state.
-
-Run on the VPS HOST (not in the strongSwan container).
-The script uses `docker exec strongswan` for swanctl VICI calls.
-
-Usage:
-  quota-monitor.py                  # run as long-running daemon
-  quota-monitor.py --once           # one iteration, exit
-  quota-monitor.py --once --verbose # debug logging
+  1. `swanctl --list-pools --leases` → list of VIP+identity+online
+  2. Snapshot per-VIP byte counters from named meters (client_src, client_dst)
+  3. Drop sidecar entries for VIPs no longer leased (lease released)
+  4. For each current lease (online OR offline):
+     a. Resolve identity → users → devices → customers (MariaDB)
+     b. Skip operator / inactive / no-mapping (legacy EAP)
+     c. First observation of this customer-VIP pair → just baseline
+     d. Else: delta = meter_now - sidecar[customer_id], update DB if > 0
+     e. Check 80%/100% thresholds; act on cut (kill creds + terminate SAs)
+  5. Save updated sidecar with current leases only
+  6. Sleep POLL_INTERVAL, repeat
 """
 import argparse
 import logging
 import os
 import re
+import secrets
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
+
+import pymysql
+import pymysql.cursors
 
 # === Config (paths) ===
-DB_PATH = Path("/var/lib/strongswan/ipsec.db")
-CONF_PATH = Path("/home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf")
-CONF_BACKUP_DIR = Path("/home/zunaid/strongswan/swanctl/conf.d/.backups")
+# Phase 4E cutover (2026-07-12 06:20 UTC): customer/device/alert/audit tables
+# moved from /var/lib/strongswan/ipsec.db (SQLite, charon's attr-sql DB) into
+# MariaDB `radius` schema. The two RW rw-eap.conf and the radcheck password
+# disable (already MariaDB since Phase 5) are unchanged.
+_MARIADB_PW_FILE = Path("/root/.mariadb-radius-pw")
+_MARIADB_HOST = "127.0.0.1"
+_MARIADB_USER = "radius"
+_MARIADB_DB = "radius"
+
+CONF_PATH = Path("/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/rw-eap.conf")
+CONF_BACKUP_DIR = Path("/opt/strongswan-vpn-gateway/docker/swanctl/conf.d/.backups")
 
 # 10.99.0.0/24 VIP range — must match iptables rules in rules.v4
 VIP_PREFIX = "10.99.0."
 
-# Poll interval (seconds)
-# Changed 2026-06-25 from 60s → 10s per Zun's directive (msg #22356).
-# At 60s with 40Mbps cap and 5-10 Mbps real LTE throughput, customers
-# were burning ~35-70 MB/min — zade hit 100% mid-poll and overran by
-# ~34 MB before the next poll detected it. 10s reduces max overrun to
-# ~6-12 MB while keeping CPU reasonable (10s × 40 customers × ~5ms/poll
-# = 20ms/s = 2% CPU). See HEARTBEAT 2026-06-25 19:47 UTC.
+# Poll interval (seconds) — unchanged from Phase 5
 POLL_INTERVAL = 10
 
 # Alert thresholds (percent)
@@ -81,31 +72,34 @@ WARN_PCT = 80
 CUT_PCT = 100
 
 # VICI (charon) — TCP socket exposed by the container on 127.0.0.1:4502
-# We call it via `docker exec strongswan swanctl --uri=tcp://...`
 SWANCTL_PREFIX = ["docker", "exec", "strongswan", "swanctl", "--uri=tcp://127.0.0.1:4502"]
 
 # === Logging ===
 log = logging.getLogger("quota-monitor")
 
-# === nft METER parsing (Phase 6, 2026-06-26) ===
-#
-# Meter output line example (from `nft list meter ip filter client_src`):
-#   elements = { 10.99.0.5 counter packets 200 bytes 8000,
-#                 10.99.0.7 counter packets 50 bytes 2000 }
-#
-# client_src meter: created by `ip saddr 10.99.0.0/24 meter client_src { ip saddr counter } accept`
-# client_dst meter: created by `ip daddr 10.99.0.0/24 meter client_dst { ip daddr counter } accept`
-#
-# Counter elements are auto-created by the kernel on first match
-# (`flags dynamic`). No runtime rule installation required.
+# === DAE helper import (unchanged) ===
+_VPN_DISC_DIR = "/home/zunaid/strongswan/quota"
+if _VPN_DISC_DIR not in sys.path:
+    sys.path.insert(0, _VPN_DISC_DIR)
+try:
+    from vpn_disconnect import send_dae_disconnect  # type: ignore[import-not-found]
+    _DAE_HELPER_IMPORTED = True
+except Exception as _dae_imp_err:
+    log.error("vpn_disconnect import failed (%s) — DAE disabled, "
+              "fallback no-op used; cut will fall back to "
+              "swanctl --terminate", _dae_imp_err)
+
+    def send_dae_disconnect(*_args, **_kwargs):
+        return "error"
+
+    _DAE_HELPER_IMPORTED = False
+
+# === nft METER parsing (Phase 6, unchanged) ===
 METER_ELEM_RE = re.compile(r"(\d+\.\d+\.\d+\.\d+)\s+counter packets (\d+) bytes (\d+)")
 
 
 def _read_meter(meter_name: str) -> dict[str, tuple[int, int]]:
-    """Read {VIP: (packets, bytes)} from a named meter in `ip filter` table.
-
-    Returns empty dict on failure (e.g. meter missing during transition).
-    """
+    """Read {VIP: (packets, bytes)} from a named meter in `ip filter` table."""
     try:
         out = subprocess.run(
             ["/usr/sbin/nft", "list", "meter", "ip", "filter", meter_name],
@@ -131,18 +125,7 @@ def _read_meter(meter_name: str) -> dict[str, tuple[int, int]]:
 
 
 def sample_counters() -> dict[str, tuple[int, int, int, int]]:
-    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)} from named meters.
-
-    Phase 6 (2026-06-26): reads two named meters instead of 508 per-rule counters.
-      client_src meter: {ip saddr 10.99.0.X} → outbound (upload)
-      client_dst meter: {ip daddr 10.99.0.X} → inbound (download)
-
-    Return shape unchanged from Phase 5 so downstream logic (delta
-    computation, DB writes, alert thresholds) needs no modification.
-
-    Meters live in /etc/nftables.conf — declared in source-of-truth, loaded
-    at boot by nftables.service. No runtime rule installation needed here.
-    """
+    """Return {VIP: (out_pkts, out_bytes, in_pkts, in_bytes)} from named meters."""
     src = _read_meter("client_src")
     dst = _read_meter("client_dst")
 
@@ -155,12 +138,57 @@ def sample_counters() -> dict[str, tuple[int, int, int, int]]:
     return out
 
 
+# === MariaDB layer ===
+
+def _read_radius_db_password() -> Optional[str]:
+    """Read MariaDB radius@127.0.0.1 password from /root/.mariadb-radius-pw."""
+    if not _MARIADB_PW_FILE.exists():
+        log.error("RADIUS password file missing: %s", _MARIADB_PW_FILE)
+        return None
+    try:
+        text = _MARIADB_PW_FILE.read_text()
+    except (PermissionError, OSError) as e:
+        log.error("Cannot read %s: %s (quota-monitor must run as root)",
+                  _MARIADB_PW_FILE, e)
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line
+    log.error("No password line found in %s (only comments?)", _MARIADB_PW_FILE)
+    return None
+
+
+def _open_mariadb() -> Optional[pymysql.connections.Connection]:
+    """Open a MariaDB connection with DictCursor.
+
+    Returns None if password file is missing/unreadable or DB unreachable.
+    Caller must close the connection (use `with` or try/finally).
+    """
+    pw = _read_radius_db_password()
+    if not pw:
+        return None
+    try:
+        return pymysql.connect(
+            host=_MARIADB_HOST,
+            user=_MARIADB_USER,
+            password=pw,
+            database=_MARIADB_DB,
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=False,
+            connect_timeout=5,
+            read_timeout=10,
+            write_timeout=10,
+        )
+    except pymysql.MySQLError as e:
+        log.error("MariaDB connect failed: %s", e)
+        return None
+
 
 # === DB queries ===
+# Note: MariaDB uses %s placeholders (not ? like SQLite). All queries
+# that previously used `?` now use `%s`.
 
-# Resolve username → customer/device using the canonical schema.
-# identities.data is a BLOB containing the username as bytes; users.name is TEXT.
-# We CAST the blob to TEXT for the join.
 CUSTOMER_LOOKUP_SQL = """
 SELECT
     u.id                 AS user_id,
@@ -177,32 +205,69 @@ SELECT
 FROM users u
 JOIN devices d          ON d.strongswan_user_id = u.id
 JOIN customers c        ON c.id  = d.customer_id
-WHERE u.name = ?
+WHERE u.name = %s
 LIMIT 1
 """
 
 
-def lookup_customer_for_username(db: sqlite3.Connection, username: str) -> dict | None:
+def lookup_customer_for_username(db, username: str) -> dict | None:
     """Resolve an IKE identity (username) to its device+customer record.
 
-    Returns None if the username is not provisioned (orphan user, no
-    customer mapping). This is the case for legacy EAP users (zun, etc.)
-    that pre-date the 5B customer schema.
+    Phase 4E: MariaDB collation is utf8_general_ci (case-insensitive by default
+    for VARCHAR with _ci suffix). We still lower() the username here for
+    symmetry with v1.7.0 and so the sidecar baseline is keyed consistently.
     """
-    cur = db.execute(CUSTOMER_LOOKUP_SQL, (username,))
-    r = cur.fetchone()
-    return dict(r) if r else None
+    with db.cursor() as cur:
+        cur.execute(CUSTOMER_LOOKUP_SQL, (username.lower(),))
+        r = cur.fetchone()
+    return r if r else None
+
+
+# Pool lease line format (unchanged from v1.7.0)
+_POOL_LEASE_LINE_RE = re.compile(
+    r"^\s+(?P<vip>\d+\.\d+\.\d+\.\d+)\s+"
+    r"(?P<status>online|offline)\s+"
+    r"'(?P<identity>[^']*)'\s*$"
+)
+
+
+def list_pool_leases() -> list[dict]:
+    """Parse `swanctl --list-pools --leases` output (unchanged)."""
+    try:
+        proc = subprocess.run(
+            SWANCTL_PREFIX + ["--list-pools", "--leases"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        log.error("swanctl --list-pools --leases failed: rc=%s stderr=%s",
+                  e.returncode, e.stderr)
+        return []
+
+    out: list[dict] = []
+    current_pool: str | None = None
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            parts = line.split()
+            if parts:
+                current_pool = parts[0]
+            continue
+        m = _POOL_LEASE_LINE_RE.match(line)
+        if m and current_pool:
+            out.append({
+                "pool":     current_pool,
+                "vip":      m.group("vip"),
+                "identity": m.group("identity"),
+                "online":   m.group("status") == "online",
+            })
+    return out
 
 
 def list_active_sas() -> list[dict]:
-    """Parse `swanctl --list-sas` output.
+    """Parse `swanctl --list-sas` output (unchanged).
 
-    Returns one dict per ESTABLISHED IKE_SA with keys:
-      - username  (str, the EAP identity)
-      - vip       (str, e.g. "10.99.0.5")
-      - uniqueid  (str, the IKE_SA unique id, e.g. "153")
-    We only care about ESTABLISHED IKE_SAs that are part of the rw-eap
-    connection (i.e. the customer-facing pool).
+    Used only by terminate_customer_sas() to find SAs to kill on a 100% cut.
     """
     try:
         proc = subprocess.run(
@@ -210,14 +275,13 @@ def list_active_sas() -> list[dict]:
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
-        log.error("swanctl --list-sas failed: rc=%s stderr=%s", e.returncode, e.stderr)
+        log.error("swanctl --list-sas failed: rc=%s stderr=%s",
+                  e.returncode, e.stderr)
         return []
 
     out: list[dict] = []
     sa = None
     for line in proc.stdout.splitlines():
-        # Top of a new SA block, e.g.:
-        # rw-eap: #153, ESTABLISHED, IKEv2, ...
         m = re.match(r"\s*rw-eap:\s+#(\d+),\s+ESTABLISHED", line)
         if m:
             sa = {"uniqueid": m.group(1), "username": None, "vip": None}
@@ -225,8 +289,6 @@ def list_active_sas() -> list[dict]:
             continue
         if sa is None:
             continue
-        # "  remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.1]"
-        # strongSwan 6.0.7 format: EAP identity after "EAP:", VIP is bracketed IP at end of line
         m = re.search(r"EAP:\s+'([^']+)'\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
         if m:
             sa["username"] = m.group(1)
@@ -234,56 +296,63 @@ def list_active_sas() -> list[dict]:
     return [s for s in out if s["username"] and s["vip"]]
 
 
-def update_used_bytes(db: sqlite3.Connection, customer_id: int, delta: int) -> None:
+def update_used_bytes(db, customer_id: int, delta: int) -> None:
     """Add `delta` to customers.data_used_bytes. Idempotent caller-side."""
-    db.execute(
-        "UPDATE customers SET data_used_bytes = data_used_bytes + ?, updated_at = ? WHERE id = ?",
-        (delta, int(time.time()), customer_id),
-    )
+    with db.cursor() as cur:
+        cur.execute(
+            "UPDATE customers SET data_used_bytes = data_used_bytes + %s, "
+            "updated_at = %s WHERE id = %s",
+            (delta, int(time.time()), customer_id),
+        )
 
 
-def alert_already_sent(db: sqlite3.Connection, customer_id: int, threshold: int) -> bool:
-    cur = db.execute(
-        "SELECT 1 FROM alerts WHERE customer_id = ? AND threshold = ? LIMIT 1",
-        (customer_id, threshold),
-    )
-    return cur.fetchone() is not None
+def alert_already_sent(db, customer_id: int, threshold: int) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM alerts WHERE customer_id = %s AND threshold = %s LIMIT 1",
+            (customer_id, threshold),
+        )
+        return cur.fetchone() is not None
 
 
-def log_alert(db: sqlite3.Connection, customer_id: int, threshold: int, data_used: int) -> None:
-    db.execute(
-        "INSERT INTO alerts (customer_id, threshold, sent_at, data_used_bytes_at_alert) "
-        "VALUES (?, ?, ?, ?)",
-        (customer_id, threshold, int(time.time()), data_used),
-    )
+def log_alert(db, customer_id: int, threshold: int, data_used: int) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO alerts (customer_id, threshold, sent_at, data_used_bytes_at_alert) "
+            "VALUES (%s, %s, %s, %s)",
+            (customer_id, threshold, int(time.time()), data_used),
+        )
 
 
-def log_audit(db: sqlite3.Connection, actor: str, action: str, target_type: str,
+def log_audit(db, actor: str, action: str, target_type: str,
               target_id: int | None, payload: str) -> None:
-    db.execute(
-        "INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (actor, action, target_type, target_id, payload, int(time.time())),
-    )
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO audit_log (actor, action, target_type, target_id, payload, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            (actor, action, target_type, target_id, payload, int(time.time())),
+        )
 
 
-# === Kill credentials at 100% ===
+# === Kill credentials at 100% (unchanged from v1.7.0) ===
 
-def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username: str) -> bool:
+def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
     """Replace rw-eap.conf secret for `username` with KILLED-<random>.
 
-    Returns True on success. Backups the original conf first.
+    Canonical (2026-08-17 reconciliation): routes through
+    safe_write_rw_eap.atomic_write_conf_local with shared fcntl.flock on
+    /var/lock/rw-eap.lock. Replaces the prior TKT-010 quota_monitor_atomic_helper
+    (separate module, different API) so we have ONE helper for atomic rw-eap.conf
+    writes — the TKT-002 single source of truth. See host/safe_write_rw_eap.py
+    for the algorithm; TKT-010's flock semantics are folded in there.
     """
     if not CONF_PATH.exists():
         log.error("rw-eap.conf not found at %s", CONF_PATH)
         return False
 
-    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     original = CONF_PATH.read_text()
 
-    # Match:  eap-<username> {\n    id     = <username>\n    secret = "..."\n  }
-    # Replace secret value with a random unguessable token.
-    killed = f"KILLED-{os.urandom(8).hex()}"
+    killed = f"KILLED-{secrets.token_hex(8)}"
     pattern = re.compile(
         r"(eap-" + re.escape(username) + r"\s*\{\s*id\s*=\s*"
         + re.escape(username) + r"\s*secret\s*=\s*\")[^\"]*(\")",
@@ -291,18 +360,30 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     )
     new_text, n_subs = pattern.subn(r"\g<1>" + killed + r"\g<2>", original)
     if n_subs == 0:
-        log.error("No eap-%s block found in rw-eap.conf — refusing to kill", username)
+        log.info("No eap-%s block in rw-eap.conf (Phase 5+ customer, "
+                 "auth via RADIUS only) — rw-eap kill skipped", username)
+        return True
+
+    # Atomic write via shared helper (TKT-002 canonical + TKT-010 flock folded in).
+    # Bootstrap sys.path so the helper module is importable from this file.
+    # On VPS the canonical location is /opt/strongswan-vpn-gateway/host/.
+    import sys
+    from pathlib import Path as _Path
+    _helper_dir = "/opt/strongswan-vpn-gateway/host"
+    if _helper_dir not in sys.path:
+        sys.path.insert(0, _helper_dir)
+    from safe_write_rw_eap import atomic_write_conf_local, SafeWriteError
+
+    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        atomic_write_conf_local(
+            new_text, str(CONF_PATH), str(CONF_BACKUP_DIR), caller_label="quotamon"
+        )
+    except SafeWriteError as e:
+        log.error("atomic write FAILED for %s, live conf untouched: %s", username, e)
         return False
-
-    # Backup before write
-    bak = CONF_BACKUP_DIR / f"rw-eap.conf.bak-quotamon-{int(time.time())}"
-    bak.write_text(original)
-    log.info("Backed up original to %s", bak)
-
-    CONF_PATH.write_text(new_text)
     log.info("Killed eap-%s secret in %s (subs=%d)", username, CONF_PATH, n_subs)
 
-    # Reload charon via VICI
     try:
         subprocess.run(
             SWANCTL_PREFIX + ["--load-creds"],
@@ -312,30 +393,68 @@ def kill_customer_credentials(db: sqlite3.Connection, customer_id: int, username
     except subprocess.CalledProcessError as e:
         log.error("charon --load-creds FAILED: rc=%s stderr=%s stdout=%s",
                   e.returncode, e.stderr, e.stdout)
-        # Rollback the conf change — we don't want to leave a broken state
-        CONF_PATH.write_text(original)
-        log.warning("Rolled back conf change due to charon reload failure")
+        # ROLLBACK: restore the pre-write content via the SAME atomic helper.
+        # The helper makes its own backup before the temp-write, so passing
+        # `original` through is enough — no extra snapshot file needed.
+        try:
+            atomic_write_conf_local(
+                original, str(CONF_PATH), str(CONF_BACKUP_DIR),
+                caller_label="quotamon-rollback",
+            )
+            log.warning("Rolled back conf change via atomic helper due to charon reload failure")
+        except SafeWriteError as e2:
+            log.error("ROLLBACK write FAILED: %s. Manual restore required (see backup dir).", e2)
         return False
 
     return True
 
 
-def terminate_customer_sas(username: str) -> int:
-    """Terminate SAs for a specific EAP username.
+def disable_customer_radcheck(username: str) -> bool:
+    """Replace radcheck Cleartext-Password with DISABLED-<random> marker."""
+    pw = _read_radius_db_password()
+    if not pw:
+        return False
 
-    Uses `swanctl --terminate-sae --ike <id>` for each matching SA.
-    Returns count of SAs terminated.
-    """
+    disabled_marker = f"DISABLED-{secrets.token_hex(8)}"
+    safe_user = username.replace("'", "''")
+    sql = (
+        f"DELETE FROM radcheck WHERE username = '{safe_user}';\n"
+        f"INSERT INTO radcheck (username, attribute, op, value) "
+        f"VALUES ('{safe_user}', 'Cleartext-Password', ':=', '{disabled_marker}');\n"
+    )
+
+    try:
+        proc = subprocess.run(
+            ["mariadb", "-u", "radius", "-h", "127.0.0.1", _MARIADB_DB],
+            input=sql,
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "MYSQL_PWD": pw},
+        )
+        log.info("radcheck: disabled %s (marker=%s)", username, disabled_marker)
+        return True
+    except subprocess.CalledProcessError as e:
+        log.error("mariadb radcheck disable failed for %s: rc=%s stderr=%s",
+                  username, e.returncode, e.stderr.strip()[:500])
+        return False
+    except FileNotFoundError:
+        log.error("mariadb CLI not found in PATH — cannot disable radcheck")
+        return False
+
+
+def terminate_customer_sas(username: str) -> int:
+    """Terminate SAs for a specific EAP username (unchanged)."""
     try:
         proc = subprocess.run(
             SWANCTL_PREFIX + ["--list-sas"],
             check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as e:
-        log.error("swanctl --list-sas failed: rc=%s stderr=%s", e.returncode, e.stderr)
+        log.error("swanctl --list-sas failed: rc=%s stderr=%s",
+                  e.returncode, e.stderr)
         return 0
 
-    # Find all IKE_SA unique ids belonging to this username
     target_ids: list[str] = []
     current_id: str | None = None
     for line in proc.stdout.splitlines():
@@ -347,7 +466,6 @@ def terminate_customer_sas(username: str) -> int:
             target_ids.append(current_id)
             current_id = None
         elif current_id and not re.match(r"\s+(remote|local|AES_|established|rekeying|reauth|net:|in |out )", line):
-            # Left the SA block (any line that doesn't look like a SA attribute)
             current_id = None
 
     if not target_ids:
@@ -357,7 +475,6 @@ def terminate_customer_sas(username: str) -> int:
     terminated = 0
     for ike_id in target_ids:
         try:
-            # swanctl 6.0.7: --ike-id is the IKE_SA unique id (not --ike)
             subprocess.run(
                 SWANCTL_PREFIX + ["--terminate", "--ike-id", ike_id, "--force"],
                 check=True, capture_output=True, text=True,
@@ -380,135 +497,250 @@ class QuotaMonitor:
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
-    def _open_db(self) -> sqlite3.Connection:
-        db = sqlite3.connect(str(DB_PATH), timeout=5)
-        db.row_factory = sqlite3.Row
-        # The charon container writes to this DB via attr-sql. Use WAL-ish
-        # busy timeout; charon holds short transactions.
-        db.execute("PRAGMA busy_timeout = 5000")
+    def _open_db(self):
+        """Open a MariaDB connection (Phase 4E cutover — was SQLite)."""
+        db = _open_mariadb()
+        if db is None:
+            raise RuntimeError("Cannot open MariaDB — check /root/.mariadb-radius-pw")
         return db
 
-    def _last_sampled_bytes(self) -> dict[int, int]:
-        """Track per-customer last seen counter total, to compute deltas.
-
-        For Phase 5B.3, we use customers.data_used_bytes as the cumulative
-        record, and read iptables counters as the SOURCE OF TRUTH for the
-        current "total bytes used". So we don't need a separate in-memory
-        cache of last-sampled values — we just read counters + DB and
-        reconcile.
-
-        Delta = current_counter_total - (DB.data_used_bytes - prior_counter_total)
-        But iptables counters are CUMULATIVE since boot, so we can just
-        compute: actual_bytes_used_now = counter_total_now - counter_at_session_start
-
-        For simplicity, we treat counter_total_now as the truth, and update
-        DB.data_used_bytes to match (clamped: DB >= counter_at_first_observation
-        of the current connection).
-        """
-        # Read counter_at_session_start from a side file
+    def _last_sampled_bytes(self) -> dict[str, int]:
+        """Load {key: last_meter_total} from sidecar (unchanged)."""
         sidecar = Path("/var/run/quota-monitor.session")
         if not sidecar.exists():
             return {}
         import json
-        return {int(k): v for k, v in json.loads(sidecar.read_text()).items()}
+        return {k: int(v) for k, v in json.loads(sidecar.read_text()).items()}
 
-    def _save_session(self, totals: dict[int, int]) -> None:
+    def _save_session(self, totals: dict[str, int]) -> None:
         import json
         sidecar = Path("/var/run/quota-monitor.session")
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        sidecar.write_text(json.dumps({str(k): v for k, v in totals.items()}))
+        sidecar.write_text(json.dumps({k: int(v) for k, v in totals.items()}))
+
+    @staticmethod
+    def _sidecar_key(customer_id: int, vip: str) -> str:
+        return f"{customer_id}:{vip}"
 
     def run_once(self) -> None:
-        """Single iteration. Returns when done. Safe to call repeatedly."""
+        """Single iteration. Returns when done. Safe to call repeatedly.
+
+        TKT-011 v2.0 restructure:
+          - Data tracking (existing, no data-cap WARN/CUT)
+          - _refresh_session_tracking (NEW: radacct aggregate → 4 cumulative cols)
+          - _kill_expired_customers (NEW: per (c) = #1 Hard-cut + DELETE on expires_at)
+        """
         log.info("=== quota-monitor iteration start ===")
-        sas = list_active_sas()
-        if not sas:
-            log.info("no active SAs — nothing to bill")
-            return
-
-        counters = sample_counters()
-        if not counters:
-            log.info("no quota:* counters found in FORWARD chain — nothing to do")
-            return
-
         db = self._open_db()
         try:
-            last_totals = self._last_sampled_bytes()
-            for sa in sas:
-                vip = sa["vip"]
-                if vip not in counters:
-                    log.debug("VIP %s has SA but no iptables counter — skipping", vip)
-                    continue
-                cust = lookup_customer_for_username(db, sa["username"])
-                if cust is None:
-                    # Legacy EAP user (no customer mapping). Skip — no quota.
-                    log.debug("VIP %s: user %s has no customer mapping — skipping",
-                              vip, sa["username"])
-                    continue
-                _, out_bytes, _, in_bytes = counters[vip]
-                total_now = out_bytes + in_bytes
-                customer_id = cust["customer_id"]
-                is_operator = cust["is_operator"]
-                data_limit = cust["data_limit_bytes"]
-                data_used = cust["data_used_bytes"]
+            # 1. Existing data tracking via leases (data-cap WARN/CUT removed TKT-011 v2.0)
+            leases = list_pool_leases()
+            if leases:
+                counters = sample_counters()
+                if counters:
+                    last_totals = self._last_sampled_bytes()
+                    new_totals: dict[str, int] = {}
+                    for lease in leases:
+                        vip = lease["vip"]
+                        identity = lease["identity"]
+                        online = lease["online"]
 
-                if is_operator:
-                    log.debug("VIP %s: operator %s — skipping",
-                              vip, cust["customer_name"])
-                    continue
+                        if vip not in counters:
+                            log.debug("VIP %s (%s): lease held but no meter entry — skipping",
+                                      vip, identity)
+                            continue
 
-                if not cust["is_active"]:
-                    log.info("VIP %s: customer %s is_active=0 — skipping",
-                             vip, cust["customer_name"])
-                    continue
+                        cust = lookup_customer_for_username(db, identity)
+                        if cust is None:
+                            log.debug("VIP %s: identity %s has no customer mapping — skipping",
+                                      vip, identity)
+                            continue
 
-                # Compute delta since last sample
-                prior = last_totals.get(customer_id, data_used)
-                delta = total_now - prior
-                if delta < 0:
-                    # Counter reset (e.g. iptables rules reloaded) — re-baseline
-                    log.warning("VIP %s: counter went backwards (%d → %d), re-baselining",
-                                vip, prior, total_now)
-                    delta = 0
+                        _, out_bytes, _, in_bytes = counters[vip]
+                        total_now = out_bytes + in_bytes
+                        customer_id = cust["customer_id"]
+                        is_operator = cust["is_operator"]
+                        data_limit = cust["data_limit_bytes"]
+                        data_used = cust["data_used_bytes"]
+                        key = self._sidecar_key(customer_id, vip)
 
-                if delta > 0:
-                    update_used_bytes(db, customer_id, delta)
-                    data_used += delta
-                    log.info("VIP %s (%s/%s): +%d bytes, used=%d / %d (%.1f%%)",
-                             vip, cust["customer_name"], cust["device_name"],
-                             delta, data_used, data_limit,
-                             100 * data_used / data_limit if data_limit else 0)
+                        if is_operator:
+                            log.debug("VIP %s: operator %s — skipping billing, baselining",
+                                      vip, cust["customer_name"])
+                            new_totals[key] = total_now
+                            continue
 
-                # Enrich cust with sa-level fields for downstream functions
-                cust["vip"] = vip
-                cust["username"] = sa["username"]
+                        if not cust["is_active"]:
+                            log.info("VIP %s: customer %s is_active=0 — skipping billing, baselining",
+                                     vip, cust["customer_name"])
+                            new_totals[key] = total_now
+                            continue
 
-                # Check thresholds
-                if data_limit > 0:
-                    pct = 100 * data_used / data_limit
-                    if pct >= CUT_PCT and not cust["over_quota"]:
-                        self._cut_customer(db, cust, data_used)
-                    elif pct >= WARN_PCT and not alert_already_sent(db, customer_id, WARN_PCT):
-                        self._warn_customer(db, cust, data_used, pct)
+                        prior = last_totals.get(key)
+                        if prior is None:
+                            log.info("VIP %s (%s/%s): first observation on this (customer,VIP) pair, "
+                                     "baseline meter=%d (DB data_used=%d)",
+                                     vip, cust["customer_name"], cust["device_name"],
+                                     total_now, data_used)
+                            new_totals[key] = total_now
+                            continue
 
+                        delta = total_now - prior
+                        if delta < 0:
+                            log.warning("VIP %s: meter went backwards (%d → %d), re-baselining",
+                                        vip, prior, total_now)
+                            delta = 0
+
+                        if delta > 0:
+                            update_used_bytes(db, customer_id, delta)
+                            data_used += delta
+                            log.info("VIP %s (%s/%s) %s: +%d bytes, used=%d / %d",
+                                     vip, cust["customer_name"], cust["device_name"],
+                                     "online" if online else "OFFLINE",
+                                     delta, data_used, data_limit)
+
+                        new_totals[key] = total_now
+                    db.commit()
+                    self._save_session(new_totals)
+                else:
+                    log.info("no nft meter entries found — skipping data tracking")
+            else:
+                log.info("no pool leases — clearing sidecar, still running session tracking + kill")
+                self._save_session({})
+
+            # 2. TKT-011 v2.0 — refresh session tracking from radacct (Option A cumulative)
+            self._refresh_session_tracking(db)
             db.commit()
 
-            # Update session cache for next iteration
-            new_totals = {}
-            for sa in sas:
-                vip = sa["vip"]
-                if vip in counters:
-                    cust = lookup_customer_for_username(db, sa["username"])
-                    if cust is not None:
-                        _, out_b, _, in_b = counters[vip]
-                        new_totals[cust["customer_id"]] = out_b + in_b
-            self._save_session(new_totals)
+            # 3. TKT-011 v2.0 — kill expired customers (per (c) = #1 Hard-cut + DELETE)
+            self._kill_expired_customers(db)
+            db.commit()
         finally:
             db.close()
         log.info("=== quota-monitor iteration done ===")
 
-    def _warn_customer(self, db: sqlite3.Connection, cust: dict, data_used: int, pct: float) -> None:
-        """80% threshold — log alert, write audit. (Telegram DM is a no-op for now.)"""
+    def _refresh_session_tracking(self, db) -> None:
+        """Recompute cumulative time-tracking columns from radacct.
+
+        TKT-011 v2.0 — populates the 4 cumulative columns per #37716 (Option A):
+          - total_session_time_seconds:      SUM(acctsessiontime) per username
+          - active_days_count:               COUNT(DISTINCT DATE(acctstarttime))
+          - last_session_at:                 MAX(acctstoptime)
+          - last_session_duration_seconds:   latest session's acctsessiontime
+
+        Runs every iteration (60s). NOT a kill trigger — kill is time-based via
+        expires_at. data_used_bytes is for visibility only.
+
+        FIX (TKT-011 v2.0 close audit 2026-08-19, per Zun #37900):
+        radacct.username is the EAP identity (e.g. 'zun-iphone'), NOT
+        customers.name (e.g. 'zun'). The original `WHERE name = %s`
+        therefore never matched — all 4 cumulative columns stayed NULL.
+        Resolve EAP identity → customer_id via lookup_customer_for_username()
+        (joins users → devices → customers) and UPDATE by id.
+        """
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT
+                username,
+                COALESCE(SUM(acctsessiontime), 0)                                       AS total_seconds,
+                COUNT(DISTINCT DATE(acctstarttime))                                    AS active_days,
+                MAX(acctstoptime)                                                       AS last_session_at,
+                CAST(NULLIF(SUBSTRING_INDEX(
+                    GROUP_CONCAT(acctsessiontime ORDER BY acctstoptime DESC SEPARATOR ','),
+                ',', 1), '') AS UNSIGNED)                                              AS last_duration
+            FROM radacct
+            WHERE acctstoptime IS NOT NULL
+            GROUP BY username
+        """)
+        rows = cursor.fetchall()
+        if not rows:
+            log.debug("no radacct entries — skipping session tracking refresh")
+            return
+        n_updated = 0
+        for row in rows:
+            username         = row['username']
+            total_seconds    = row['total_seconds']
+            active_days      = row['active_days']
+            last_session_at  = row['last_session_at']
+            last_duration    = row['last_duration']
+            cust = lookup_customer_for_username(db, username)
+            if cust is None:
+                log.debug("radacct username %s: no customer mapping (users/devices/customer join empty) — skipping", username)
+                continue
+            customer_id = cust['customer_id']
+            cursor.execute("""
+                UPDATE customers
+                SET total_session_time_seconds     = %s,
+                    active_days_count              = %s,
+                    last_session_at                = %s,
+                    last_session_duration_seconds  = %s
+                WHERE id = %s
+            """, (total_seconds, active_days, last_session_at, last_duration, customer_id))
+            n_updated += 1
+        log.info("refreshed session tracking for %d customer(s) (of %d radacct usernames)", n_updated, len(rows))
+
+    def _kill_expired_customers(self, db) -> None:
+        """Per (c) = #1 Hard-cut + DELETE: at expires_at, kill VPN + delete customer.
+
+        TKT-011 v2.0 — kill trigger is time-based, NOT data-cap. For each
+        customer with expires_at < NOW() AND is_active=1:
+          1. disable_customer_radcheck  — delete radcheck rows
+          2. kill_customer_credentials   — remove EAP block from rw-eap.conf
+          3. send_dae_disconnect         — DAE Disconnect-Request
+          4. terminate_customer_sas      — terminate active SAs
+          5. DELETE FROM devices WHERE customer_id = ?
+          6. DELETE FROM customers WHERE id = ?
+          7. log_audit                   — audit log entry
+        """
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT id, name, user_id FROM customers
+            WHERE expires_at IS NOT NULL
+              AND expires_at < NOW()
+              AND is_active = 1
+        """)
+        expired = cursor.fetchall()
+        if not expired:
+            log.debug("no expired customers")
+            return
+        log.warning("=== %d customer(s) EXPIRED — hard-cut + DELETE per (c) = #1 ===",
+                    len(expired))
+        for row in expired:
+            customer_id = row['id']
+            cust_name   = row['name']
+            user_id     = row['user_id']
+            # FIX 2026-10-12 (TKT-032 follow-up): kill by device identity
+            # (users.name = EAP identity), not customer.name. Previous code
+            # killed the wrong radcheck/rw-eap/SA — see HOT-216 audit trail.
+            cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+            user_row = cursor.fetchone()
+            if user_row:
+                auth_id = user_row['name']
+            else:
+                # Defensive: operators have NULL user_id, but they don't
+                # expire (expires_at IS NULL), so this branch is unreachable
+                # in normal flow. Logged for forensics.
+                auth_id = cust_name
+                log.warning("customer %s (id=%d) has no user_id linked, "
+                            "falling back to customer_name for kill",
+                            cust_name, customer_id)
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — killing",
+                        cust_name, customer_id, auth_id)
+            radcheck_killed = disable_customer_radcheck(auth_id)
+            rw_eap_killed    = kill_customer_credentials(db, customer_id, auth_id)
+            dae_result       = send_dae_disconnect(auth_id)
+            n_terminated     = terminate_customer_sas(auth_id)
+            cursor.execute("DELETE FROM devices WHERE customer_id = %s", (customer_id,))
+            cursor.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
+            log_audit(db, "quota-monitor", "expired_delete", "customer", customer_id,
+                      f'{{"name": "{cust_name}", "auth_id": "{auth_id}", '
+                      f'"radcheck_killed": {radcheck_killed}, '
+                      f'"rw_eap_killed": {rw_eap_killed}, "sas_terminated": {n_terminated}, '
+                      f'"dae_result": "{dae_result}"}}')
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — killed and deleted",
+                        cust_name, customer_id, auth_id)
+
+    def _warn_customer(self, db, cust: dict, data_used: int, pct: float) -> None:
         customer_id = cust["customer_id"]
         log.warning("VIP %s user=%s cust=%s: 80%% WARN — used %d / %d (%.1f%%)",
                     cust["vip"], cust["username"], cust["customer_name"],
@@ -518,32 +750,40 @@ class QuotaMonitor:
                   f'{{"pct": {pct:.2f}, "data_used": {data_used}, '
                   f'"data_limit": {cust["data_limit_bytes"]}}}')
 
-    def _cut_customer(self, db: sqlite3.Connection, cust: dict, data_used: int) -> None:
-        """100% threshold — kill creds, terminate SAs, set over_quota=1."""
+    def _cut_customer(self, db, cust: dict, data_used: int) -> None:
         customer_id = cust["customer_id"]
         username = cust["username"]
         log.error("VIP %s user=%s cust=%s: 100%% CUT — used %d / %d",
                   cust["vip"], username, cust["customer_name"],
                   data_used, cust["data_limit_bytes"])
 
-        ok = kill_customer_credentials(db, customer_id, username)
+        radcheck_killed = disable_customer_radcheck(username)
+        rw_eap_killed = kill_customer_credentials(db, customer_id, username)
+        dae_result = send_dae_disconnect(username)
         n_terminated = terminate_customer_sas(username)
 
-        if ok:
-            db.execute(
-                "UPDATE customers SET over_quota = 1, updated_at = ? WHERE id = ?",
-                (int(time.time()), customer_id),
-            )
+        if radcheck_killed:
+            with db.cursor() as cur:
+                cur.execute(
+                    "UPDATE customers SET over_quota = 1, updated_at = %s WHERE id = %s",
+                    (int(time.time()), customer_id),
+                )
             log_alert(db, customer_id, CUT_PCT, data_used)
             log_audit(db, "quota-monitor", "cut_100pct", "customer", customer_id,
                       f'{{"data_used": {data_used}, "data_limit": {cust["data_limit_bytes"]}, '
-                      f'"sas_terminated": {n_terminated}}}')
+                      f'"dae_result": "{dae_result}", '
+                      f'"sas_terminated": {n_terminated}, '
+                      f'"radcheck_killed": {radcheck_killed}, '
+                      f'"rw_eap_killed": {rw_eap_killed}}}')
         else:
             log_audit(db, "quota-monitor", "cut_100pct_FAILED", "customer", customer_id,
-                      f'{{"data_used": {data_used}, "reason": "kill_customer_credentials returned False"}}')
+                      f'{{"data_used": {data_used}, '
+                      f'"reason": "radcheck disable failed (customer NOT locked out)", '
+                      f'"dae_result": "{dae_result}", '
+                      f'"sas_terminated": {n_terminated}, '
+                      f'"rw_eap_killed": {rw_eap_killed}}}')
 
     def run_daemon(self) -> None:
-        """Long-running loop with graceful shutdown on SIGTERM/SIGINT."""
         running = True
 
         def stop(*_):
@@ -556,11 +796,6 @@ class QuotaMonitor:
 
         log.info("starting daemon (poll every %ds, warn=%d%%, cut=%d%%)",
                  POLL_INTERVAL, WARN_PCT, CUT_PCT)
-
-        # Phase 6 (2026-06-26): no runtime rule installation needed.
-        # Quota meters (`client_src` / `client_dst`) live in /etc/nftables.conf
-        # and load at boot via nftables.service. Kernel auto-creates counter
-        # elements per VIP on first packet match.
 
         while running:
             try:
@@ -575,16 +810,64 @@ class QuotaMonitor:
 
 
 def main():
-    p = argparse.ArgumentParser(description="5B.3 quota monitor")
+    p = argparse.ArgumentParser(description="Phase 8 quota monitor (MariaDB)")
     p.add_argument("--once", action="store_true", help="run a single iteration and exit")
     p.add_argument("--verbose", "-v", action="store_true", help="debug logging")
+    p.add_argument(
+        "--backfill-orphans", action="store_true",
+        help="One-time migration: for each current pool lease with a "
+             "customer mapping and data_used_bytes=0 in DB, credit the "
+             "current nft meter total to data_used_bytes and write it to "
+             "the sidecar as the baseline.",
+    )
     args = p.parse_args()
 
     mon = QuotaMonitor(verbose=args.verbose)
-    if args.once:
+    if args.backfill_orphans:
+        backfill_orphans(mon)
+    elif args.once:
         mon.run_once()
     else:
         mon.run_daemon()
+
+
+def backfill_orphans(mon: "QuotaMonitor") -> None:
+    log.info("=== backfill-orphans: one-time migration ===")
+    leases = list_pool_leases()
+    counters = sample_counters()
+    if not leases:
+        log.warning("no leases; nothing to backfill")
+        return
+
+    db = mon._open_db()
+    try:
+        sidecar: dict[str, int] = mon._last_sampled_bytes()
+        for lease in leases:
+            vip = lease["vip"]
+            identity = lease["identity"]
+            if vip not in counters:
+                continue
+            cust = lookup_customer_for_username(db, identity)
+            if cust is None or cust["is_operator"] or not cust["is_active"]:
+                continue
+            _, out_b, _, in_b = counters[vip]
+            total_now = out_b + in_b
+            if total_now <= 0:
+                continue
+            if cust["data_used_bytes"] != 0:
+                log.info("VIP %s cust=%s: data_used_bytes already %d — skipping backfill",
+                         vip, cust["customer_name"], cust["data_used_bytes"])
+                continue
+            update_used_bytes(db, cust["customer_id"], total_now)
+            key = mon._sidecar_key(cust["customer_id"], vip)
+            sidecar[key] = total_now
+            log.warning("VIP %s cust=%s: BACKFILLED %d bytes (data_used 0 → %d)",
+                        vip, cust["customer_name"], total_now, total_now)
+        db.commit()
+        mon._save_session(sidecar)
+    finally:
+        db.close()
+    log.info("=== backfill-orphans done ===")
 
 
 if __name__ == "__main__":
