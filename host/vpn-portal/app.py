@@ -349,8 +349,6 @@ def recent_sessions(limit: int = 2, exclude_usernames=None, lookback_days: int =
     return db_query(sql, params)
 
 
-
-
 # ---------- charon / ipBan / firewalld wrappers ----------
 def leases_active() -> list:
     """Currently active virtual-IP leases with customer + device info.
@@ -828,7 +826,6 @@ def write_rw_eap_conf(content: str, _ssh=None) -> None:
             502,
             f"rw-eap.conf write aborted (size mismatch refused): {e}",
         )
-
 
 
 def reload_charon_creds() -> None:
@@ -3024,7 +3021,6 @@ def bulk_customer_action(req: BulkAction, user: dict = Depends(require_session))
     }
 
 
-
 # ---------- v1.3.0 Customer portal (NTC) ----------
 
 class PortalLoginRequest(BaseModel):
@@ -3268,12 +3264,3 @@ async def telegram_webhook(secret: str, request: Request):
     return {"ok": True, "handlers_fired": handlers_fired}
 
 
-# TKT-011 v2.0 — start Telegram bot in background thread (admin-mediated flow).
-# Bot.send_credentials_sync() is called from create_client() after a customer
-# is created. Mock token check: if TELEGRAM_TOKEN starts with 'MOCK_' or
-# contains 'TOKEN_REPLACE_ME', the actual send is skipped (logs only).
-try:
-    import bot
-    bot.start_bot_thread()
-except Exception as e:
-    log.error(f"bot startup failed: {e}")
