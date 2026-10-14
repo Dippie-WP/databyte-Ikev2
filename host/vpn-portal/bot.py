@@ -24,7 +24,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -522,6 +522,139 @@ def send_credentials_sync(
         "send_credentials_sync called telegram_id=%s eap_identity=%s tier=%s (no-op mock)",
         telegram_id, eap_identity, tier_display,
     )
+
+
+async def cmd_bake(update, context):
+    """/bake <id|name> [device_name] - re-bake the Windows .ps1 installer for a customer.
+
+    Mirrors what /create does at step 6/6 (TKT-BAKE block in ct_confirm), but
+    standalone. Reads the existing Cleartext-Password from radcheck, calls
+    build_installer.build_installer(mode="hostile"), sends the .ps1 as a
+    Telegram document. Logs to audit.
+
+    HOT-244: refuses is_operator=1 customers (hard, no override).
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: /bake <id|name> [device_name]")
+        return
+    audit("bake", arg=context.args)
+    import app
+
+    arg = context.args[0]
+    device_filter = context.args[1] if len(context.args) > 1 else None
+
+    # 1. Look up customer
+    if arg.isdigit():
+        rows = app.db_query("SELECT * FROM customers WHERE id = ?", (int(arg),))
+    else:
+        rows = app.db_query("SELECT * FROM customers WHERE name = ?", (arg,))
+    if not rows:
+        await update.message.reply_text(f"No customer `Zidaan`.")
+        return
+    cust = rows[0]
+    cust_id = cust["id"]
+    cust_name = cust["name"]
+
+    # 2. HOT-244: refuse operator customers
+    if cust.get("is_operator"):
+        await update.message.reply_text(
+            f"❌ REFUSED: customer `Zidaan` is an operator account (is_operator=1). Cannot bake installer for operator."
+        )
+        return
+
+    # 3. Find device(s)
+    if device_filter:
+        devices = app.db_query(
+            "SELECT * FROM devices WHERE customer_id = ? AND device_name = ?",
+            (cust_id, device_filter)
+        )
+    else:
+        devices = app.db_query("SELECT * FROM devices WHERE customer_id = ?", (cust_id,))
+    if not devices:
+        await update.message.reply_text(f"No devices found for customer `Zidaan`.")
+        return
+    if len(devices) > 1 and not device_filter:
+        device_names = ", ".join(f"`{d['device_name']}`" for d in devices)
+        await update.message.reply_text(
+            f"Customer `Zidaan` has {len(devices)} devices ({device_names}). Specify which one: `/bake Zidaan <device_name>`"
+        )
+        return
+    device = devices[0]
+    dn = device["device_name"]
+
+    # 4. Check device type
+    if device.get("device_type") != "Windows":
+        await update.message.reply_text(
+            f"Device `{dn}` is type `{device.get('device_type')}`, not Windows. /bake is only for Windows customers."
+        )
+        return
+
+    # 5. Get EAP identity from users table
+    user_id = device.get("strongswan_user_id")
+    if not user_id:
+        await update.message.reply_text(f"Device `{dn}` has no user_id linked.")
+        return
+    u = app.db_query("SELECT name FROM users WHERE id = ?", (user_id,))
+    if not u:
+        await update.message.reply_text(f"users row missing for id={user_id}.")
+        return
+    eap_identity = u[0]["name"]
+
+    # 6. Get EAP password from radcheck (Cleartext-Password)
+    rc = app.db_query(
+        "SELECT Value FROM radcheck WHERE UserName = ? AND Attribute = ?",
+        (eap_identity, "Cleartext-Password")
+    )
+    if not rc:
+        await update.message.reply_text(f"No Cleartext-Password in radcheck for `{eap_identity}`.")
+        return
+    eap_password = rc[0]["Value"]
+
+    # 7. Bake and send
+    try:
+        import sys, os
+        from io import BytesIO
+        from telegram import InputFile
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts'))
+        from build_installer import build as build_installer_script
+        customer_dict = {
+            "name": cust_name,
+            "display_name": cust.get("display_name") or cust_name,
+        }
+        device_dict = {
+            "device_name": dn,
+            "device_type": "Windows",
+        }
+        bake_result = build_installer_script(
+            customer=customer_dict,
+            device=device_dict,
+            mode="hostile",
+            eap_password=eap_password,
+        )
+        bio = BytesIO(bake_result["content"].encode("utf-8"))
+        bio.name = bake_result["filename"]
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=InputFile(bio, filename=bio.name),
+            caption=(
+                f"Baked Windows installer for `Zidaan` / `{dn}`. "
+                f"Type H (manual entry, hostile networks). "
+                f"Forward this file to the customer — they save it, "
+                f"right-click -> 'Run with PowerShell' (Admin)."
+            ),
+        )
+        audit(
+            "bake_windows_installer",
+            customer=cust_name,
+            device=dn,
+            filename=bake_result["filename"],
+        )
+    except Exception as bake_err:
+        logger.exception("cmd_bake failed: %s", bake_err)
+        await update.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"⚠️ Bake FAILED for `Zidaan`: {bake_err}"
+        )
 
 
 # ---------- Commands ----------
@@ -1174,6 +1307,59 @@ async def ct_confirm(update, context):
     if msg is None:
         return ConversationHandler.END  # edit failed; credentials not sent but customer was created
     schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+
+    # --- TKT-BAKE: Bake + send Windows installer for Type H customers ---
+    # When the operator picks "Windows" as device_type, also generate a
+    # self-contained .ps1 (EAP creds inlined) and send it as a Telegram
+    # document. Closes the gap where the bot previously just showed the
+    # password and forced the operator to manually paste into a template.
+    if dt == "Windows":
+        try:
+            import sys, os
+            from io import BytesIO
+            from telegram import InputFile
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts'))
+            from build_installer import build as build_installer_script
+            customer_dict = {
+                "name": name,
+                "display_name": display,
+            }
+            device_dict = {
+                "device_name": dn,
+                "device_type": dt,
+            }
+            bake_result = build_installer_script(
+                customer=customer_dict,
+                device=device_dict,
+                mode="hostile",
+                eap_password=password,
+            )
+            bio = BytesIO(bake_result["content"].encode("utf-8"))
+            bio.name = bake_result["filename"]
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=InputFile(bio, filename=bio.name),
+                caption=(
+                    f"Baked Windows installer for `{name}` / `{dn}`. "
+                    f"Type H (manual entry, hostile networks). "
+                    f"Forward this file to the customer — they save it, "
+                    f"right-click -> 'Run with PowerShell' (Admin)."
+                ),
+            )
+            audit(
+                "bake_windows_installer",
+                customer=name,
+                device=dn,
+                filename=bake_result["filename"],
+            )
+        except Exception as bake_err:
+            logger.exception("bake_windows_installer failed at ct_confirm: %s", bake_err)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=f"⚠️ Windows installer bake FAILED: {bake_err}. Use /bake {name} {dn} to retry manually.",
+            )
+    # --- END TKT-BAKE ---
+
     return ConversationHandler.END
 
 
@@ -1471,6 +1657,239 @@ async def cmd_logs(update, context):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
+
+async def cmd_orphans(update, context):
+    """Report sync drift between radcheck / users / devices / customers."""
+    audit("orphans")
+    import app
+    from datetime import datetime, timezone, timedelta
+    SAST = timezone(timedelta(hours=2))
+
+    chain = app.db_query("""
+        SELECT r.UserName AS radcheck, u.id AS users_id, d.id AS devices_id,
+               c.id AS customers_id, c.name AS customers_name
+        FROM radcheck r
+        LEFT JOIN users u ON u.name COLLATE utf8mb4_unicode_ci = r.UserName COLLATE utf8mb4_unicode_ci
+        LEFT JOIN devices d ON d.strongswan_user_id = u.id
+        LEFT JOIN customers c ON c.id = d.customer_id
+        WHERE r.Attribute = 'Cleartext-Password' AND r.Value NOT LIKE 'DISABLED-%'
+        ORDER BY r.UserName
+    """)
+    broken = [r for r in chain if not (r['users_id'] and r['devices_id'] and r['customers_id'])]
+
+    users_no_device = app.db_query("""
+        SELECT u.id, u.name FROM users u
+        LEFT JOIN devices d ON d.strongswan_user_id = u.id
+        WHERE d.id IS NULL ORDER BY u.id
+    """)
+    broken_devices = app.db_query("""
+        SELECT d.id, d.strongswan_user_id, d.customer_id, d.device_name
+        FROM devices d LEFT JOIN customers c ON c.id = d.customer_id
+        WHERE c.id IS NULL ORDER BY d.id
+    """)
+    customers_no_devices = app.db_query("""
+        SELECT c.id, c.name FROM customers c
+        WHERE c.is_operator = 0
+          AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.customer_id = c.id)
+        ORDER BY c.id
+    """)
+
+    lines = ["*Orphan audit*", ""]
+    if broken:
+        lines.append(f"*Chain broken ({len(broken)}):*")
+        for r in broken:
+            status = []
+            if not r['users_id']: status.append("NO users")
+            if not r['devices_id']: status.append("NO device")
+            if not r['customers_id']: status.append("NO customer")
+            lines.append(f"- `{r['radcheck']}` -> {', '.join(status)}")
+        lines.append("")
+    else:
+        lines.append(f"*radcheck chain:* all {len(chain)} entries fully linked \u2705")
+        lines.append("")
+
+    if users_no_device:
+        lines.append("*users with no device:*")
+        for r in users_no_device:
+            lines.append(f"- users.id={r['id']} `{r['name']}`")
+        lines.append("")
+    if broken_devices:
+        lines.append("*devices with phantom customer:*")
+        for r in broken_devices:
+            lines.append(f"- device.id={r['id']} (`{r['device_name']}`) -> customer_id={r['customer_id']} (DELETED)")
+        lines.append("")
+    if customers_no_devices:
+        lines.append("*customers with no devices (potential dead):*")
+        for r in customers_no_devices:
+            lines.append(f"- customer.id={r['id']} `{r['name']}`")
+        lines.append("")
+
+    if not (broken or users_no_device or broken_devices or customers_no_devices):
+        lines.append("\u2705 No drift detected.")
+        lines.append("")
+    lines.append(f"_Run at {datetime.now(SAST).strftime('%Y-%m-%d %H:%M')} SAST_")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_deleteuser(update, context):
+    """Delete a customer + sweep ALL associated auth.
+
+    Sweeps (per 'sweep everything on a client delete'):
+      - radcheck: bare-name DISABLED- sentinel + every <customer>-<device> row
+      - users: every device-suffixed name linked via devices.strongswan_user_id
+      - devices: every device where customer_id = X
+      - EAP blocks: bare-name (if present) + every device-suffixed name
+      - customers: the customer row itself
+
+    HOT-244: refuses is_operator=1 customers (hard, no override).
+    Requires 'force' flag if customer has active sessions.
+    """
+    if not context.args:
+        await update.message.reply_text("Usage: `/deleteuser <id|name> [force]`", parse_mode=ParseMode.MARKDOWN)
+        return
+    audit("deleteuser", arg=context.args)
+    import app
+    import re
+
+    arg = context.args[0]
+    force = len(context.args) > 1 and context.args[1].lower() == "force"
+
+    # 1. Look up customer
+    if arg.isdigit():
+        rows = app.db_query("SELECT * FROM customers WHERE id = ?", (int(arg),))
+    else:
+        rows = app.db_query("SELECT * FROM customers WHERE name = ?", (arg,))
+    if not rows:
+        await update.message.reply_text(f"No customer `{arg}`.")
+        return
+    c = rows[0]
+    bare_name = c['name']
+
+    # 2. HOT-244: refuse operator customers -- hard, no override
+    if c.get("is_operator"):
+        await update.message.reply_text(
+            f"\u274c REFUSED: customer `{c['name']}` is an operator account (is_operator=1). "
+            f"Operator customers cannot be deleted via this command. "
+            f"Use the portal admin UI for operator changes."
+        )
+        return
+
+    # 3. Active sessions check
+    active = app.db_query(
+        "SELECT COUNT(*) AS n FROM radacct WHERE UserName IN ("
+        "  SELECT u.name FROM users u INNER JOIN devices d ON d.strongswan_user_id = u.id "
+        "  WHERE d.customer_id = ?) AND AcctStopTime IS NULL",
+        (c['id'],)
+    )
+    active_n = active[0]['n'] if active else 0
+    if active_n > 0 and not force:
+        await update.message.reply_text(
+            f"\u26a0\ufe0f Customer `{c['name']}` has {active_n} active session(s). "
+            f"Disconnect first with `/disconnect {c['name']}` or run "
+            f"`/deleteuser {c['name']} force` to delete anyway."
+        )
+        return
+
+    # 4. Collect ALL usernames to sweep (bare + every device-suffixed)
+    radcheck_names = app.db_query(
+        "SELECT DISTINCT UserName FROM radcheck "
+        "WHERE UserName = ? OR UserName LIKE ?",
+        (bare_name, bare_name + '-%')
+    )
+    usernames = set(r['UserName'] for r in radcheck_names)
+    user_rows = app.db_query(
+        "SELECT u.id, u.name FROM users u "
+        "INNER JOIN devices d ON d.strongswan_user_id = u.id WHERE d.customer_id = ?",
+        (c['id'],)
+    )
+    for u in user_rows:
+        usernames.add(u['name'])
+    usernames.add(bare_name)
+
+    device_rows = app.db_query("SELECT id FROM devices WHERE customer_id = ?", (c['id'],))
+
+    # 5. Transactional DB sweep
+    try:
+        with app.portal_auth._engine().begin() as conn:
+            wrapped = app.portal_auth._Conn(conn)
+            for un in usernames:
+                wrapped.execute("DELETE FROM radcheck WHERE UserName = ?", (un,))
+            for u in user_rows:
+                wrapped.execute("DELETE FROM users WHERE id = ?", (u['id'],))
+            for d in device_rows:
+                wrapped.execute("DELETE FROM devices WHERE id = ?", (d['id'],))
+            wrapped.execute("DELETE FROM customers WHERE id = ?", (c['id'],))
+    except Exception as e:
+        await update.message.reply_text(f"\u274c Delete failed: {e}")
+        return
+
+    # 6. Remove ALL EAP blocks (binary-mode atomic write pattern)
+    if usernames:
+        conf = app.read_rw_eap_conf()
+        for un in usernames:
+            pat = re.compile(rf"\n?\s*eap-{re.escape(un)}\s*\{{[^{{}}]*?\}}\n?", re.DOTALL)
+            conf = pat.sub('', conf, count=1)
+        if 'secrets {' in conf and 'connections {' in conf and conf.rstrip().endswith('}'):
+            app.write_rw_eap_conf(conf)
+
+    # 7. Reload charon
+    app.reload_charon_creds()
+
+    # 8. Report
+    sorted_names = sorted(usernames)
+    lines = [
+        f"*Customer `{c['name']}` deleted (full sweep).*",
+        f"- id: {c['id']}",
+        f"- radcheck rows removed: {len(usernames)} ({', '.join(f'`{n}`' for n in sorted_names)})",
+        f"- users rows removed: {len(user_rows)}",
+        f"- devices rows removed: {len(device_rows)}",
+        f"- EAP blocks removed: up to {len(usernames)} (only present ones actually deleted)",
+        "- charon reloaded",
+    ]
+    if active_n > 0:
+        lines.append(f"_Note: {active_n} active session(s) were force-terminated by 'force'._")
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+
+
+# ---------- Bot Commands (single source of truth) ----------
+#
+# One list drives BOTH the CommandHandler registration (in build_application)
+# and the BotFather menu push (in _post_init_register_commands). To add a
+# new /command: add one row here, restart the bot, done. Don't register
+# commands anywhere else -- keep this list the only registration table.
+BOT_COMMANDS = [
+    ("start",      cmd_start,      "Restart / show welcome"),
+    ("help",       cmd_help,       "Show all commands"),
+    ("status",     cmd_status,     "Live gateway / SA / sessions summary"),
+    ("stats",      cmd_stats,      "Long-term usage stats"),
+    ("sessions",   cmd_sessions,   "List live + recent closed sessions"),
+    ("customers",  cmd_customers,  "List all customers"),
+    ("customer",   cmd_customer,   "Show one customer's devices and status"),
+    ("creds",      cmd_creds,      "Show credentials for a customer/device"),
+    ("disable",    cmd_disable,    "Disable a customer or device"),
+    ("enable",     cmd_enable,     "Re-enable a customer or device"),
+    ("disconnect", cmd_disconnect, "Force-disconnect a live session"),
+    ("logs",       cmd_logs,       "Tail charon.log"),
+    ("bake",       cmd_bake,       "Generate a baked Windows .ps1 installer for a customer"),
+    ("orphans",    cmd_orphans,    "List orphaned EAP identities (no portal device)"),
+    ("deleteuser", cmd_deleteuser, "Delete a customer (with confirmation)"),
+]
+
+
+async def _post_init_register_commands(application: Application) -> None:
+    """Push BOT_COMMANDS to the BotFather /commands menu on bot startup.
+
+    Idempotent -- Telegram replaces the existing list. Runs in both the
+    gunicorn workers and bot-polling at startup; harmless because the API
+    is rate-limited and we only do 1 call per start.
+    """
+    await application.bot.set_my_commands(
+        [BotCommand(name, desc) for name, _handler, desc in BOT_COMMANDS]
+    )
+
+
 # ---------- Build Application ----------
 
 def build_application() -> Application:
@@ -1494,7 +1913,7 @@ def build_application() -> Application:
     }
     persistence = MariaDBPersistence(db_config)
 
-    application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).post_init(_post_init_register_commands).build()
 
     whitelist = filters.User(user_id=ALLOWED_CHAT_ID)
     application.add_handler(MessageHandler(~whitelist, reject_non_admin))
@@ -1560,22 +1979,8 @@ def build_application() -> Application:
     create_conv.persistence_ref = persistence
     application.add_handler(create_conv)
 
-    commands = [
-        ("start", cmd_start),
-        ("help", cmd_help),
-        ("status", cmd_status),
-        ("stats", cmd_stats),
-        ("sessions", cmd_sessions),
-        ("customers", cmd_customers),
-        ("customer", cmd_customer),
-        ("creds", cmd_creds),
-        ("disable", cmd_disable),
-        ("enable", cmd_enable),
-        ("disconnect", cmd_disconnect),
-        ("logs", cmd_logs),
-    ]
-    for cmd, handler in commands:
-        application.add_handler(CommandHandler(cmd, handler, filters=whitelist))
+    for name, handler, _desc in BOT_COMMANDS:
+        application.add_handler(CommandHandler(name, handler, filters=whitelist))
 
     # Inline keyboard callback for /sessions [Disconnect] buttons.
     # Pattern matches callback_data starting with "disc:" (eap_identity follows).
