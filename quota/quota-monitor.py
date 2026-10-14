@@ -694,7 +694,7 @@ class QuotaMonitor:
         """
         cursor = db.cursor()
         cursor.execute("""
-            SELECT id, name FROM customers
+            SELECT id, name, user_id FROM customers
             WHERE expires_at IS NOT NULL
               AND expires_at < NOW()
               AND is_active = 1
@@ -707,19 +707,38 @@ class QuotaMonitor:
                     len(expired))
         for row in expired:
             customer_id = row['id']
-            name        = row['name']
-            log.warning("customer %s (id=%d) EXPIRED — killing", name, customer_id)
-            radcheck_killed = disable_customer_radcheck(name)
-            rw_eap_killed    = kill_customer_credentials(db, customer_id, name)
-            dae_result       = send_dae_disconnect(name)
-            n_terminated     = terminate_customer_sas(name)
+            cust_name   = row['name']
+            user_id     = row['user_id']
+            # FIX 2026-10-12 (TKT-032 follow-up): kill by device identity
+            # (users.name = EAP identity), not customer.name. Previous code
+            # killed the wrong radcheck/rw-eap/SA — see HOT-216 audit trail.
+            cursor.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+            user_row = cursor.fetchone()
+            if user_row:
+                auth_id = user_row['name']
+            else:
+                # Defensive: operators have NULL user_id, but they don't
+                # expire (expires_at IS NULL), so this branch is unreachable
+                # in normal flow. Logged for forensics.
+                auth_id = cust_name
+                log.warning("customer %s (id=%d) has no user_id linked, "
+                            "falling back to customer_name for kill",
+                            cust_name, customer_id)
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — killing",
+                        cust_name, customer_id, auth_id)
+            radcheck_killed = disable_customer_radcheck(auth_id)
+            rw_eap_killed    = kill_customer_credentials(db, customer_id, auth_id)
+            dae_result       = send_dae_disconnect(auth_id)
+            n_terminated     = terminate_customer_sas(auth_id)
             cursor.execute("DELETE FROM devices WHERE customer_id = %s", (customer_id,))
             cursor.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
             log_audit(db, "quota-monitor", "expired_delete", "customer", customer_id,
-                      f'{{"name": "{name}", "radcheck_killed": {radcheck_killed}, '
+                      f'{{"name": "{cust_name}", "auth_id": "{auth_id}", '
+                      f'"radcheck_killed": {radcheck_killed}, '
                       f'"rw_eap_killed": {rw_eap_killed}, "sas_terminated": {n_terminated}, '
                       f'"dae_result": "{dae_result}"}}')
-            log.warning("customer %s (id=%d) EXPIRED — killed and deleted", name, customer_id)
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — killed and deleted",
+                        cust_name, customer_id, auth_id)
 
     def _warn_customer(self, db, cust: dict, data_used: int, pct: float) -> None:
         customer_id = cust["customer_id"]
