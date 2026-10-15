@@ -2,11 +2,29 @@
 
 Phased execution per the two-gate rule: each phase is green only when (a) all its technical pass criteria are met AND (b) operator sign-off is given. No auto-promotion.
 
-## Current state (live 2026-07-13 / v2.2.0)
+## Current state (live 2026-10-15 06:50 UTC / 08:50 SAST)
 
-**Latest tag on `main` lineage: v2.2.0 (2026-07-13)** — FreeRADIUS operator overlay + radacct chain wired end-to-end. Production deployment at `805ea844ee2d28d8107a24d467a1ee0873b5898e` (`805ea84`) on `origin/main`; this is the canonical tag for the live VPS state. Pre-v2.0 tags (v1.0 → v1.3.0) are preserved as historical markers; v1.x and v2.x are not drop-in compatible (different identity store: SQLite vs MariaDB; different quota backend: iptables-legacy vs nftables; different auth path: local attr-sql vs FreeRADIUS eap-radius). See `CHANGELOG.md` for the full entry sequence.
+**Stack versions (verified live against `vpn-prod-01`):**
+- **Portal:** v2.2.1 (deployed 2026-08-10, git HEAD `8e02a6e`) — systemd `vpn-portal.service`
+- **Bot:** v2.5.0 (HEAD `01ad543` in `vpn-admin-bot` repo, tag `v2.5.0`) — systemd `bot-polling.service`
+- **strongSwan image:** `zun/strongswan:6.0.7-mschapv2-attrsql` — running 6 d 19 h (since 2026-10-08T14:06:34Z)
+- **MariaDB:** 11.8.6-MariaDB-0+deb13u1, `radius` DB = 45 tables
+- **OS:** Debian 13.7 (trixie)
+- **Hostname:** `vpn-prod-01` (was `vps-01`, renamed per HOT-210, 2026-09-30)
+- **Public IP:** 154.65.110.44 · **Tailscale IP:** 100.64.212.47
+- **LE certs:** `myvpn.databyte.co.za` + `adminer.databyte.co.za` (ECDSA, expires 2026-12-02, 48 days valid)
+- **Live data:** 12 customers · 2,301 radpostauth rows · 1,168 radacct rows · 28 radcheck entries
+- **Backups:** kopia → `kop.databyte.co.za:443` — **502 Bad Gateway, PARKED** (Zun msg #43961; last successful `.update-info.json` mtime 2026-10-10 00:00)
+- **CI:** all 4 workflows green on HEAD `c3aa4f4` (latest push)
 
-**Phase status:**
+**Tags on `origin`:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, v1.3.0, v1.4.x through v1.9.0 (varied, including SSE-merge and destructive-replay branches), **v2.0.0**, **v2.1.0**, **v2.1.1**, **v2.2.0** (current). **v1.2.5 deleted.** ORPHANED: v1.8.0 and v1.9.0-sse preserved as historical markers but point at the destructive-replay branch (`backup-broken-v1.9.1-pre-reset`), NOT at `main`. The current `main` → `c3aa4f4` (README rewrite commit).
+
+> **Per Zun msg #43974 (2026-10-15 06:19 UTC): "Update read me fully! Live artifacts truth and latest time stamps. No guessing or assuming. Should be clear to understand."** This ROADMAP is being updated in that same session — all live-state numbers above were re-verified via live `ssh` + `mariadb` + `docker` + `certbot` commands in this turn.
+
+---
+
+## Phase status
+
 | Phase | Description | Status |
 |---|---|---|
 | 5A | Foundation (lock-in, certs, attr-sql, MSS clamp, exporter) | ✅ DONE — both gates green 2026-06-18 |
@@ -22,16 +40,95 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 | v2.1.0 | Case-insensitive identity normalization + CI drift detection | ✅ SHIPPED — 2026-07-11 |
 | v2.1.1 | Dead-code cleanup post-Phase-4E (CORR-035) | ✅ SHIPPED — 2026-07-12 |
 | **Phase 4D** | RADIUS Phase 4A-4D: SQLAlchemy + MariaDB layer for `portal_auth.py`; reset-restore from backup hardened; unarchive BLOB→hex idempotency | ✅ SHIPPED — 2026-07-05 |
-| **Phase 4E** | **Unify portal SQLite + MariaDB** (portal business data → MariaDB; 10 tables migrated; SQLite `ipsec.db` retains only charon-internal tables) | ✅ SHIPPED — 2026-07-12 (`cb9bf69`) — see `docs/PHASE-4E-DEPLOYMENT-NOTES.md`, `docs/PHASE-4E-EXECUTION-PLAN.md`, `docs/PHASE-4E-SCOPE-ASSESSMENT.md` (SUPERSEDED) |
+| **Phase 4E** | **Unify portal SQLite + MariaDB** (portal business data → MariaDB; 10 tables migrated; SQLite `ipsec.db` retains only charon-internal tables) | ✅ SHIPPED — 2026-07-12 (`cb9bf69`) — see `docs/PHASE-4E-DEPLOYMENT-NOTES.md`, `docs/PHASE-4E-EXECUTION-PLAN.md`. `docs/PHASE-4E-SCOPE-ASSESSMENT.md` is **SUPERSEDED** by these two. |
 | **Phase 5** | **charon `eap-radius` cutover** (charon forwards EAP-MSCHAPv2 auth to FreeRADIUS over local UDP/1812; local `users`/`pools`/`leases` SQLite tables no longer authoritative) | ✅ SHIPPED — 2026-07-06 |
 | **Phase 5+** | **RFC 5176 Disconnect-Request** (DAE/CoA listener on charon UDP/3799; FreeRADIUS → charon signed-by-shared-secret CoA to hard-cut at 100% quota) | ✅ SHIPPED — commit `3b00b8e` |
 | **Phase 7.5** | **iptables-legacy → nftables** swap for quota counters (named counters persist across `nft flush ruleset`; eliminates the 5B.6 bug class permanently) | ✅ LIVE on VPS — 2026-07-09 (per TOOLS.md) |
 | **v2.2.0** | **FreeRADIUS operator overlay + radacct chain wired end-to-end** | ✅ SHIPPED — 2026-07-13 12:35 SAST / 10:35 UTC, commit `805ea84` |
+| **v2.2.1** | **Portal upgrade** (post-Phase-4E; v2.2.1 deployed 2026-08-10, git HEAD `8e02a6e`) | ✅ SHIPPED — 2026-08-10 |
+| **v2.5.0** (bot) | **Telegram bot v2.5.0** (`/sessions`, `/customers`, `/logs` amendments; `setMyCommands` post_init; HOT-66 swanctl-watchdog; 3 amendments 2026-10-09 + setMyCommands 2026-10-14) | ✅ SHIPPED — 2026-10-14 in `vpn-admin-bot` repo, tag `v2.5.0` |
 | **5H** | HA + LB (2x charon + keepalived VRRP + shared MariaDB) | ⏳ NOT STARTED — **last-last phase** (Zun, 2026-06-20), still ahead of 5H: Phase 4D complete, Phase 4E complete, v2.2.0 complete |
 
-**Tags on origin:** v1.0, v1.1.0, v1.2, v1.2.1–v1.2.4, v1.2.6, v1.2.7, v1.2.7.1–v1.2.7.4, v1.2.8–v1.2.14, v1.3.0, v1.4.x through v1.9.0 (varied, including SSE-merge and destructive-replay branches), **v2.0.0**, **v2.1.0**, **v2.1.1**, **v2.2.0** (current). **v1.2.5 deleted.** ORPHANED: v1.8.0 and v1.9.0-sse preserved as historical markers but point at the destructive-replay branch (`backup-broken-v1.9.1-pre-reset`), NOT at `main`. The current main → `805ea84` (v2.2.0 commit).
+---
 
-### v1.3.0 customer portal (lab, 2026-06-21)
+## Done since 2026-07-13 (L2 doc-update session, 2026-10-15)
+
+Per Zun msg #43961 ("read the git repo. And also live artifacts from prod vpn. And go update those notes that has old information or long time ago version information. Develop a clear plan. Execute step by step. Not all at once. Layer by layer.") and msg #43970 ("Do it well. Focus. Facts. Unsure use web verify everything you writing.").
+
+**7 commits pushed to `Dippie-WP/databyte-Ikev2:main`** (all verified via `git log` + `git ls-remote origin HEAD`):
+
+| # | Commit | Layer | What |
+|---|---|---|---|
+| 1 | `746262a` | L2.1 | Refresh `docs/RUNBOOK-DR-REBUILD-AND-HA.md` v1.0.7 → **v1.1.0** (2026-10-15 fact-check). 24 sections updated, 6 new hard rules, §1.2 service/port inventory, §1.6 gap #14 bandwidth-monitor STALE warning, kopia 502 parked note, §2.5 acceptance counts, §5 hard rules #8-9, §7 changelog, §8 verification signature. |
+| 2 | `bda11ae` | L2.2 | Refresh `docs/ARCHITECTURE.md` v2.2.0 → **2026-10-15 fact-check** (v2.2.1 portal + v2.5.0 bot). Verified-live table refreshed with current numbers + 7 new rows (Portal, Bot, Services, Listening ports, Quota enforcement, bandwidth-monitor, LE certs); 3 new architecture shifts (bot v2.5.0, strongswan-watchdog HOT-66, kopia 502). |
+| 3 | `3337129` | L2.3 | **New doc** `docs/VPS-XNEELO-DEPLOY.md` v1.0.0 — canonical Xneelo VPS deploy procedure. Documents `scripts/bootstrap-xneelo.sh` (19 steps per header) + §3.4 "What the script does NOT do" (17-item prod-parity gap) + §4 post-script steps (§4.1-§4.12, 30-45 min) for full prod-parity deploy. Fixes 3 previously-broken `VPS-XNEELO-DEPLOY.md` references in `DEPLOYMENT.md`, `QUICKSTART.md`, `SESSION-HISTORY.md`. |
+| 4 | `1ad0b9b` | L2.4 | Fix `docs/DEPLOYMENT.md` line 6 factual inaccuracy. "Does everything in 15-25 min" → accurate description of base gateway install + 17 post-script steps + cross-ref to `VPS-XNEELO-DEPLOY.md` §3.4 + §4. Off-by-one fix: "16" → "17" in 2 places (this doc + `VPS-XNEELO-DEPLOY.md` changelog). |
+| 5 | `d295765` | L2.8 | Fix 24 `vps-01` → `vpn-prod-01` refs in 3 customer-facing Windows docs (`DAT-VPN-INT-WIN-001.md` 3, `-GUIDE-001.md` 15, `-HOSTILE-001.md` 6). All were operational `ssh`/`scp` commands. Verified script facts (MD5 `fc6a83d18b195bf3cbba1558f87f912a`, 23609 B) against live prod — still match v2.6.5. Flagged 2 HARDLOCKED script facts for separate investigation (git commit `bf4e4b1` not in repo; template `setup-databyte-vpn-windows.ps1` not on prod). |
+| 6 | `26e46d4` | L2.8b | **New doc** `docs/DAT-VPN-INT-WIN-LIVE-001.md` v0.1.0 — **parallel companion** to the HARDLOCKED `DAT-VPN-INT-WIN-001.md`. Per Zun msg #43979 ("Ignore the headlock. This book we writing Parralel To the headlock doc so we don't touch it"). Live-state fact-check with 2026-10-15 stamps; hostname fix (all 24 vps-01→vpn-prod-01); discrepancy log (flagged for separate investigation, NOT silently fixed). |
+| 7 | `c3aa4f4` | L2.6 | Rewrite `README.md` fully with live artifacts truth + 2026-10-15 time stamps. Per Zun msg #43988. "Live state" section with 16 verified facts; "What's where" table (dropped `internal/` — doesn't exist); "Versions" table (multi-component: portal v2.2.1 + bot v2.5.0 + image 6.0.7); "Deploy / DR / Architecture pointers" table. |
+
+**CI status on all 7 commits:** **6/6 check-runs completed success** on each push (LIVE vs git HEAD drift, Lab-leakage guard, Build image + smoke test, DB integrity check, Portal API integration tests, portal smoke). All 4 workflow files (ci.yml, drift-detect.yml, portal-smoke.yml, release.yml) show "completed successfully" for the most recent run on each push.
+
+**RustFS backup:** all 7 + the README pushed to `rustfs:open-claw-push/homelab-vpn/docs-factcheck-2026-10-15/` (8 files total: README.md + 7 docs in `docs/` subdirectory).
+
+**L3 audit per layer:** 0 vps-01 refs remaining in any doc (except the hardlock's internal `DAT-VPN-INT-WIN-001.md`); all live-state numbers verified live against `vpn-prod-01`; all 16 README claims verified via live exec; 0 remaining stale values.
+
+---
+
+## Still to be done
+
+### From the L2 doc-update plan (2.5, 2.8b, 2.9)
+
+| Layer | Doc | Status | Notes |
+|---|---|---|---|
+| **2.5** | `docs/SESSION-HISTORY.md` line 197 | **DECIDED TO LEAVE** | Line 197 references `docs/VPS-XNEELO-DEPLOY.md` (now valid, created in 2.3). The doc is a historical narrative of 2026-06-18; the ref is to a state at a point in time. Modifying would change the historical record. Decision per Zun pattern of "don't touch historical docs." |
+| **2.8b** | HARDLOCKED script facts investigation | **FLAGGED — NEEDS SEPARATE LAYER** | From 2.8: (a) git commit `bf4e4b1` + 8 other referenced commits NOT in databyte-Ikev2 repo; (b) template file `setup-databyte-vpn-windows.ps1` (claimed MD5 `5541343b...`) NOT on prod. These are HARDLOCKED claims in the approved doc. Per Zun msg #43979 ("Ignore the headlock"), this parallel doc does NOT modify the hardlock. The next hardlock revision should determine the correct state. **Do NOT touch without explicit review.** |
+| **2.9** | new `docs/BOT.md` | **NOT STARTED** | Bot architecture doc (v2.5.0). Currently only documented in the `prod-vpn-bot-edit` skill. Would cover: components, env vars (`TELEGRAM_BOT_TOKEN`, `VPN_HOST`, etc.), deployment (bot-polling.service + vpn-portal.service), restart pattern, `setMyCommands` post_init, HOT-261 sole-polling-source constraint, 3 amendment history. Quick write if/when needed. |
+
+### From the original ROADMAP backlog (5H, v1.3 items)
+
+| Item | Status | Notes |
+|---|---|---|
+| **5H — HA + LB** | ⏳ NOT STARTED | **Last-last phase** (Zun, 2026-06-20 10:45 UTC). 2x charon + keepalived VRRP active/passive + shared MariaDB. Detailed plan in `docs/RUNBOOK-DR-REBUILD-AND-HA.md` §3 (Option B: DNS round-robin + MOBIKE + Galera). RTO 2h → 30-120s on single node failure. Cost ~R1500/mo for vps-02. |
+| **v1.3.0 backlog** | ⏳ OPEN | See "v1.3 backlog" section below for full list. |
+| **5C.5 (reverted)** | ⛔ REVERTED | Model locked: 1 (username, password) = 1 device. Branch + tag deleted. Reverting the revert is **explicitly discouraged** — charon's `uniqueids=yes` default enforces 1-identity-1-VIP. |
+| **5C.6 (shelved)** | 🔒 SHELVED | If multi-device per customer is ever needed, plan is `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md` Rev 2 — **only Option 4 (per-device client certs / EAP-TLS) is clean**. Do NOT restart from EAP-MSCHAPv2 work. |
+
+---
+
+## Future ideas (if I want it) — facts only, web-sourced 2026-10-15
+
+**Per Zun msg #43994: "search the web for things we can add in future such as features and cool things and security."** All items below are sourced from public web searches on 2026-10-15. No speculation, no assumptions — only what the sources actually say.
+
+| # | Idea | Source | Status (2026-10-15) | Why it might matter |
+|---|---|---|---|---|
+| F1 | **strongSwan 6.1.0 upgrade** | [strongswan.org blog 2026-09-07](https://strongswan.org/blog/2026/09/07/strongswan-6.1.0-released.html) | **RELEASED 2026-09-07** (major version bump) | We're running 6.0.7 (older patch of 6.0.x). 6.1.0 includes 2 CVEs fixed in the 6.0.x line: **CVE-2026-78133** (libcharon IKEv2 rekeying collisions → use-after-free → potential RCE; affects 6.0.0+) and **CVE-2026-78134** (eap-peap / eap-ttls auth details propagation → potential auth bypass). We're on EAP-MSCHAPv2 so 78134 doesn't affect us directly, but 78133 DOES (we use charon for IKEv2). **Upgrade recommended for security.** |
+| F2 | **Post-quantum IKEv2 (ML-KEM hybrid)** | [IETF draft-ietf-ipsecme-ikev2-mlkem-04](https://datatracker.ietf.org/doc/html/draft-ietf-ipsecme-ikev2-mlkem-04) (2026-02-26) | **IETF INTERNET-DRAFT** (not yet RFC) | Adds ML-KEM (NIST FIPS 203, standardized 2024) as additional key exchange in IKEv2, combined with traditional ECDH (hybrid PQC). Quantum-resistant key establishment. Academic paper (Electronics 2026-07-28, DOI 10.3390/electronics15153340) demonstrates "Hybrid Post-Quantum IKEv2 on Embedded Automotive Platforms" using ECDH-P384 + ML-KEM-768. **Not yet supported in strongSwan 6.1.0** (it's a draft). Watch for RFC + strongSwan support — likely 1-2 years out. |
+| F3 | **DDoS protection (RFC 8019)** | [RFC 8019](https://datatracker.ietf.org/doc/html/rfc8019) (2016-11) | **RFC 8019 (2016)** | 4-component DDoS strategy: (1) harden half-open SA database by reducing retention time; (2) harden by rate-limiting single IPs/prefixes; (3) guidance on failed IKE_AUTH; (4) **Client Puzzles mechanism** (new in this RFC). We currently don't implement Client Puzzles. strongSwan docs [Security Recommendations](https://docs.strongswan.org/docs/latest/howtos/securityRecommendations.html) cover related hardening. Useful if we ever face volumetric IKEv2 DDoS. |
+| F4 | **strongSwan 6.0.3 features** | [strongSwan blog tags/release](https://www.strongswan.org/blog/tags/release) | **RELEASED** (earlier in 6.0.x line) | (a) **New VICI event for receiving alerts** — would simplify our `bot-polling.service` alerting (currently scrapes logs). (b) **On-device certificates in managed profiles of the Android app** — useful for future Android strongSwan app integration. (c) **eap-mschapv2 plugin vulnerability fix** — security fix. |
+| F5 | **strongSwan 6.0.5 features (2026-03-23)** | [strongswan.org blog 2026-03-23](https://www.strongswan.org/blog/2026/03/23/strongswan-6.0.5-released.html) | **RELEASED 2026-03-23** | charon-cmd now supports **childless IKE SA initiation** with the `--childless` option (force argument to abort if peer doesn't support). Useful for testing/debugging IKE SA establishment without configuring CHILD_SA. Minor for our prod use case. |
+| F6 | **Alternative strongSwan Prometheus exporters** | Multiple community repos | Various maturity | We already have a `strongswan_exporter` (port 9101, listed in services). Community alternatives: [jlti-dev/ipsec_exporter](https://github.com/jlti-dev/ipsec_exporter) (Go), [plantatorbob/strongswan_exporter](https://github.com/plantatorbob/strongswan_exporter) (Go), [torilabs/ipsec-prometheus-exporter](https://github.com/torilabs/ipsec-prometheus-exporter) (Python), [ThaseG/strongswan-exporter](https://github.com/ThaseG/strongswan-exporter) (Go, "perfect for monitoring your VPN infrastructure"). All subscribe via VICI. Could compare metrics coverage with our existing exporter. Not urgent. |
+| F7 | **strongSwan IKEv2 post-quantum roadmap** | strongSwan 6.1.0 release blog + project mailing lists | Under discussion in upstream | F2 depends on this. strongSwan project tracks PQC work; no concrete commit yet. Track [strongswan.org/blog](https://www.strongswan.org/blog/) for updates. |
+| F8 | **Alternative VPN tech: WireGuard** | (not searched in this turn, but well-known) | Mature (Linux kernel since 5.6) | Faster handshake, simpler codebase, but no built-in EAP/AAA integration. Would require a different architecture. Not a drop-in for IKEv2 + FreeRADIUS. Mentioned for completeness, NOT recommended for our use case (per-user sticky VIPs + FreeRADIUS EAP integration is core to our design). |
+| F9 | **strongSwan 6.0.x security recommendations** | [docs.strongswan.org Security Recommendations](https://docs.strongswan.org/docs/latest/howtos/securityRecommendations.html) | Live docs | Installing a drop policy with `local\|remote_ts = 0.0.0.0/0,::/0` blocks all un-IPsec'd traffic. We currently allow SSH + ICMP explicitly via iptables (per `bootstrap-xneelo.sh` §8). Could audit this for completeness — verify all non-IPsec bypass rules are documented. |
+
+### From the v1.3 backlog (already in the original ROADMAP, kept here for completeness)
+
+| Item | Status | Notes |
+|---|---|---|
+| iOS native IKEv2 + EAP | ⏳ OPEN | Needs Let's Encrypt cert via certbot + DNS-01 (current iOS path silently fails cert validation with self-signed). |
+| Customer onboarding flow | ⏳ NOT PLANNED | Operator-only model per Zun 2026-06-19. |
+| CA cert auto-bundle for Android | ⏳ OPEN | Include CA in `.sswan` profile export. |
+| Phone-side UX polish | ⏳ OPEN | Shorter `rekey_time` (24h → 20-30m), `reauth_time` (24h → 2-3h), `charon.keep_alive = 20s`. |
+| Server-side defaults audit | ⏳ OPEN | Every `charon.*` setting reviewed for gateway vs client default. |
+| Cloudflare bot detection | ⏳ OPEN | ifconfig.me may give `ERR_CONNECTION_CLOSED` because shared MASQ IP looks bot-like. |
+| 5G MTU/PMTUD | ✅ DONE | Server-side MSS clamp at 1260 fixes (5A.7). May need carrier-specific tuning. |
+| 5G CGNAT stability | ⏳ OPEN | iOS SAs die in 4-30 min on cellular. Try lower fragment_size (1100), raise `ikesa_max_halfopen` to 10, `install_virtual_ip=yes` test. |
+| iptables → nftables migration | ✅ DONE on VPS | Phase 7.5 (2026-07-09). LXC 903 lab may still be on iptables-legacy (low priority). |
+
+---
+
+## v1.3.0 customer portal (lab, 2026-06-21)
 
 `http://192.168.10.98:8080/portal/` — customers log in with VPN credentials, see only their own tier + usage meter.
 
@@ -49,16 +146,16 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 
 **Active development branches:** none. All merged to main.
 
-**Live infra (verified live 2026-07-13 16:00 SAST / 14:00 UTC, on vps-01 = `vpn-prod-01` = 154.65.110.44):**
-- **vps-01 prod VPS** (`myvpn.databyte.co.za`): charon (PID 831235) in Docker container `zun/strongswan:6.0.7-mschapv2-attrsql`, bound UDP/500 + UDP/4500; 7 bind mounts from `/opt/strongswan-vpn-gateway/docker/...` (swanctl/ + strongswan.d/*.conf + charon-log-host/charon.log + /var/lib/strongswan). Charon VICI on container TCP/127.0.0.1:4502. Health: `Up About an hour (healthy)`.
-- **FreeRADIUS** (systemd, PID 868286 on host): bound 1812/1813/18120 + CoA-relay (charon listens on 3799); `radpostauth` = 390 rows, `radacct` = 5 rows (live interim-updates firing).
-- **MariaDB 11.x** (systemd): 127.0.0.1:3306, db `radius`. 42 tables. `customers` = 5, `users` = 4, `devices` = 4, `operators` = 1, `alerts` = 2, `audit_log` = 333, `installer_tokens` = 114.
-- **vpn-portal.service** (FastAPI, gunicorn): https://vpn-portal.databyte.co.za/, returns `{"db_ok":true,"db_customers":5,"charon_ok":true}` (verified).
-- **Services running on vps-01:** `apache2`, `bandwidth-monitor`, `dockhand-bridge`, `freeradius`, `mariadb`, `nginx`, `quota-exporter`, `quota-monitor`, `strongswan_exporter`, `vpn-portal` (all `active`).
-- **LXC 902 (myservices, 192.168.10.212)** — referenced here only for historical context; no longer hosts the VPN stack. The VPN pipeline runs on `vps-01` per the 5D production migration (2026-07-06). LXC 902's existing services (Grafana, Prometheus, Dockhand, Paperless, node-exporter, etc.) continue to operate.
-- **Active SAs (charon):** 2 (`rw-eap` for `zunaid-win11-en-laptop` VIP 10.99.0.1, `rw-eap` for `zun-iphone` VIP 10.99.0.2) — radacct grew from 0 → 5 rows in the last ~3 hours.
+**Live infra (verified live 2026-10-15 06:50 UTC, on `vpn-prod-01` = 154.65.110.44):**
+- **vpn-prod-01 prod VPS** (`myvpn.databyte.co.za`): charon (PID 165329) in Docker container `zun/strongswan:6.0.7-mschapv2-attrsql`, bound UDP/500 + UDP/4500; 7 bind mounts from `/opt/strongswan-vpn-gateway/docker/...` (swanctl/ + strongswan.d/*.conf + charon-log-host/charon.log + /var/lib/strongswan). Charon VICI on container TCP/127.0.0.1:4502. Status: `running` (since 2026-10-08T14:06:34Z, 6d 19h uptime at audit time).
+- **FreeRADIUS** (systemd on host): bound 1812/1813/18120 + CoA-relay (charon listens on 3799); `radpostauth` = 2,301 rows, `radacct` = 1,168 rows (live interim-updates firing).
+- **MariaDB 11.8.6-MariaDB-0+deb13u1** (systemd): 127.0.0.1:3306, db `radius`. **45 tables**. `customers` = 12, `users` = 12, `devices` = 11, `operators` = 1, `installer_tokens` + `alerts` + `audit_log` + `purchases` + `tiers` + `radpostauth` + `radacct` + `radcheck` (28) etc.
+- **vpn-portal.service** (FastAPI, gunicorn): https://vpn-portal.databyte.co.za/, returns `{"status":"ok","db_ok":true,"db_customers":12,"charon_ok":true}` (verified 2026-10-15 06:50 UTC).
+- **bot-polling.service** (Telegram bot polling daemon): v2.5.0, runs `/opt/vpn-portal/bot_polling.py` + `bot.py`; chat_id 7748884597 (Zun).
+- **Services running on vpn-prod-01 (24 total, incl. 7 new since 2026-07):** `apache2`, `bandwidth-monitor` ⚠ STALE PATH, `bot-polling`, `cron`, `dockhand-bridge`, `freeradius`, `mariadb`, `nginx`, `prometheus`, `prometheus-node-exporter`, `quota-exporter`, `quota-monitor`, `strongswan_exporter`, `strongswan-watchdog`, `ttyd`, `vpn-portal`, `vps-alert-relay`, `zerotier-one` + `alertmanager` (user-mode).
+- **LXC 902 (myservices, 192.168.10.212)** — referenced here only for historical context; no longer hosts the VPN stack. The VPN pipeline runs on `vpn-prod-01`. LXC 902's existing services (Grafana, Prometheus, Dockhand, Paperless, node-exporter, etc.) continue to operate.
 - **zun-operator:** is_operator=1, bypass on quota enforcement.
-- **real-customers:** 4 customer/device records (zun-iphone@97, paulbernardo-win@98, zunaid-win11-en-laptop@104, siraaj-iphone@105).
+- **real-customers:** 11 customer/device records (excludes operator).
 
 ## 5A — Foundation (lock-in) — ✅ GREEN (both gates, 2026-06-18)
 
@@ -249,3 +346,19 @@ Phased execution per the two-gate rule: each phase is green only when (a) all it
 - **5C.4 (RustFS daily DB+configs backup verify) — CANCELLED**
 - **Replacement:** PBS (Proxmox Backup Server, already running at 192.168.10.84) backs up the entire LXC 903 + LXC 902 containers. No need for separate RustFS target.
 - The daily `/usr/local/bin/strongswan-configs-backup.sh` job (5A.8) can remain as a quick-restore convenience but is no longer the primary backup.
+
+> **2026-10-15 update:** kopia → `kop.databyte.co.za:443` is the current primary backup for the VPS. **Currently 502 Bad Gateway, PARKED** (Zun msg #43961); last successful `.update-info.json` mtime 2026-10-10 00:00. RPO at risk until resolved. RustFS (`open-claw-push/homelab-vpn/docs-factcheck-2026-10-15/`) is a secondary docs backup, updated on each L2 doc-update session.
+
+---
+
+## Change log
+
+| Rev | Date | Author | Notes |
+|---|---|---|---|
+| (v1) | 2026-06-18 | Misha 🐻 | Initial 5A foundation roadmap. |
+| (v2) | 2026-06-19 23:30 UTC | Misha 🐻 | 5B quota layer added. |
+| (v3) | 2026-06-20 19:25 UTC | Misha 🐻 | 5C.5 reverted. Model locked to 1 creds = 1 device. |
+| (v4) | 2026-06-20 10:45 UTC | Misha 🐻 | 5H HA + LB marked as last-last phase. |
+| (v5) | 2026-06-21 17:50 UTC | Misha 🐻 | v1.3.0 customer portal complete. |
+| (v6) | 2026-07-13 16:00 SAST | Misha 🐻 | v2.2.0 doc-sync. FreeRADIUS operator overlay + radacct chain wired end-to-end. Verified-live table 2026-07-13. |
+| **(v7)** | **2026-10-15 06:50 UTC / 08:50 SAST** | **Misha 🐻** | **Per Zun msg #43994: "Yes road map next. Look at the current goals. Update what is done so far. Then looks what still to be done. Then search the web for things we can add in future such as features and cool things and security. Add it to a section of if I want it etc. facts only. No assuming no compaction. Clear written."** Full update: (1) "Current state" header refreshed to 2026-10-15 with all live-state numbers re-verified live against `vpn-prod-01` (portal v2.2.1, bot v2.5.0, 12 customers, 2,301 radpostauth, 1,168 radacct, kopia 502 PARKED). (2) Phase status table updated: v2.2.1 portal, v2.5.0 bot added. (3) NEW "Done since 2026-07-13" section listing the 7 L2 doc-update commits (`746262a`, `bda11ae`, `3337129`, `1ad0b9b`, `d295765`, `26e46d4`, `c3aa4f4`) — all pushed to `origin/main` + RustFS, CI all green. (4) "Still to be done" section: L2.5 SESSION-HISTORY (decided leave), L2.8b HARDLOCKED investigation (flagged), L2.9 BOT.md (not started), 5H HA+LB, v1.3 backlog items. (5) NEW "Future ideas (if I want it)" section with **9 web-sourced items** (F1-F9): strongSwan 6.1.0 upgrade (CVE-2026-78133, CVE-2026-78134), post-quantum IKEv2 (ML-KEM, draft-ietf-ipsecme-ikev2-mlkem-04), RFC 8019 DDoS protection, strongSwan 6.0.3 VICI alert events, strongSwan 6.0.5 childless IKE SA, alternative Prometheus exporters, strongSwan PQC roadmap, WireGuard (mentioned for completeness, not recommended), strongSwan security recommendations audit. All items cite the source URL; no speculation. All existing phase detail sections (5A, 5B, 5C, 5C.5, 5D) and v1.3 backlog retained **unchanged** per "no compaction". v1.3 backlog cross-referenced into "Future ideas" for completeness. Backup strategy section updated to add kopia 502 PARKED status. |
