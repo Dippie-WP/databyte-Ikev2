@@ -95,6 +95,46 @@ Per Zun msg #43961 ("read the git repo. And also live artifacts from prod vpn. A
 | **5C.5 (reverted)** | ⛔ REVERTED | Model locked: 1 (username, password) = 1 device. Branch + tag deleted. Reverting the revert is **explicitly discouraged** — charon's `uniqueids=yes` default enforces 1-identity-1-VIP. |
 | **5C.6 (shelved)** | 🔒 SHELVED | If multi-device per customer is ever needed, plan is `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md` Rev 2 — **only Option 4 (per-device client certs / EAP-TLS) is clean**. Do NOT restart from EAP-MSCHAPv2 work. |
 
+### Multi-region rollout (naming schema + wildcard cert) — 🆕 ADDED 2026-10-15
+
+**Per Zun msg #44067 followup** ("Also add the naming schema to road map like za-cpt.xxx fr-pa. xxx") + the wildcard-cert validation from the same session.
+
+**Naming schema decision (locked 2026-10-15):** Country ISO + city IATA. Matches the Nord/Express convention. So:
+
+- `za-cpt.myvpn.databyte.co.za` — Cape Town
+- `za-jnb.myvpn.databyte.co.za` — Johannesburg (when added)
+- `fr-par.myvpn.databyte.co.za` — Paris
+- `uk-lhr.myvpn.databyte.co.za` — London (if/when)
+- `de-fra.myvpn.databyte.co.za` — Frankfurt (if/when)
+
+**Why this pattern over the alternatives:**
+- Country prefix means a French client doesn't accidentally land in Cape Town
+- City IATA (3-letter, recognisable) is shorter and clearer than numeric tails
+- Matches the 80% commercial-market convention (familiar to anyone who's set up Nord/Express before)
+- Scales per-city without ambiguity (vs. city-only IATA, which breaks if you ever have two SA cities)
+
+**Sub-tasks:**
+
+| # | Sub-task | Status | Notes |
+|---|---|---|---|
+| MR-1 | **Wildcard cert ([TKT-036](./../tickets/tickets-active.yaml), see [`docs/DRAFT-WILDCARD-CERT.md`](./DRAFT-WILDCARD-CERT.md) v0.1.0)** — issue `*.myvpn.databyte.co.za + myvpn.databyte.co.za` via certbot + Cloudflare DNS-01 (already-wired infra). Keep the existing `myvpn + vpn-portal` SAN cert as a separate cert for `vpn-portal.databyte.co.za`. | ⏳ NOT STARTED | ~5 min: dry-run + certbot invocation. Operator playbook at `docs/DRAFT-WILDCARD-CERT.md` (pre-conditions + procedure + verification + rollback). Certbot timer auto-renews. **Can be done now, before any second server exists** — removes a future blocker. |
+| MR-2 | **Second regional VPS** (Cape Town or whichever DC is first). Stand up `strongswan:6.0.7-mschapv2-attrsql` container, FreeRADIUS bridge to shared MariaDB, Cloudflare A record for the regional hostname pointing at the new IP. | ⏳ NOT STARTED | Full prod-parity deploy per `docs/VPS-XNEELO-DEPLOY.md`. 30-45 min post-script steps. |
+| MR-3 | **Per-customer `assigned_server` field** in the bot/portal. The baked .ps1 reads this to set `$ServerAddress` (ZA customer → `za-cpt.myvpn...`, FR customer → `fr-par.myvpn...`). Default = current `myvpn.databyte.co.za` (shared). | ⏳ NOT STARTED | Bot code change: add column to `customers`, update `/create_client`, update `build_installer.py`. |
+| MR-4 | **StrongSwan config** on each regional server: load the same wildcard cert, same FreeRADIUS bridge, same `rw-pool` (the `Framed-Pool` RADIUS attr is server-agnostic; the customer's profile works at any region). | ⏳ NOT STARTED | Identical to current `vpn-prod-01` config + the wildcard cert path. |
+
+**Composition notes:**
+- The `Framed-Pool` RADIUS attribute (RFC 2868 § 3.15) is server-agnostic. A customer connecting to `fr-par.myvpn...` from Paris gets the same tenant pool IP they'd get in Cape Town. So per-tenant isolation (TKT-035) composes cleanly with multi-region.
+- The cert SHA-256 baked into the .ps1 (Variation A in the `vpn-windows-client-setup` skill) is the same across all regional servers (they share the wildcard cert). So the re-bake workload on cert rotation doesn't multiply per region.
+- Per-region `Framed-IP-Address` allocation is independent. No cross-region VIP pinning unless you want it (separate decision if/when HA+LB Phase 5H ships).
+
+**Out of scope (explicit):**
+- BGP anycast (not needed, no infrastructure, no current scale)
+- Cloudflare Load Balancer with geo-routing (would let customers keep one hostname forever, but adds CF LB cost + complexity for marginal benefit when each region has a clear name)
+
+---
+
+## v1.3 backlog (revisit later)
+
 ---
 
 ## Future ideas (if I want it) — facts only, web-sourced 2026-10-15
@@ -327,6 +367,7 @@ Per Zun msg #43961 ("read the git repo. And also live artifacts from prod vpn. A
 - **5G CGNAT stability** — iOS SAs die in 4-30 min on cellular. Try lower fragment_size (1100), raise `ikesa_max_halfopen` to 10, install_virtual_ip=yes test
 - **5H — HA + LB** — 2x v1.2 + keepalived VRRP active/passive, shared DB, ~5s failover. Tier 1 for homelab SLA. **Last-last phase (Zun, 2026-06-20 10:45 UTC)**.
 - **iptables → nftables migration** — nftables named counters persist across rule reloads. Would prevent future 5B.6-style bugs. ~2-3h work, low priority since 5B.6 fix is in place.
+- **Per-tenant virtual IP pools (TKT-035)** — 🆕 ADDED 2026-10-15. Per-tenant virtual IP pool feature. Customer companies (e.g., 10-person companies) get their own pool/subnet so their users can route between each other; users from other companies are isolated. Shared pool (`rw-shared = 10.99.0.0/24`) remains default for ad-hoc customers; private tenant pools are opt-in. Standards basis: RFC 2868 § 3.15 (`Framed-Pool` RADIUS attribute 88) + strongSwan `swanctl.conf` `pools {}` block. ~half a day of work. Composes with multi-region rollout (same RADIUS attr, server-agnostic). Trigger: first real tenant customer. **No live tenant customer on the books yet — this is a capability, not a project.**
 
 ## Backup strategy (Zun 2026-06-20 10:48 UTC)
 
@@ -348,4 +389,6 @@ Per Zun msg #43961 ("read the git repo. And also live artifacts from prod vpn. A
 | (v4) | 2026-06-20 10:45 UTC | Misha 🐻 | 5H HA + LB marked as last-last phase. |
 | (v5) | 2026-06-21 17:50 UTC | Misha 🐻 | v1.3.0 customer portal complete. |
 | (v6) | 2026-07-13 16:00 SAST | Misha 🐻 | v2.2.0 doc-sync. FreeRADIUS operator overlay + radacct chain wired end-to-end. Verified-live table 2026-07-13. |
+| (v7) | 2026-10-15 11:10 UTC | Misha 🐻 | Multi-region rollout sub-section added to "Still to be done" (naming schema decision + 4 sub-tasks: wildcard cert MR-1, second VPS MR-2, per-customer `assigned_server` field MR-3, strongSwan config MR-4). Per-tenant virtual IP pools (TKT-035) added to v1.3 backlog. tickets-active.yaml recovery (line 1612 corruption; restored from 2026-10-09T02:53Z backup; 2 closed-file conflicts resolved). |
+| (v8) | 2026-10-15 11:25 UTC | Misha 🐻 | Wildcard cert operator playbook created at `docs/DRAFT-WILDCARD-CERT.md` v0.1.0 (per Zun msg #44072 "1+3"). TKT-036 opened (P1, score 31.0, infra_ansible). MR-1 row in "Multi-region rollout" updated to reference the new ticket + doc. Pre-conditions all verified live against `vpn-prod-01` on 2026-10-15 (certbot dns-cloudflare plugin + `/root/.cloudflare.ini` + ACME v02 endpoint). Doc covers dry-run + real issuance + verification + rollback. |
 | **(v7)** | **2026-10-15 06:50 UTC / 08:50 SAST** | **Misha 🐻** | **Per Zun msg #43994: "Yes road map next. Look at the current goals. Update what is done so far. Then looks what still to be done. Then search the web for things we can add in future such as features and cool things and security. Add it to a section of if I want it etc. facts only. No assuming no compaction. Clear written."** Full update: (1) "Current state" header refreshed to 2026-10-15 with all live-state numbers re-verified live against `vpn-prod-01` (portal v2.2.1, bot v2.5.0, 12 customers, 2,301 radpostauth, 1,168 radacct, kopia 502 PARKED). (2) Phase status table updated: v2.2.1 portal, v2.5.0 bot added. (3) NEW "Done since 2026-07-13" section listing the 7 L2 doc-update commits (`746262a`, `bda11ae`, `3337129`, `1ad0b9b`, `d295765`, `26e46d4`, `c3aa4f4`) — all pushed to `origin/main` + RustFS, CI all green. (4) "Still to be done" section: L2.5 SESSION-HISTORY (decided leave), L2.8b HARDLOCKED investigation (flagged), L2.9 BOT.md (not started), 5H HA+LB, v1.3 backlog items. (5) NEW "Future ideas (if I want it)" section with **9 web-sourced items** (F1-F9): strongSwan 6.1.0 upgrade (CVE-2026-78133, CVE-2026-78134), post-quantum IKEv2 (ML-KEM, draft-ietf-ipsecme-ikev2-mlkem-04), RFC 8019 DDoS protection, strongSwan 6.0.3 VICI alert events, strongSwan 6.0.5 childless IKE SA, alternative Prometheus exporters, strongSwan PQC roadmap, WireGuard (mentioned for completeness, not recommended), strongSwan security recommendations audit. All items cite the source URL; no speculation. All existing phase detail sections (5A, 5B, 5C, 5C.5, 5D) and v1.3 backlog retained **unchanged** per "no compaction". v1.3 backlog cross-referenced into "Future ideas" for completeness. Backup strategy section updated to add kopia 502 PARKED status. |
