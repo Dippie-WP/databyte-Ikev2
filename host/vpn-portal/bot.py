@@ -1271,7 +1271,7 @@ async def ct_confirm(update, context):
             name=name,
             display_name=context.user_data.get("ct_display", name),
             tier_name=tier,
-            device_name=eap_identity,                # device_name = EAP identity (per Zun msg #44114)
+            device_name=device_type.lower(),         # just the device part; API constructs EAP identity as f"{name}-{device_name}"
             device_type=device_type.upper(),         # store "ANDROID" / "IOS" / etc.
             speed_plan=speed,
             email=None,
