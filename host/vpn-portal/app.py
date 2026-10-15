@@ -920,8 +920,9 @@ def slugify(s: str) -> str:
 # Operator picks the speed plan at customer creation; explicit bandwidth_*
 # overrides win.
 SPEED_PLANS = {
-    "standard":         {"bandwidth_down_mbps": 20, "bandwidth_up_mbps": 20},
-    "asymmetric_40_20": {"bandwidth_down_mbps": 40, "bandwidth_up_mbps": 20},
+    "lite":     {"bandwidth_down_mbps": 10, "bandwidth_up_mbps": 10},
+    "standard": {"bandwidth_down_mbps": 20, "bandwidth_up_mbps": 20},
+    "pro":      {"bandwidth_down_mbps": 40, "bandwidth_up_mbps": 20},
 }
 
 
