@@ -107,7 +107,7 @@ for rel in "${FILES[@]}"; do
     echo "  SKIP:    $rel (no LIVE_PATH configured — file not deployed yet)"
     continue
   fi
-  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPS_USER@$VPS_HOST" "md5sum ${LIVE_PATHS[$rel]}" 2>/dev/null | awk '{print $1}')
+  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "md5sum ${LIVE_PATHS[$rel]}" 2>/dev/null | awk '{print $1}')
 
   if [ -z "$git_md5" ] || [ -z "$live_md5" ]; then
     echo "  SKIP:    $rel (could not compute one or both hashes)"
@@ -140,7 +140,7 @@ VPN_ADMIN_BOT_FILES=(
 )
 vpn_admin_drift=0
 for rel in "${VPN_ADMIN_BOT_FILES[@]}"; do
-  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$VPS_USER@$VPS_HOST" "md5sum /opt/vpn-portal/$rel" 2>/dev/null | awk '{print $1}')
+  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "md5sum /opt/vpn-portal/$rel" 2>/dev/null | awk '{print $1}')
   if [ -z "$live_md5" ]; then
     echo "  SKIP (vpn-admin-bot): $rel (could not hash live file)"
     continue
