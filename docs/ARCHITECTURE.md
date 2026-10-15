@@ -1,39 +1,48 @@
 # ARCHITECTURE
 
-> **⚠ Live deployment context (updated 2026-07-13, v2.2.0 fact-check):** Production runs on the Xneelo VPS (`vps-01`, 154.65.110.44, `myvpn.databyte.co.za`). This doc was last touched 2026-07-01 and primarily describes the LXC 903 lab; significant drift has accumulated. See the "🟢 Verified-live 2026-07-13" annotations at section heads for the current state. See `docs/VPS-XNEELO-DEPLOY.md` for the production system. Lab (LXC 903 @ 192.168.10.98) and prod (VPS @ 154.65.110.44) are intentionally separate — no sync, never will be.
+> **⚠ Live deployment context (updated 2026-10-15, v2.2.1 portal + v2.5.0 bot fact-check):** Production runs on the Xneelo VPS **`vpn-prod-01`** (renamed from `vps-01` per HOT-210, 2026-09-30), 154.65.110.44, `myvpn.databyte.co.za`. The 🟢 verified-live table at the top is the canonical reference for the current prod state. **The body of this file (below the verified-live table + "Key architecture shifts" table) is the legacy v1.x LXC 903 lab architecture** — preserved for historical context; do not use it as a guide for current state. For DR/HA procedure see `docs/RUNBOOK-DR-REBUILD-AND-HA.md` v1.1.0 (2026-10-15). The `docs/VPS-XNEELO-DEPLOY.md` reference is stale (file removed; use `scripts/bootstrap-xneelo.sh` instead). Lab (LXC 903 @ 192.168.10.98) and prod (VPS @ 154.65.110.44) are intentionally separate — no sync, never will be.
 
-## 🟢 Verified-live 2026-07-13 (v2.2.0 production state on vps-01)
+## 🟢 Verified-live 2026-10-15 (v2.2.1 portal + v2.5.0 bot production state on vpn-prod-01)
 
-The following are live-verified facts from `ssh root@vps-01` at 14:00 UTC / 16:00 SAST, cross-checked against `git rev-parse HEAD` on origin/main = `805ea844ee2d28d8107a24d467a1ee0873b5898e` (= tag v2.2.0):
+The following are live-verified facts from `ssh root@vpn-prod-01` at 06:50 UTC / 08:50 SAST, cross-checked against `git rev-parse HEAD` on origin/main = `b3cf38b9d22f87aa4f127d84b06f81e118c90bbc` (no remote tags on databyte-Ikev2; **bot** tags live in `vpn-admin-bot` repo: latest **v2.5.0**, HEAD `01ad543`). For the full service + port inventory see `docs/RUNBOOK-DR-REBUILD-AND-HA.md` v1.1.0 §1.2 + §1.3.
 
 | Aspect | Live state | Notes |
 |---|---|---|
-| **Image** | `zun/strongswan:6.0.7-mschapv2-attrsql` | Same image as v1.x; only operator-overlay config changed |
-| **Container ID** | `Up About an hour (healthy)` (lived-tracked) | bind mounts: 7 paths from `/opt/strongswan-vpn-gateway/docker/...` |
-| **charon daemon** | PID 831235, UDP/500 + UDP/4500 listening on `0.0.0.0` + `[::]` | EAP-MSCHAPv2 via FreeRADIUS (NOT local SQLite) |
-| **VICI socket** | TCP `127.0.0.1:4502` (container-internal listener, host-readable via `docker exec`) | unchanged |
-| **Quotas** | **nftables** (`nft list ruleset \| grep quota` → `table inet quota_table`) | Per-VIP packets/bytes counters in nftables (NOT iptables-legacy). Per TOOLS.md Phase 7.5 switch |
-| **Identity store** | **MariaDB 11.x at 127.0.0.1:3306, db `radius`** (post-Phase-4E cutover) | 42 tables: 7 RADIUS-protocol + 35 daloRADIUS-mirrored business (`customers`, `users`, `devices`, `installer_tokens`, `tiers`, etc.) |
-| **FreeRADIUS** | active (pid 868286), listening 1812/1813/18120 + CoA at 3799 | Connected to charon via `eap-radius.conf` (binds UDP/1812+1813 to charon in container) |
-| **Services running** | `apache2`, `bandwidth-monitor`, `dockhand-bridge`, `freeradius`, `mariadb`, `nginx`, `quota-exporter`, `quota-monitor`, `strongswan_exporter`, `vpn-portal` | All active (systemctl) |
-| **radpostauth** | 390 rows | Live MSCHAPv2 with migrated NTLM hashes from charon SQLite |
-| **radacct** | 5 rows | Live interim-updates from charon eap-radius `accounting = yes` (added v2.2.0, 805ea84) |
-| **customers** | 5 rows | Live portal business data |
+| **Image** | `zun/strongswan:6.0.7-mschapv2-attrsql` | Unchanged since v1.x; only operator-overlay config evolved |
+| **Container ID** | `Up 6 days (healthy)` | Started **2026-10-08T14:06:34Z** (audit time); bind mounts: 7 paths from `/opt/strongswan-vpn-gateway/docker/...` |
+| **charon daemon** | PID 165329, UDP/500 + UDP/4500 listening on `0.0.0.0` + `[::]` | EAP-MSCHAPv2 via FreeRADIUS (NOT local SQLite) |
+| **VICI socket** | TCP `127.0.0.1:4502` (container-internal, host-readable via `docker exec`) | unchanged |
+| **Quotas** | **nftables** (`nft list ruleset \| grep quota` → `table inet quota_table`) | Per-VIP packets/bytes counters in nftables (NOT iptables-legacy). Per Phase 7.5 switch |
+| **Identity store** | **MariaDB 11.8.6-MariaDB-0+deb13u1** at 127.0.0.1:3306, db `radius` (post-Phase-4E cutover) | **45 tables** (was 42): 7 RADIUS-protocol + ~38 daloRADIUS-mirrored business (`customers`, `users`, `devices`, `installer_tokens`, `tiers`, etc.). **Live row counts (2026-10-15):** `radcheck=26`, `radpostauth=2,299`, `radacct=1,166`, `customers=11`, `users=11`, `devices=10`, `operators=1` |
+| **FreeRADIUS** | active, listening 1812/1813/18120 + CoA at 3799 | Connected to charon via `eap-radius.conf` (binds UDP/1812+1813 to charon in container) |
+| **Portal (FastAPI)** | **`v2.2.1`** (deployed 2026-08-10, git HEAD `8e02a6e`) | systemd Description verified. **NOTE:** FastAPI `app.version` string on line 141 still says `"2.1.1"` — cosmetic drift from systemd Description. Code SHAs: `app.py` 3,266 lines (`baca20f7e9c08691a06ad4c3d2e4bec92e40cbb6d6235288f51bce774318be2b`), `bot.py` 1,988 lines (`8cbda46e3aa073841dc429856488e0b5b24d21818ccb275668dcd5882c881042`) |
+| **Bot (Telegram)** | **`v2.5.0`** (HEAD `01ad543`) | Runs as `bot-polling.service` (sole polling source per HOT-261); never start a second `bot.py` polling instance — HTTP 409 Conflict from Telegram. Tag `v2.5.0` is in `vpn-admin-bot` repo, not `databyte-Ikev2`. |
+| **Services running** | **18 services** (incl. 7 new since 2026-07): `apache2`, `bandwidth-monitor` ⚠ STALE, `bot-polling`, `cron`, `dockhand-bridge`, `freeradius`, `mariadb`, `nginx`, `prometheus`, `prometheus-node-exporter`, `quota-exporter`, `quota-monitor`, `strongswan_exporter`, `strongswan-watchdog`, `ttyd`, `vpn-portal`, `vps-alert-relay`, `zerotier-one` + `alertmanager` (user-mode). | See RUNBOOK §1.2 for the full ExecStart + backup-coverage table. |
+| **Listening ports** | TCP: 22, 80, 443, 2384, 3306, 4502, 5355, 7681, 8000, 9101, 9102, 9999. UDP: 500, 4500, 1812, 1813, 18120, 3799, 5355, 9993, 44062, 51820. | **6 new ports since 2026-07:** `4502` (VICI, was missing from prior table), `7681` (ttyd), `9999` (ops python), `9993` (ZeroTier), `44062` (ZeroTier per-iface), `51820` (kernel wg0). See RUNBOOK §1.3. |
+| **radpostauth** | **2,299** rows | Live MSCHAPv2 with migrated NTLM hashes from charon SQLite. **~6× growth** since 2026-07 (was 390) |
+| **radacct** | **1,166** rows | Live interim-updates from charon eap-radius `accounting = yes` (added v2.2.0, 805ea84). **~230× growth** since 2026-07 (was 5) |
+| **customers** | **11** rows | Live portal business data (was 5 at Phase 4E baseline; +6 since) |
 | **charon/customer identity source** | **NOW**: FreeRADIUS with `SELECT id FROM users WHERE name='%{User-Name}'` SQL module | Was: SQLite at `/var/lib/strongswan/ipsec.db` via attr-sql |
-| **Backup** | kopia → PBS (homelab) + RustFS (docs push only) | kopia runs per-host; doc push only via rclone |
+| **Quota enforcement (script location)** | `quota-monitor.py` lives at `/opt/strongswan-vpn-gateway/quota/` (35,898 B, Oct 12) | **INVERTED** from v1.x — `/home/zunaid/strongswan/quota/` is now a `.bak` graveyard. See RUNBOOK §1.6 gap #1. |
+| **bandwidth-monitor.service** | `ExecStart=/usr/bin/python3 /home/zunaid/strongswan/quota/bandwidth-monitor.py` | ⚠ **STALE PATH** — running on `.bak-pre-phase8-2026-07-12` since 2026-10-08 (3-month-old code). Canonical: `/opt/.../quota/bandwidth-monitor-nft.py`. See RUNBOOK §1.6 gap #14 + §2.3 step 11a. |
+| **LE certs** | `myvpn.databyte.co.za` (SAN: `myvpn` + `vpn-portal`), `adminer.databyte.co.za` | Both ECDSA, expiry **2026-12-02** (48 days valid). `certbot certonly --nginx` style. |
+| **Backup** | kopia → PBS (homelab) + RustFS (docs push only) | kopia runs per-host; doc push only via rclone. **⚠ 2026-10-15: kopia 502 Bad Gateway from `kop.databyte.co.za:443`** (parked; Zun msg #43961); last successful `.update-info.json` mtime 2026-10-10 00:00. **RPO at risk** until resolved. |
 | **ACCOUNTING CHAIN** | Wired end-to-end (v2.2.0) | See `host/freeradius/` overlay + `provision-freeradius.sh` |
 
 ## Key architecture shifts since the v1.x design (locked forward by v2.2.0)
 
-| Was (v1.x) | Is now (v2.2.0) | Commit |
+| Was (v1.x) | Is now (v2.2.x) | Commit |
 |---|---|---|
 | SQLite at `/var/lib/strongswan/ipsec.db` (portable via bind-mount) | MariaDB `radius` database with `customers`/`users`/`devices`/`installer_tokens`/etc. tables (single source of truth) | Phase 4E `cb9bf69` (2026-07-12) |
 | iptables-legacy per-VIP byte counters in FORWARD | nftables named counters in `inet quota_table` | Phase 7.5 / applied 2026-07-09 |
 | charon's local `users`/`pools`/`leases` (SQLite) | FreeRADIUS `radcheck`/`radusergroup` (MariaDB), charon eap-radius plugin proxies auth | Phase 5 `a9d2527` (2026-07-06) |
 | `/etc/freeradius/3.0/` with default Debian config (no operator overlay) | `host/freeradius/` overlay dir + `provision-freeradius.sh` | v2.2.0 `805ea84` (2026-07-13) |
 | Quota enforcement via iptables counter + ipsec connection kill | Quota enforcement via nftables counter + RADIUS identity DISABLE + RFC 5176 Disconnect-Request (`3799/udp` → charon) | Phase 5+ `b00b8e` (2026-07-06) |
-| `curl https://vpn-portal.databyte.co.za/` for portal | same URL, now powered by portal v2.2.0 (FastAPI + MariaDB `radius` DB) | Phase 4C `09e3cfe` |
-| `/home/zunaid/strongswan/quota/quota-monitor.py` (LXC 903 lab only) | live at `/opt/strongswan-vpn-gateway/quota/quota-monitor.py` on VPS | phase-by-phase, see ROADMAP.md |
+| `curl https://vpn-portal.databyte.co.za/` for portal | same URL, now powered by **portal v2.2.1** (FastAPI + MariaDB `radius` DB) | Phase 4C `09e3cfe`; v2.2.1 deployed 2026-08-10 (HEAD `8e02a6e`) |
+| `/home/zunaid/strongswan/quota/quota-monitor.py` (LXC 903 lab only) | live at `/opt/strongswan-vpn-gateway/quota/quota-monitor.py` on VPS (script location **INVERTED** vs v1.0.7 docs — see RUNBOOK §1.6 gap #1) | phase-by-phase, see ROADMAP.md |
+| **(new in v2.5.0)** No Telegram bot integration | **`vpn-admin-bot v2.5.0`** (HEAD `01ad543`) — `@Databytevpn_bot` runs as `bot-polling.service`, sole polling source per HOT-261; chat_id 7748884597 (Zun) | 3 amendments on 2026-10-09 (TKT-029 layered block + `/sessions` + `/customers` + `/logs`); `setMyCommands` fix 2026-10-14 (HOT-241) |
+| **(new in v2.5.x)** No automatic swanctl config reload | **`strongswan-watchdog.service`** (HOT-66 fix) — polls `/opt/.../docker/swanctl/conf.d/` every 3s, runs `swanctl --load-all` on change. Renamed from `strongswan-iptables-watchdog.service`. | HOT-66 |
+| **(new in v2.5.x)** kopia 4-7h cron drift | **kopia 502 Bad Gateway** from `kop.databyte.co.za:443` (2026-10-15 audit) — RPO at risk, parked (Zun msg #43961) | TBD |
 
 The remainder of this file, below, is the **legacy v1.x lab architecture** (LXC 903 192.168.10.98). It is preserved for historical context and as the design from which the above shifts were derived. DO NOT use it as a guide for current state — every claim about "the system" should be cross-checked against the 🟢 verified-live table above.
 
@@ -356,6 +365,8 @@ See ADR `docs/decisions/5B-architecture.md` for full analysis.
 ---
 
 ## Changelog (architecture doc itself)
+
+- **2026-10-15 06:50 UTC / 08:50 SAST (v2.2.1 portal + v2.5.0 bot fact-check):** Refreshed the 🟢 verified-live table to 2026-10-15 live state. **Drift fixed:** (1) Verified-live date 2026-07-13 → **2026-10-15**; (2) Hostname `vps-01` → **`vpn-prod-01`** (HOT-210); (3) MariaDB **42 → 45 tables** with full live row-count baseline (`radcheck=26`, `radpostauth=2,299`, `radacct=1,166`, `customers=11`, `users=11`, `devices=10`, `operators=1`); (4) `radpostauth` 390 → **2,299** (~6× growth); (5) `radacct` 5 → **1,166** (~230× growth); (6) `customers` 5 → **11** (+6 new); (7) Container status: `Up About an hour` → **`Up 6 days`** (StartedAt 2026-10-08T14:06:34Z); (8) **New rows added:** `Portal` (v2.2.1 + SHAs), `Bot` (v2.5.0), `Services running` (18 services incl. 7 new), `Listening ports` (6 new ports), `Quota enforcement (script location)` (INVERTED), `bandwidth-monitor.service` (STALE path warning), `LE certs` (adminer.databyte.co.za + 48 days); (9) `kopia 502 Bad Gateway` flagged in Backup row (parked; Zun msg #43961); (10) Architecture shifts table: `v2.2.0` → `v2.2.x`; added 3 new shifts (bot, swanctl-watchdog, kopia); portal `v2.2.0` → `v2.2.1`. **Broken reference fixed:** `docs/VPS-XNEELO-DEPLOY.md` (file doesn't exist) replaced with pointer to `docs/RUNBOOK-DR-REBUILD-AND-HA.md` v1.1.0 + `scripts/bootstrap-xneelo.sh`. **L3 audit:** all numbers in the new verified-live table re-verified against live prod via SSH; 0 drift remaining. Cross-check with `docs/RUNBOOK-DR-REBUILD-AND-HA.md` v1.1.0 §1.2 + §1.3 + §1.6.
 
 - **2026-07-13 16:00 SAST / 14:00 UTC (v2.2.0 doc-sync):** Added "🟢 Verified-live 2026-07-13" table at the top with live-verified facts from `ssh root@vps-01`. Added "Key architecture shifts since v1.x" mapping each commit+date for the SQLite→MariaDB (Phase 4E), iptables→nftables (Phase 7.5), SQLite→FreeRADIUS (Phase 5) transitions. Marked two design-decision subsections as STALE with the commit that superseded each. The lab (LXC 903) architecture below is preserved as historical context — every claim MUST be cross-checked against the verified-live table. Doc-touch commit: included in v2.2.0 docs sync (this audit). Verification receipts: live VPS container image MD5, freeRADIUS listening on 1812/1813/18120, charon UDP/500+4500, MariaDB `radius` DB at 42 tables with `customers`/`users`/`devices` rows.
 
