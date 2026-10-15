@@ -1205,14 +1205,14 @@ The script **refuses to run** if any value still contains `REPLACE-ME` — sanit
 2. Pull the customer's credentials from the portal operator page (`https://vpn-portal.databyte.co.za/admin` → customer → device).
 3. Pull the current LE cert SHA-256 fingerprint:
    ```
-   ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
    ```
 4. Edit the file: replace the three `REPLACE-ME-*` values.
 5. Save as `setup-databyte-vpn-<customer>-<device>.ps1`.
 6. Deploy to VPS:
    ```
-   scp setup-databyte-vpn-<customer>-<device>.ps1 root@vps-01:/opt/vpn-portal/www/static/baked/
-   ssh root@vps-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+   scp setup-databyte-vpn-<customer>-<device>.ps1 root@vpn-prod-01:/opt/vpn-portal/www/static/baked/
+   ssh root@vpn-prod-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
    ```
 7. Verify the URL:
    ```

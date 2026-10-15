@@ -31,7 +31,7 @@ This document covers the **complete procedure**, every **variation** we've encou
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  VPS (vps-01 / 154.65.110.44)                              │
+│  VPS (vpn-prod-01 / 154.65.110.44)                              │
 │  /opt/vpn-portal/www/static/baked/setup-databyte-vpn-     │
 │                          <customer>-<device>.ps1           │
 │  (chown vpn-portal:vpn-portal, chmod 644)                  │
@@ -55,7 +55,7 @@ This document covers the **complete procedure**, every **variation** we've encou
 
 | Item | Value | Verified |
 |---|---|---|
-| Server hostname | `myvpn.databyte.co.za` | `ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -subject'` → `CN=myvpn.databyte.co.za` |
+| Server hostname | `myvpn.databyte.co.za` | `ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -subject'` → `CN=myvpn.databyte.co.za` |
 | LE cert issuer | `CN=YE1, O=Let's Encrypt, C=US` | same command with `-issuer` |
 | LE cert SHA-256 (live) | `01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB` | live as of 2026-07-10 |
 | LE cert SAN | `DNS:myvpn.databyte.co.za, DNS:vpn-portal.databyte.co.za` | `openssl x509 -ext subjectAltName` |
@@ -192,7 +192,7 @@ Both are operator-side. Never seen by customer in plain text — they're baked i
 ### 4.2 Get the current LE cert SHA-256 fingerprint
 
 ```bash
-ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
 ```
 
 Output (live 2026-07-10):
@@ -253,10 +253,10 @@ grep -cP "[^\x00-\x7F]" /tmp/setup-databyte-vpn-<customer>-<device>.ps1
 
 ```bash
 # Copy file to VPS
-scp /tmp/setup-databyte-vpn-<customer>-<device>.ps1 root@vps-01:/opt/vpn-portal/www/static/baked/
+scp /tmp/setup-databyte-vpn-<customer>-<device>.ps1 root@vpn-prod-01:/opt/vpn-portal/www/static/baked/
 
 # Set ownership + permissions
-ssh root@vps-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@vpn-prod-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
 ```
 
 **Why `vpn-portal:vpn-portal`:** the nginx user serving static files is `vpn-portal`. Wrong ownership = nginx 403s the file.
@@ -271,7 +271,7 @@ curl -ksSL -o /dev/null -w "%{http_code} %{size_download}\n" \
 # Expected: 200 <size in bytes>
 ```
 
-If you get 403: perms wrong. If 404: file not at the path nginx expects. If 502/503: nginx down — check `ssh root@vps-01 'systemctl status nginx'`.
+If you get 403: perms wrong. If 404: file not at the path nginx expects. If 502/503: nginx down — check `ssh root@vpn-prod-01 'systemctl status nginx'`.
 
 ### 4.8 Ship the URL to the customer
 
@@ -295,7 +295,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File $env:TEMP\setup.ps1
 shred -u /tmp/setup-databyte-vpn-<customer>-<device>.ps1
 
 # Optional: remove from VPS too if customer only needs it for one install
-ssh root@vps-01 'rm /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@vpn-prod-01 'rm /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
 ```
 
 If the customer needs the URL later (e.g. new device), the file can be re-deployed at any time. There is no rotation requirement on the file itself; only the **LE cert fingerprint** rotates every ~60 days (see §7.5).
@@ -329,7 +329,7 @@ certbot auto-renews the LE cert via `dns-cloudflare` plugin. New cert has new SH
 
 1. Get new fingerprint (post-rotation):
    ```bash
-   ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
    ```
 2. For each deployed baked file: re-run §4.3–§4.7 with the new fingerprint.
 3. Customers who try to install between rotation and re-bake will hit `[FAIL] Cert fingerprint mismatch!` (Step 1 exit code 1).
@@ -411,7 +411,7 @@ If the poll NEVER catches `Connected`:
 **Fix:**
 1. Pull new fingerprint:
    ```bash
-   ssh root@vps-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
    ```
 2. Re-bake the file with the new fingerprint (re-do §4.4).
 3. Re-deploy (re-do §4.6).
@@ -453,7 +453,7 @@ If the poll NEVER catches `Connected`:
 **Fix:**
 1. Verify in MariaDB (MariaDB runs on VPS host directly, not in Docker):
    ```bash
-   ssh root@vps-01 'mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
+   ssh root@vpn-prod-01 'mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
    ```
    Expected output for `zun-iphone`:
    ```
@@ -497,14 +497,14 @@ If second attempt fails: Control Panel → Network Connections → right-click m
 **Fix:**
 1. Verify file exists on VPS:
    ```bash
-   ssh root@vps-01 'ls -la /opt/vpn-portal/www/static/certs/'
+   ssh root@vpn-prod-01 'ls -la /opt/vpn-portal/www/static/certs/'
    ```
    Expected: `isrg-root-x2.pem` and `root-ye.pem` present, owned by `vpn-portal:vpn-portal`.
 2. If missing, re-deploy from the source-of-truth chain:
    ```bash
-   ssh root@vps-01 'awk "/BEGIN CERT/{n++} n==4{print} /END CERT/{if(n==4)exit}" /etc/letsencrypt/live/myvpn.databyte.co.za/fullchain.pem > /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chmod 644 /opt/vpn-portal/www/static/certs/isrg-root-x2.pem'
+   ssh root@vpn-prod-01 'awk "/BEGIN CERT/{n++} n==4{print} /END CERT/{if(n==4)exit}" /etc/letsencrypt/live/myvpn.databyte.co.za/fullchain.pem > /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chmod 644 /opt/vpn-portal/www/static/certs/isrg-root-x2.pem'
    ```
-3. If file present but download fails: check nginx (`ssh root@vps-01 'systemctl status nginx'`) and the access log (`/var/log/nginx/vpn-portal.access.log`).
+3. If file present but download fails: check nginx (`ssh root@vpn-prod-01 'systemctl status nginx'`) and the access log (`/var/log/nginx/vpn-portal.access.log`).
 4. Customer can also proceed — Step 0 will skip the download but Step 1 will abort if cert chain is untrusted. They'll get a clear error message.
 
 ### 7.13 `rasapi32!RasSetCredentials P/Invoke` not loading
@@ -562,7 +562,7 @@ When a customer reports an issue, retrieve the exact file they were given:
 
 ```bash
 # Fetch from VPS
-ssh root@vps-01 'cat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1' > /tmp/customer-file.ps1
+ssh root@vpn-prod-01 'cat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1' > /tmp/customer-file.ps1
 
 # MD5 + SHA-256
 md5sum /tmp/customer-file.ps1
@@ -572,7 +572,7 @@ sha256sum /tmp/customer-file.ps1
 grep -E '^\$ServerCertSha256|^\$Username|^\$Password' /tmp/customer-file.ps1
 
 # Was the script file edited after deploy? (modification time)
-ssh root@vps-01 'stat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@vpn-prod-01 'stat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
 
 # Is the customer still in radcheck?
 ssh root@vps-1 'docker exec <mariadb-container> mysql -u root -e "SELECT id, UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"<customer>\"\"'

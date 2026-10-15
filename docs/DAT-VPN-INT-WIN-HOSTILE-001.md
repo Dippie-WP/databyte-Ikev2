@@ -338,7 +338,7 @@ NT_HASH=$(printf '%s' "$PASSWORD" | iconv -t UTF-16LE | openssl md4 -provider le
 ### 4.2 Insert into MariaDB FreeRADIUS
 
 ```bash
-ssh root@vps-01 "mariadb -uroot -D radius << SQL
+ssh root@vpn-prod-01 "mariadb -uroot -D radius << SQL
 INSERT INTO radusergroup (UserName, GroupName, priority) VALUES ('<eap_identity>', 'default', 0);
 INSERT INTO radcheck (UserName, Attribute, op, Value) VALUES ('<eap_identity>', 'Cleartext-Password', ':=', '$PASSWORD');
 INSERT INTO radcheck (UserName, Attribute, op, Value) VALUES ('<eap_identity>', 'NT-Password', ':=', '$NT_HASH');
@@ -348,7 +348,7 @@ SQL"
 ### 4.3 Live auth test
 
 ```bash
-ssh root@vps-01 "radtest <eap_identity> '$PASSWORD' 127.0.0.1 0 testing123"
+ssh root@vpn-prod-01 "radtest <eap_identity> '$PASSWORD' 127.0.0.1 0 testing123"
 # Expect: Access-Accept
 ```
 
@@ -356,8 +356,8 @@ ssh root@vps-01 "radtest <eap_identity> '$PASSWORD' 127.0.0.1 0 testing123"
 
 ```bash
 AUDIT_DIR="/root/audit-bk/$(date -u +%Y-%m-%d)-<eap_identity>-onboard"
-ssh root@vps-01 "mkdir -p \$AUDIT_DIR && chmod 700 \$AUDIT_DIR"
-ssh root@vps-01 "cat > \$AUDIT_DIR/password.txt << EOF
+ssh root@vpn-prod-01 "mkdir -p \$AUDIT_DIR && chmod 700 \$AUDIT_DIR"
+ssh root@vpn-prod-01 "cat > \$AUDIT_DIR/password.txt << EOF
 $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC) - new customer onboarding
 Customer:     <eap_identity>
 Device:       <device_name>
@@ -385,10 +385,10 @@ Use Telegram DM (1:1 direct chat) or encrypted email. **Never** email the `.ps1`
 
 ```bash
 # 1. radpostauth (expect Access-Accept for new customer)
-ssh root@vps-01 'mariadb -uroot -D radius -e "SELECT id, username, reply, authdate FROM radpostauth WHERE authdate >= NOW() - INTERVAL 3 MINUTE ORDER BY id DESC LIMIT 5;"'
+ssh root@vpn-prod-01 'mariadb -uroot -D radius -e "SELECT id, username, reply, authdate FROM radpostauth WHERE authdate >= NOW() - INTERVAL 3 MINUTE ORDER BY id DESC LIMIT 5;"'
 
 # 2. IKE_SAs (expect new ESTABLISHED with framed IP 10.99.0.x)
-ssh root@vps-01 'docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas'
+ssh root@vpn-prod-01 'docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas'
 
 # 3. Update VPN Tracker (Changes sheet)
 # 4. Push tracker to rustfs
