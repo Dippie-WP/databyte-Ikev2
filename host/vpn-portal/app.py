@@ -1333,8 +1333,14 @@ def create_client(req: ClientCreate, _user: dict = Depends(require_session)):
     if req.mac_address_2 and not MAC_RE.match(req.mac_address_2):
         raise HTTPException(400, f"mac_address_2 '{req.mac_address_2}' is not a valid MAC (XX:XX:XX:XX:XX:XX)")
 
-    if req.device_type not in ALLOWED_DEVICE_TYPES:
-        raise HTTPException(400, f"device_type must be one of {sorted(ALLOWED_DEVICE_TYPES)}")
+    # Case-insensitive check: the bot uppercases device_type before sending.
+    # Normalize both sides to upper for comparison, but preserve the bot's
+    # value in the DB (the ALLOWED_DEVICE_TYPES set uses title case for display).
+    if req.device_type.upper() not in {d.upper() for d in ALLOWED_DEVICE_TYPES}:
+        raise HTTPException(
+            400,
+            f"device_type must be one of {sorted(ALLOWED_DEVICE_TYPES)} (case-insensitive)"
+        )
 
     if not DEVICE_NAME_RE.match(req.device_name):
         raise HTTPException(400, "device_name must be alphanumeric + dash, 1-32 chars, no leading dash")
