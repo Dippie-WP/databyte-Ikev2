@@ -67,11 +67,10 @@ ssh root@vpn-prod-01 'cat /etc/letsencrypt/renewal/myvpn.databyte.co.za.conf | g
 #   server = https://acme-v02.api.letsencrypt.org/directory
 #   dns_cloudflare_credentials = /root/.cloudflare.ini
 
-# 2.2 Confirm Cloudflare API token is reachable
-ssh root@vpn-prod-01 'curl -sS -X GET "https://api.cloudflare.com/client/v4/user" \
-  -H "Authorization: Bearer $(grep "dns_cloudflare_api_key" /root/.cloudflare.ini | cut -d"=" -f2)" \
-  -H "Content-Type:application/json" | head -c 200'
-# Expected: {"result":{"id":"...","email":"..."...},"success":true,...}
+# 2.2 Confirm Cloudflare API key is present in the ini file
+ssh root@vpn-prod-01 'grep -E "dns_cloudflare" /root/.cloudflare.ini | sed "s/=.*/= <redacted>/"'
+# Expected: dns_cloudflare_api_key = <redacted>
+# (Real token validation happens in §3.1 dry-run via certbot)
 
 # 2.3 Confirm current cert is still valid
 ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -dates -ext subjectAltName'
