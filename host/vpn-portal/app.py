@@ -995,7 +995,7 @@ class ClientCreate(BaseModel):
     #   'asymmetric_40_20'   → 40 mbps down / 20 mbps up
     # Precedence: explicit bandwidth_down_mbps / bandwidth_up_mbps (below) wins.
     # If both omitted → defaults to 'standard'.
-    speed_plan:       Optional[Literal["standard", "asymmetric_40_20"]] = Field(
+    speed_plan:       Optional[Literal["lite", "standard", "pro"]] = Field(
         None,
         description="Per-customer bandwidth preset. 'standard' (20/20) or 'asymmetric_40_20' (40/20). "
                     "If both speed_plan and explicit bandwidth_* are provided, explicit wins."
@@ -2406,7 +2406,7 @@ class CustomerUpdate(BaseModel):
     # Precedence (consistent with ClientCreate): explicit bandwidth_* > speed_plan.
     # If only speed_plan provided, it resolves to bandwidth_* via resolve_bandwidth().
     # If neither provided, bandwidth_* columns are NOT touched.
-    speed_plan:        Optional[Literal["standard", "asymmetric_40_20", "custom"]] = None
+    speed_plan:        Optional[Literal["lite", "standard", "pro", "custom"]] = None
     bandwidth_down_mbps: Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
     bandwidth_up_mbps:   Optional[int] = None  # 1..1000 (5D per-customer bandwidth)
 
