@@ -46,6 +46,19 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H "${{ vars.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
+      # Pre-flight SSH check: fail fast (<15s) with a clear error if VPSSSH is stale/wrong
+      # or the runner->VPS path is down. Saves the 56s silent timeout that would
+      # otherwise be the only signal. (Added 2026-10-15 after VPSSSH key rotation;
+      # see TKT for the fail2ban/IPBan investigation that motivated this.)
+      - name: Pre-flight SSH check
+        env:
+          VPS_HOST: ${{ vars.VPS_HOST || 'vpn-prod-01' }}
+          VPS_USER: ${{ vars.VPS_USER || 'root' }}
+        run: |
+          timeout 10 ssh -o BatchMode=yes -o ConnectTimeout=5 \
+            "$VPS_USER@$VPS_HOST" 'echo "SSH pre-flight OK"' \
+          || (echo "::error::SSH pre-flight failed — check VPSSSH secret matches a public key in /root/.ssh/authorized_keys on the VPS, and that the runner→VPS SSH path is reachable."; exit 1)
+
       - name: Run drift detector
         env:
           VPS_HOST: ${{ vars.VPS_HOST || 'vpn-prod-01' }}
