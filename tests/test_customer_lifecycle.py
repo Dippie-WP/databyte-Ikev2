@@ -853,11 +853,11 @@ class TestSpeedPlan:
         down, up = self._read_bandwidth(db_path, cust_id)
         assert (down, up) == (20, 20), f"expected (20, 20), got ({down}, {up})"
 
-    def test_speed_plan_asymmetric_40_20_sets_40_20(self, client, operator_login, db_path):
+    def test_speed_plan_pro_sets_40_20(self, client, operator_login, db_path):
         """speed_plan='pro' → 40 down / 20 up."""
         r = self._create(client, operator_login,
                          display_name="Asym Speed Co",
-                         speed_plan="asymmetric_40_20")
+                         speed_plan="pro")
         assert r.status_code == 200, r.text
         cust_id = r.json()["customer"]["id"]
         down, up = self._read_bandwidth(db_path, cust_id)
@@ -912,7 +912,7 @@ class TestSpeedPlan:
         # Pydantic returns a structured error mentioning the literal options
         body = r.json()
         assert "speed_plan" in str(body), r.text
-        assert "standard" in r.text and "asymmetric_40_20" in r.text
+        assert "standard" in r.text and "pro" in r.text
 
     def test_bandwidth_out_of_range_rejected_422(self, client, operator_login):
         """bandwidth_down_mbps > 1000 → Pydantic 422 (le=1000 bound)."""
@@ -926,7 +926,7 @@ class TestSpeedPlan:
     def test_speed_plan_does_not_override_tier(self, client, operator_login, db_path):
         """Speed plan drives BANDWIDTH (mbps), independent of tier.
         Per Zun's directive: speed_plan is per-customer, NOT tier-based.
-        This test proves the two are independent: tier_10gb + asymmetric_40_20
+        This test proves the two are independent: tier_10gb + pro
         → 40/20 mbps bandwidth.
 
         v3.0 (commit 111da4b): tiers no longer carry data_limit_bytes. Kill
@@ -936,7 +936,7 @@ class TestSpeedPlan:
         r = self._create(client, operator_login,
                          display_name="Indep Co",
                          tier_name="tier_10gb",
-                         speed_plan="asymmetric_40_20")
+                         speed_plan="pro")
         assert r.status_code == 200, r.text
         body = r.json()
         cust_id = body["customer"]["id"]
@@ -1004,16 +1004,16 @@ class TestSpeedPlanPatch:
             f"speed_plan=standard in PATCH failed: {r.text}"
         )
 
-    def test_patch_speed_plan_asymmetric_40_20(self, client, operator_login, db_path):
-        """Customer starts at 20/20. PATCH speed_plan=asymmetric_40_20 → 40/20."""
+    def test_patch_speed_plan_pro(self, client, operator_login, db_path):
+        """Customer starts at 20/20. PATCH speed_plan=pro → 40/20."""
         r = self._create(client, operator_login, display_name="Patch Asym")
         assert r.status_code == 200, r.text
         cust_id = r.json()["customer"]["id"]
         assert self._read_bandwidth(db_path, cust_id) == (20, 20)
-        r = self._patch(client, operator_login, cust_id, {"speed_plan": "asymmetric_40_20"})
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "pro"})
         assert r.status_code == 200, r.text
         assert self._read_bandwidth(db_path, cust_id) == (40, 20), (
-            f"speed_plan=asymmetric_40_20 in PATCH failed: {r.text}"
+            f"speed_plan=pro in PATCH failed: {r.text}"
         )
 
     def test_patch_explicit_bandwidth_wins_over_speed_plan(
@@ -1108,14 +1108,14 @@ class TestSpeedPlanPatch:
         assert r.status_code == 200, r.text
         plans = r.json()
         names = {p["name"] for p in plans}
-        assert names == {"standard", "asymmetric_40_20"}, (
+        assert names == {"standard", "pro"}, (
             f"unexpected speed plans: {names}"
         )
         # Spot-check the values
         std = next(p for p in plans if p["name"] == "standard")
         assert std["bandwidth_down_mbps"] == 20
         assert std["bandwidth_up_mbps"] == 20
-        asym = next(p for p in plans if p["name"] == "asymmetric_40_20")
+        asym = next(p for p in plans if p["name"] == "pro")
         assert asym["bandwidth_down_mbps"] == 40
         assert asym["bandwidth_up_mbps"] == 20
 
@@ -1176,16 +1176,16 @@ class TestSpeedPlanPatch:
             f"speed_plan=standard in PATCH failed: {r.text}"
         )
 
-    def test_patch_speed_plan_asymmetric_40_20(self, client, operator_login, db_path):
-        """Customer starts at 20/20. PATCH speed_plan=asymmetric_40_20 → 40/20."""
+    def test_patch_speed_plan_pro(self, client, operator_login, db_path):
+        """Customer starts at 20/20. PATCH speed_plan=pro → 40/20."""
         r = self._create(client, operator_login, display_name="Patch Asym")
         assert r.status_code == 200, r.text
         cust_id = r.json()["customer"]["id"]
         assert self._read_bandwidth(db_path, cust_id) == (20, 20)
-        r = self._patch(client, operator_login, cust_id, {"speed_plan": "asymmetric_40_20"})
+        r = self._patch(client, operator_login, cust_id, {"speed_plan": "pro"})
         assert r.status_code == 200, r.text
         assert self._read_bandwidth(db_path, cust_id) == (40, 20), (
-            f"speed_plan=asymmetric_40_20 in PATCH failed: {r.text}"
+            f"speed_plan=pro in PATCH failed: {r.text}"
         )
 
     def test_patch_explicit_bandwidth_wins_over_speed_plan(
@@ -1279,12 +1279,12 @@ class TestSpeedPlanPatch:
         assert r.status_code == 200, r.text
         plans = r.json()
         names = {p["name"] for p in plans}
-        assert names == {"standard", "asymmetric_40_20"}, (
+        assert names == {"standard", "pro"}, (
             f"unexpected speed plans: {names}"
         )
         std = next(p for p in plans if p["name"] == "standard")
         assert std["bandwidth_down_mbps"] == 20
         assert std["bandwidth_up_mbps"] == 20
-        asym = next(p for p in plans if p["name"] == "asymmetric_40_20")
+        asym = next(p for p in plans if p["name"] == "pro")
         assert asym["bandwidth_down_mbps"] == 40
         assert asym["bandwidth_up_mbps"] == 20
