@@ -799,7 +799,7 @@ class TestCustomerUserIdFK:
 #
 # Per Zun 2026-06-25 05:19: two preset options at customer create time:
 #   - 'standard'         → 20/20 mbps symmetric (default)
-#   - 'asymmetric_40_20' → 40/20 mbps asymmetric
+#   - 'pro' → 40/20 mbps asymmetric
 #
 # Tiers (tier_5gb/tier_10gb/tier_20gb) drive DATA QUOTA, not bandwidth.
 # The operator picks the speed plan when creating the customer.
@@ -854,7 +854,7 @@ class TestSpeedPlan:
         assert (down, up) == (20, 20), f"expected (20, 20), got ({down}, {up})"
 
     def test_speed_plan_asymmetric_40_20_sets_40_20(self, client, operator_login, db_path):
-        """speed_plan='asymmetric_40_20' → 40 down / 20 up."""
+        """speed_plan='pro' → 40 down / 20 up."""
         r = self._create(client, operator_login,
                          display_name="Asym Speed Co",
                          speed_plan="asymmetric_40_20")
@@ -952,7 +952,7 @@ class TestSpeedPlanPatch:
     Mirrors TestSpeedPlan but exercises the PATCH endpoint. Backend precedence
     (consistent with POST):
       1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
-      2. speed_plan preset ('standard' / 'asymmetric_40_20')
+      2. speed_plan preset ('standard' / 'pro')
       3. speed_plan='custom' OR no speed_plan AND no explicit → don't touch bandwidth
     """
 
@@ -1126,7 +1126,7 @@ class TestSpeedPlanPatch:
     Mirrors TestSpeedPlan but exercises the PATCH endpoint. Backend precedence
     (consistent with POST):
       1. Explicit bandwidth_down_mbps + bandwidth_up_mbps (both required if either)
-      2. speed_plan preset ('standard' / 'asymmetric_40_20')
+      2. speed_plan preset ('standard' / 'pro')
       3. speed_plan='custom' OR no speed_plan AND no explicit → don't touch bandwidth
     """
 
