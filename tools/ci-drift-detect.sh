@@ -97,32 +97,62 @@ echo "  repo HEAD%:   $(git rev-parse --short HEAD)"
 echo "  VPS:          $VPS_USER@$VPS_HOST"
 
 drift_count=0
+# Batch the md5sum calls into a single SSH session.
+# Previously: one `ssh` per file → 17 connections × ~3.5s latency = 57-60s.
+# Now: one `ssh` that runs `md5sum` on all deployed live paths in one shot.
+# Builds a single command line on the VPS and parses the output.
+# Skip handling is done client-side (paths not in LIVE_PATHS stay out of the batch).
+# Modified 2026-10-16 to fix the 57s CI failure (post VPSSSH key rotation).
+deployed_paths=()
 for rel in "${FILES[@]}"; do
-  git_md5=$(git show "HEAD:$rel" 2>/dev/null | md5sum | awk '{print $1}')
-  # Skip files that aren't deployed to LIVE yet (empty LIVE_PATHS entry).
-  # Without this, md5sum with no arg hashes empty stdin and reports drift
-  # vs real git content (false positive). Files with no live path yet are
-  # "future drift coverage" — they'll be checked once they're deployed.
-  if [ -z "${LIVE_PATHS[$rel]:-}" ]; then
-    echo "  SKIP:    $rel (no LIVE_PATH configured — file not deployed yet)"
-    continue
-  fi
-  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "md5sum ${LIVE_PATHS[$rel]}" 2>/dev/null | awk '{print $1}')
-
-  if [ -z "$git_md5" ] || [ -z "$live_md5" ]; then
-    echo "  SKIP:    $rel (could not compute one or both hashes)"
-    continue
-  fi
-
-  if [ "$git_md5" = "$live_md5" ]; then
-    echo "  MATCH:   $rel  ($git_md5)"
-  else
-    echo "  DRIFT!!  $rel"
-    echo "    git:    $git_md5  ($rel)"
-    echo "    live:   $live_md5  (${LIVE_PATHS[$rel]})"
-    drift_count=$((drift_count + 1))
+  if [ -n "${LIVE_PATHS[$rel]:-}" ]; then
+    deployed_paths+=("${LIVE_PATHS[$rel]}")
   fi
 done
+
+if [ ${#deployed_paths[@]} -gt 0 ]; then
+  # One SSH call, one md5sum invocation covering all deployed live paths.
+  # We build the command dynamically so the VPS only pays one connection
+  # cost regardless of how many files are checked.
+  md5_cmd="md5sum"
+  for p in "${deployed_paths[@]}"; do
+    md5_cmd="$md5_cmd \"$p\""
+  done
+  live_md5_output=$(ssh -o BatchMode=yes -o ConnectTimeout=15 \
+    "$VPS_USER@$VPS_HOST" "$md5_cmd" 2>/dev/null)
+  # Build a lookup: live_path -> md5
+  declare -A live_md5s=()
+  while IFS= read -r line; do
+    # Format: "<md5>  <path>"
+    if [[ "$line" =~ ^([a-f0-9]{32})\ \ (.+)$ ]]; then
+      live_md5s["${BASH_REMATCH[2]}"]="${BASH_REMATCH[1]}"
+    fi
+  done <<< "$live_md5_output"
+
+  for rel in "${FILES[@]}"; do
+    git_md5=$(git show "HEAD:$rel" 2>/dev/null | md5sum | awk '{print $1}')
+    if [ -z "${LIVE_PATHS[$rel]:-}" ]; then
+      echo "  SKIP:    $rel (no LIVE_PATH configured — file not deployed yet)"
+      continue
+    fi
+    live_md5="${live_md5s[${LIVE_PATHS[$rel]}]:-}"
+
+    if [ -z "$git_md5" ] || [ -z "$live_md5" ]; then
+      echo "  SKIP:    $rel (could not compute one or both hashes)"
+      continue
+    fi
+
+    if [ "$git_md5" = "$live_md5" ]; then
+      echo "  MATCH:   $rel  ($git_md5)"
+    else
+      echo "  DRIFT!!  $rel"
+      echo "    git:    $git_md5  ($rel)"
+      echo "    live:   $live_md5  (${LIVE_PATHS[$rel]})"
+      drift_count=$((drift_count + 1))
+    fi
+  done
+  unset live_md5s
+fi
 
 # ---------- Cross-repo check: vpn-admin-bot vs prod ----------
 # Added 2026-10-09 — the VPN bot code is also tracked in Dippie-WP/vpn-admin-bot
@@ -139,9 +169,31 @@ VPN_ADMIN_BOT_FILES=(
   "bot.py"
 )
 vpn_admin_drift=0
+# Same batching for the vpn-admin-bot section (was 2 separate SSH connects).
+# Build one `md5sum` command covering both files, one SSH session.
+vab_paths=()
+vab_rels=()
 for rel in "${VPN_ADMIN_BOT_FILES[@]}"; do
-  live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" "md5sum /opt/vpn-portal/$rel" 2>/dev/null | awk '{print $1}')
-  if [ -z "$live_md5" ]; then
+  vab_paths+=("/opt/vpn-portal/$rel")
+  vab_rels+=("$rel")
+done
+if [ ${#vab_paths[@]} -gt 0 ]; then
+  md5_cmd="md5sum"
+  for p in "${vab_paths[@]}"; do
+    md5_cmd="$md5_cmd \"$p\""
+  done
+  vab_md5_output=$(ssh -o BatchMode=yes -o ConnectTimeout=15 \
+    "$VPS_USER@$VPS_HOST" "$md5_cmd" 2>/dev/null)
+  declare -A vab_md5s=()
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^([a-f0-9]{32})\ \ (.+)$ ]]; then
+      vab_md5s["${BASH_REMATCH[2]}"]="${BASH_REMATCH[1]}"
+    fi
+  done <<< "$vab_md5_output"
+  for i in "${!vab_rels[@]}"; do
+    rel="${vab_rels[$i]}"
+    live_md5="${vab_md5s[${vab_paths[$i]}]:-}"
+    if [ -z "$live_md5" ]; then
     echo "  SKIP (vpn-admin-bot): $rel (could not hash live file)"
     continue
   fi
@@ -159,6 +211,7 @@ for rel in "${VPN_ADMIN_BOT_FILES[@]}"; do
     vpn_admin_drift=$((vpn_admin_drift + 1))
   fi
 done
+fi
 
 if [ $vpn_admin_drift -gt 0 ]; then
   echo
