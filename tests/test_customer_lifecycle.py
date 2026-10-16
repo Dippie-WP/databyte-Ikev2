@@ -1108,7 +1108,7 @@ class TestSpeedPlanPatch:
         assert r.status_code == 200, r.text
         plans = r.json()
         names = {p["name"] for p in plans}
-        assert names == {"standard", "pro"}, (
+        assert names == {"lite", "standard", "pro"}, (
             f"unexpected speed plans: {names}"
         )
         # Spot-check the values
@@ -1279,7 +1279,7 @@ class TestSpeedPlanPatch:
         assert r.status_code == 200, r.text
         plans = r.json()
         names = {p["name"] for p in plans}
-        assert names == {"standard", "pro"}, (
+        assert names == {"lite", "standard", "pro"}, (
             f"unexpected speed plans: {names}"
         )
         std = next(p for p in plans if p["name"] == "standard")
