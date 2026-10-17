@@ -1,3 +1,11 @@
+# ⚠️ SUPERSEDED — DO NOT USE
+
+> **This document was archived on 2026-10-17.** It is databyte's internal LXC 903 lab design for per-user bandwidth caps (FreeRADIUS + tc). The specific tunables, lab LXC IPs, and databyte-deployment context are not applicable to a generic template.
+>
+> Future users can adapt the FreeRADIUS + tc pattern to their own deployment. The content below is preserved as-is for databyte's own use.
+
+---
+
 # 5D-BANDWIDTH-LIMITING — Per-User Bandwidth Caps
 
 > **Added 2026-06-22 (Phase 5D)**: Prevents a single user from saturating the
