@@ -1860,6 +1860,18 @@ async def cmd_deleteuser(update, context):
         "INNER JOIN devices d ON d.strongswan_user_id = u.id WHERE d.customer_id = ?",
         (c['id'],)
     )
+    # Fix 2026-10-17 (HOT-273 follow-up): also include orphan users (no device) whose
+    # name matches the customer's name pattern. The INNER JOIN above misses them,
+    # leaving "doubly-orphaned" users (radcheck wiped but users row survives) after
+    # /deleteuser. Same gap exists in delete_customer (HTTP, app.py:2882) and
+    # bulk_action.py (LXC 903, scripts/bulk_action.py:226).
+    orphan_user_rows = app.db_query(
+        "SELECT u.id, u.name FROM users u "
+        "WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.strongswan_user_id = u.id) "
+        "AND (u.name = ? OR u.name LIKE ?)",
+        (bare_name, bare_name + '-%')
+    )
+    user_rows.extend(orphan_user_rows)
     for u in user_rows:
         usernames.add(u['name'])
     usernames.add(bare_name)
@@ -1911,6 +1923,300 @@ async def cmd_deleteuser(update, context):
 
 
 
+async def cmd_cleanup_orphans(update, context):
+    """Retire orphan users (users with no device) by explicit user IDs.
+
+    Refuses:
+      - Users that have a device (not orphans) -- use /deleteuser
+      - HOT-244 operator accounts (zun-*, zunaid-*)
+
+    Usage:
+      /cleanup_orphans <user_id> [<user_id> ...]
+      /cleanup_orphans all          # retire all current users_no_device (warning)
+      /cleanup_orphans all force    # same, skip the warning
+
+    Pattern: same DELETE-in-transaction as /tmp/nuke_orphans.py, but bot-driven.
+    Whitelist-only (chat_id 7748884597).
+    """
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/cleanup_orphans <user_id> [<user_id> ...]`\n"
+            "       `/cleanup_orphans all` (retire all current users_no_device, requires `force`)",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    audit("cleanup_orphans", args=list(context.args))
+    import app
+
+    args_lower = [a.lower() for a in context.args]
+    force = "force" in args_lower
+    is_all = "all" in args_lower
+
+    if is_all:
+        rows = app.db_query("""
+            SELECT u.id, u.name FROM users u
+            LEFT JOIN devices d ON d.strongswan_user_id = u.id
+            WHERE d.id IS NULL ORDER BY u.id
+        """)
+        if not rows:
+            await update.message.reply_text("*No orphans. Nothing to clean.*", parse_mode=ParseMode.MARKDOWN)
+            return
+        if not force:
+            ids_str = ", ".join(f"`{r['id']}`" for r in rows)
+            await update.message.reply_text(
+                f"\u26a0\ufe0f About to retire {len(rows)} orphan user(s): {ids_str}\n"
+                f"Pass `force` to confirm: `/cleanup_orphans all force`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        ids = [r['id'] for r in rows]
+        names = [r['name'] for r in rows]
+    else:
+        try:
+            ids = [int(a) for a in context.args if a.lower() != "force"]
+        except ValueError:
+            await update.message.reply_text("\u274c Invalid: user IDs must be integers.", parse_mode=ParseMode.MARKDOWN)
+            return
+        if not ids:
+            await update.message.reply_text("\u274c No user IDs given.", parse_mode=ParseMode.MARKDOWN)
+            return
+        ph = ",".join(["?"] * len(ids))
+        rows = app.db_query(f"SELECT id, name FROM users WHERE id IN ({ph})", ids)
+        if not rows:
+            await update.message.reply_text(f"\u274c No users found for ids: {ids}", parse_mode=ParseMode.MARKDOWN)
+            return
+        found_ids = set(r['id'] for r in rows)
+        missing = [i for i in ids if i not in found_ids]
+        if missing:
+            await update.message.reply_text(f"\u274c Users not found: {missing}", parse_mode=ParseMode.MARKDOWN)
+            return
+        names = [r['name'] for r in rows]
+
+    # Pre-check: not orphans (have device) -- refuse
+    ph = ",".join(["?"] * len(ids))
+    non_orphans = app.db_query(f"""
+        SELECT u.id, u.name FROM users u
+        INNER JOIN devices d ON d.strongswan_user_id = u.id
+        WHERE u.id IN ({ph})
+    """, ids)
+    if non_orphans:
+        bad = ", ".join(f"`{r['name']}`" for r in non_orphans)
+        await update.message.reply_text(
+            f"\u274c REFUSED: these have devices (not orphans): {bad}\n"
+            f"Use `/deleteuser` to remove customers with devices.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Pre-check: HOT-244 operators
+    op_rows = app.db_query(f"""
+        SELECT u.id, u.name FROM users u
+        INNER JOIN customers c ON c.user_id = u.id
+        WHERE u.id IN ({ph}) AND c.is_operator = 1
+    """, ids)
+    if op_rows:
+        bad = ", ".join(f"`{r['name']}`" for r in op_rows)
+        await update.message.reply_text(
+            f"\u274c REFUSED: these are operator accounts (HOT-244): {bad}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Execute DELETE in transaction
+    try:
+        with app.portal_auth._engine().begin() as conn:
+            wrapped = app.portal_auth._Conn(conn)
+            ph_n = ",".join(["?"] * len(names))
+            r1 = wrapped.execute(f"DELETE FROM radcheck WHERE username IN ({ph_n})", names)
+            r2 = wrapped.execute(f"DELETE FROM users WHERE id IN ({ph})", ids)
+        audit(
+            "cleanup_orphans_done",
+            ids=ids, names=names,
+            radcheck_deleted=r1.rowcount, users_deleted=r2.rowcount,
+        )
+        await update.message.reply_text(
+            f"\u2705 Cleaned {len(names)} orphan user(s):\n"
+            f"- radcheck rows deleted: {r1.rowcount}\n"
+            f"- users rows deleted: {r2.rowcount}\n"
+            f"- names: {', '.join(f'`{n}`' for n in names)}",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception as e:
+        await update.message.reply_text(f"\u274c Cleanup failed (rolled back): {e}", parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_renew_orphan(update, context):
+    """Restore an orphan user to a working customer.
+
+    The orphan's users.password BLOB (NTLM hash) is preserved; a fresh
+    Cleartext-Password is generated (one-way hash, the original CT is not
+    recoverable). The new password is shown once in the rendered output
+    (same format as /create), self-destructs in 60s.
+
+    Refuses:
+      - HOT-244 operators (zun-*, zunaid-*)
+      - Non-orphan users (already have a device) -- use /renew
+      - Missing or archived tier
+      - Customer name collision (cannot renew into a taken name)
+      - EAP identity without `-` (cannot parse customer/device names)
+
+    Usage:
+      /renew_orphan <eap_identity> <tier_name>
+    """
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: `/renew_orphan <eap_identity> <tier_name>`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    audit("renew_orphan", args=list(context.args))
+    import app
+    from datetime import datetime, timedelta
+
+    eap_identity = context.args[0]
+    tier_name = context.args[1]
+
+    # HOT-244 prefix check
+    if eap_identity.lower().startswith(("zun", "zunaid")):
+        await update.message.reply_text(
+            f"\u274c REFUSED: `{eap_identity}` matches an operator prefix (HOT-244).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Pre-check: orphan must exist in users table (no device)
+    user = app.db_query("SELECT id, name, password FROM users WHERE name = ?", (eap_identity,))
+    if not user:
+        await update.message.reply_text(
+            f"\u274c No users row for `{eap_identity}`. Run `/orphans` to see the audit.\n"
+            f"(If already nuked, restore from `/var/backups/orphan-nuke-*.sql` first.)",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    user_row = user[0]
+    dev = app.db_query("SELECT id FROM devices WHERE strongswan_user_id = ?", (user_row['id'],))
+    if dev:
+        await update.message.reply_text(
+            f"\u274c `{eap_identity}` already has a device (not an orphan). Use `/renew` to renew the customer.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Parse customer + device name
+    if "-" not in eap_identity:
+        await update.message.reply_text(
+            f"\u274c EAP identity `{eap_identity}` has no `-`. Cannot parse customer/device names.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+    cust_name, device_name = eap_identity.split("-", 1)
+
+    # Verify tier
+    tier = app.db_query("SELECT id, duration_days, is_active FROM tiers WHERE name = ?", (tier_name,))
+    if not tier:
+        await update.message.reply_text(f"\u274c Tier `{tier_name}` does not exist.", parse_mode=ParseMode.MARKDOWN)
+        return
+    if not tier[0].get("is_active"):
+        await update.message.reply_text(f"\u274c Tier `{tier_name}` is archived.", parse_mode=ParseMode.MARKDOWN)
+        return
+    tier_id = tier[0]["id"]
+    duration_days = tier[0].get("duration_days")
+
+    # Customer name collision check
+    if app.db_query("SELECT id FROM customers WHERE name = ?", (cust_name,)):
+        await update.message.reply_text(
+            f"\u274c Customer `{cust_name}` already exists. Cannot renew an orphan into a taken name.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # Generate fresh password
+    password = app.secrets.token_urlsafe(16)
+    ntlm = app.ntlm_hash_bytes(password)
+    now = int(app.time.time())
+    expires_at = None
+    if duration_days is not None:
+        expires_at = (datetime.utcnow() + timedelta(days=int(duration_days))).strftime("%Y-%m-%d %H:%M:%S")
+
+    # Execute recreation in transaction
+    try:
+        with app.portal_auth._engine().begin() as conn:
+            wrapped = app.portal_auth._Conn(conn)
+            wrapped.execute(
+                "INSERT INTO customers (name, display_name, is_operator, is_active, "
+                "data_used_bytes, expires_at, tier_id, status, max_devices, "
+                "bandwidth_down_mbps, bandwidth_up_mbps, created_at, updated_at, notes, email) "
+                "VALUES (?, ?, 0, 1, 0, ?, ?, 'active', 1, 20, 20, ?, ?, '', '')",
+                (cust_name, cust_name, expires_at, tier_id, now, now),
+            )
+            cust_id = wrapped.execute("SELECT id FROM customers WHERE name = ?", (cust_name,)).fetchone()["id"]
+            wrapped.execute("DELETE FROM users WHERE id = ?", (user_row['id'],))
+            wrapped.execute(
+                "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
+                (eap_identity, ntlm.hex().upper()),
+            )
+            user_id = wrapped.execute("SELECT id FROM users WHERE name = ?", (eap_identity,)).fetchone()["id"]
+            wrapped.execute(
+                "INSERT INTO devices (customer_id, strongswan_user_id, device_name, is_active, "
+                "created_at, updated_at, device_type) "
+                "VALUES (?, ?, ?, 1, ?, ?, 'OTHER')",
+                (int(cust_id), int(user_id), device_name, now, now),
+            )
+            wrapped.execute("UPDATE customers SET user_id = ? WHERE id = ?", (int(user_id), int(cust_id)))
+            wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
+            wrapped.execute(
+                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                "(?, 'Cleartext-Password', ':=', ?)",
+                (eap_identity, password),
+            )
+            wrapped.execute(
+                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                "(?, 'NT-Password', ':=', ?)",
+                (eap_identity, ntlm.hex().upper()),
+            )
+            wrapped.execute(
+                "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, 'default', 1)",
+                (eap_identity,),
+            )
+
+        # EAP block pre-clean + write + charon reload (side effects, post-tx)
+        try:
+            import re as _re
+            conf = app.read_rw_eap_conf()
+            block_pat = _re.compile(
+                rf"\n?\s*eap-{_re.escape(eap_identity)}\s*\{{[^{{}}]*?\}}\n?",
+                _re.DOTALL,
+            )
+            conf = block_pat.sub("", conf, count=1)
+            app.write_rw_eap_conf(conf)
+        except Exception as ex:
+            logger.warning(f"renew_orphan: pre-clean eap block failed for {eap_identity}: {ex}")
+        app.append_eap_block(eap_identity, password)
+        app.reload_charon_creds()
+
+        audit("renew_orphan_done", eap_identity=eap_identity, cust_id=cust_id, tier_name=tier_name)
+
+        text = (
+            f"OK Orphan `{eap_identity}` renewed (customer.id=`{cust_id}`)\n"
+            f"Tier: `{tier_name}`\n"
+            f"Device: `{device_name}`\n"
+            f"Expires: `{expires_at or '?'}`\n\n"
+            f"! *Self-destructs in 60s*\n\n"
+            f"Server: `myvpn.databyte.co.za`\n"
+            f"EAP identity: `{eap_identity}`\n"
+            f"Password: `{password}`\n"
+            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
+        )
+        msg = await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        if msg is not None:
+            schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"\u274c Renew orphan failed: {e}", parse_mode=ParseMode.MARKDOWN,
+        )
+
+
 # ---------- Bot Commands (single source of truth) ----------
 #
 # One list drives BOTH the CommandHandler registration (in build_application)
@@ -1934,6 +2240,8 @@ BOT_COMMANDS = [
     ("orphans",    cmd_orphans,    "List orphaned EAP identities (no portal device)"),
     ("deleteuser", cmd_deleteuser, "Delete a customer (with confirmation)"),
     ("renew",   cmd_renew,   "Renew a customer's tier (keeps same EAP identity)"),
+    ("cleanup_orphans", cmd_cleanup_orphans, "Retire orphan users (no device) by user ID or 'all'"),
+    ("renew_orphan",   cmd_renew_orphan,   "Restore an orphan user to a working customer (new password)"),
 ]
 
 
