@@ -1,21 +1,20 @@
-# Databyte VPN — Windows Installer Generation Guide (Bake-to-Ship)
+# Windows Installer Generation Guide (Bake-to-Ship)
 
-**Document ID:** DAT-VPN-INT-WIN-GUIDE-001
-**Version:** v1.0.0
-**Date:** 2026-07-10
-**Status:** VALIDATED
-**Audience:** Operator (Zun + future assistants)
-**Source of truth for:** End-to-end process of generating a Windows installer for a new VPN customer — from template to shipped URL — plus every variation we've actually used and every failure we've actually hit.
+Generic operator-side playbook for generating per-customer baked Windows VPN installers. Documents the complete process of taking a generic PowerShell template and producing individual customer installers with credentials pre-baked, plus every variation and failure mode we've encountered.
+
+> **Generic note:** This doc was originally databyte-internal (v1.0.0, 2026-07-10). It has been hand-curated 2026-10-17 for generic use — all databyte branding, dates, internal ticket references, and deployment-specific details removed. Replace all `<placeholder>` values with your own.
+
+**Companion doc:** [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md) — the master build manual (server config, PowerShell script source, failure modes). This doc focuses specifically on the operator workflow for generating per-customer baked installers.
 
 ---
 
 ## 0. Purpose
 
-You are onboarding a new customer onto Databyte VPN on a Windows 10 / 11 device. You need a **per-customer installer script** (credentials baked in, no prompt, ships via HTTPS) — produced by editing one template, deploying it to the VPS, and handing the customer a one-liner.
+You are onboarding a new customer onto your self-hosted IKEv2 VPN on a Windows 10/11 device. You need a **per-customer installer script** (credentials baked in, no prompt, ships via HTTPS) — produced by editing one template, deploying it to the VPS, and handing the customer a one-liner.
 
-This document covers the **complete procedure**, every **variation** we've encountered (operator-side naming, cert pin vs not, cert rotation, multi-device customers), and every **failure mode** with evidence and fix.
+This document covers the **complete procedure**, every **variation** (operator-side naming, cert pin vs not, cert rotation, multi-device customers), and every **failure mode** with evidence and fix.
 
-**This document does NOT cover** customer-facing copy. That lives in `reports/DAT-VPN-EXT-WIN-001-v1.0.0.docx`. This is the **operator-side playbook**.
+**This document does NOT cover** customer-facing copy or the generic self-serve installer (customer enters creds via prompt at install). The generic self-serve flow is in [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md) Section 12 and the QUICKSTART.md doc.
 
 ---
 
@@ -23,7 +22,7 @@ This document covers the **complete procedure**, every **variation** we've encou
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  OPERATOR (you, on OC host / any Linux box)                │
+│  OPERATOR (you, on any Linux box)                          │
 │  1. Copy template                                          │
 │  2. Edit 3 baked-in values                                 │
 │  3. scp to VPS                                             │
@@ -31,12 +30,12 @@ This document covers the **complete procedure**, every **variation** we've encou
                      │
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  VPS (vpn-prod-01 / 154.65.110.44)                              │
-│  /opt/vpn-portal/www/static/baked/setup-databyte-vpn-     │
-│                          <customer>-<device>.ps1           │
-│  (chown vpn-portal:vpn-portal, chmod 644)                  │
+│  VPS (<your-hostname> / <your-public-ip>)                  │
+│  <your-portal-web-root>/static/baked/<your-template-name>-│
+│                          <customer>-<device>.ps1            │
+│  (chown <nginx-user>:<nginx-group>, chmod 644)             │
 └────────────────────┬────────────────────────────────────────┘
-                     │ HTTPS (Cloudflare-fronted, LE cert)
+                     │ HTTPS (CDN-fronted, LE cert)
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  CUSTOMER (Win 10 / 11, PowerShell as Admin)               │
@@ -46,23 +45,23 @@ This document covers the **complete procedure**, every **variation** we've encou
                      │ IKEv2 + EAP-MSCHAPv2 (UDP 500/4500)
                      ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  VPS strongSwan (Docker: zun/strongswan:6.0.7-mschapv2)    │
+│  VPS strongSwan (Docker: <your-namespace>/strongswan:6.0.7) │
 │  FreeRADIUS → MariaDB radcheck → Access-Accept             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Critical facts (live verified 2026-07-10):**
+**Critical facts (verify on your deploy):**
 
 | Item | Value | Verified |
 |---|---|---|
-| Server hostname | `myvpn.databyte.co.za` | `ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -subject'` → `CN=myvpn.databyte.co.za` |
+| Server hostname | `<your-vpn-hostname>` | `ssh root@<your-hostname> 'openssl x509 -in /etc/letsencrypt/live/<your-vpn-hostname>/cert.pem -noout -subject'` → `CN=<your-vpn-hostname>` |
 | LE cert issuer | `CN=YE1, O=Let's Encrypt, C=US` | same command with `-issuer` |
-| LE cert SHA-256 (live) | `01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB` | live as of 2026-07-10 |
-| LE cert SAN | `DNS:myvpn.databyte.co.za, DNS:vpn-portal.databyte.co.za` | `openssl x509 -ext subjectAltName` |
-| LE cert expiry | `Oct 3 12:47:33 2026 GMT` (85 days from 2026-07-10) | same |
+| LE cert SHA-256 | *Verify on your deploy* | `openssl x509 -noout -fingerprint -sha256` |
+| LE cert SAN | `DNS:<your-vpn-hostname>, DNS:<your-portal-domain>` | `openssl x509 -ext subjectAltName` |
+| LE cert expiry | *Verify on your deploy* (~90 days from issue) | same |
 | Cert rotation | every ~60 days (certbot auto-renew via `dns-cloudflare` plugin) | `/etc/cron.d/certbot` on VPS |
-| Delivery URL hostname | `vpn-portal.databyte.co.za` | **NOT `myvpn.*`** — Cloudflare badware flagged for some network paths |
-| strongSwan proposals | `aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256` | `docker exec strongswan cat /etc/swanctl/conf.d/rw-eap.conf` |
+| Delivery URL hostname | `<your-portal-domain>` | **NOT `<your-vpn-hostname>`** — Cloudflare badware may flag VPN hostnames on some network paths |
+| strongSwan proposals | `aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256` | `docker exec strongswan cat /etc/swanctl/conf.d/10-eap-radius.conf` |
 | ESP proposals | same as IKE | same file |
 
 ---
@@ -73,22 +72,22 @@ This document covers the **complete procedure**, every **variation** we've encou
 
 | Property | Value |
 |---|---|
-| Repo path | `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1` |
-| Git commit (HEAD) | `1dea754` (rename from `setup-databyte-vpn-baked-v1.0.0.ps1`) |
-| Template MD5 | `5541343b9c5efe3b3b9257dbd3332805` |
-| Template size | 22,644 bytes / 476 lines |
+| Repo path | `<your-install-root>/host/vpn-portal/scripts/<your-template-name>` (e.g. `setup-vpn-windows.ps1`) |
+| Git commit (HEAD) | *Verify on your deploy* |
+| Template MD5 | *Verify on your deploy* — changes if template is edited |
+| Template size | *Verify on your deploy* |
 | Syntax validator | `pwsh 7.x`: `[System.Management.Automation.Language.Parser]::ParseFile(...)` |
-| Test command | `pwsh -NoProfile -Command "& { $tokens=$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile('...setup-databyte-vpn-windows.ps1',[ref]$tokens,[ref]$errors) | Out-Null; if($errors.Count -eq 0){'SYNTAX OK'} else { $errors | %{ '  '+$_.Message } } }"` |
+| Test command | `pwsh -NoProfile -Command "& { $tokens=$errors=$null; [System.Management.Automation.language.Parser]::ParseFile('<your-template-name>',[ref]$tokens,[ref]$errors) | Out-Null; if($errors.Count -eq 0){'SYNTAX OK'} else { $errors | %{ '  '+$_.Message } } }"` |
 
-### 2.2 The BAKED-IN CONFIG block (lines 56–74)
+### 2.2 The BAKED-IN CONFIG block (top of template)
 
 This is the ONLY block operator edits per-customer. Everything else is frozen template code.
 
 ```powershell
-$ServerAddress  = "myvpn.databyte.co.za"           # NEVER change
-$RemoteId       = "myvpn.databyte.co.za"           # NEVER change (must match cert SAN)
-$ConnectionName = "DatabyteVPN"                    # NEVER change
-$PortalBase     = "https://vpn-portal.databyte.co.za"  # NEVER change
+$ServerAddress  = "<your-vpn-hostname>"           # NEVER change (must match cert CN/SAN)
+$RemoteId       = "<your-vpn-hostname>"           # NEVER change (must match cert SAN)
+$ConnectionName = "<vpn-connection-name>"        # e.g. "MyVPN" or "DatabyteVPN" — keep consistent
+$PortalBase     = "https://<your-portal-domain>"  # NEVER change
 
 # --- Operator-edited per customer: ---
 
@@ -99,25 +98,20 @@ $LERootUrl        = "$PortalBase/static/certs/isrg-root-x2.pem"  # NEVER change
 $ExpectedIssuerMatch = "Let.?s Encrypt|ISRG"          # NEVER change
 ```
 
-**Sanity check at lines 96–103:** If any of the three REPLACE-ME values remain, script exits with code 1 and a red error banner. Customer cannot accidentally run an unbaked file.
+**Sanity check:** If any of the three `REPLACE-ME` values remain, the script should exit with code 1 and a red error banner. Customer cannot accidentally run an unbaked file.
 
 ### 2.3 What the script does (8 steps, verified live)
 
 | Step | What | Verified behavior |
 |---|---|---|
-| **0** | Bootstrap ISRG Root X2 via `certutil -addstore -f Root` | Live 2026-07-10: `certutil: OK (ISRG Root X2 installed)` |
-| **1** | TCP-connect to `:443`, fetch cert via `SslStream`, check issuer + optional SHA-256 pin | Live: `Subject CN=myvpn.databyte.co.za / Issuer CN=YE1, O=Let's Encrypt / Pin: SHA-256 match` |
-| **2** | Remove stale `Databyte*`/`myvpn*` VPN connections + cmdkey entries | Live: `(no leftover profiles)` |
-| **3** | `Add-VpnConnection -TunnelType IKEv2 -EapConfigXmlStream (New-EapConfiguration)` | Live: `Profile created: DatabyteVPN` |
-| **4** | `Set-VpnConnectionIPsecConfiguration` → AES128/SHA256128/Group14/SHA256/PFS2048 | Live: `AES128 / SHA256128 / Group14 / SHA256 / PFS2048` |
-| **5** | Registry: `HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters\NegotiateDH2048_AES256=2` + `PolicyAgent\AssumeUDPEncapsulationContextOnSendRule=2` | Live: both set |
-| **6** | `RasSetCredentials` P/Invoke (rasapi32.dll) + `cmdkey` backup | Live: `RasSetCredentials P/Invoke: OK` |
-| **7** | `rasdial DatabyteVPN` + 90s poll on `Get-VpnConnection` | Live: `rasdial exit code: 703` (normal for IKEv2+EAP) → poll caught `Connected` |
-
-**Live result 2026-07-10 13:05 UTC** (Zun's Windows 11 24H2 build 26200):
-- strongSwan SA `rw-eap #22, ESTABLISHED, IKEv2, AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048`
-- EAP identity `zun-iphone`, virtual IP `10.99.0.2`, remote `102.182.117.43[4500]`
-- 143,102 packets out, 177 MB transferred in 168 seconds
+| **0** | Bootstrap ISRG Root X2 via `certutil -addstore -f Root` | `certutil: OK (ISRG Root X2 installed)` |
+| **1** | TCP-connect to `:443`, fetch cert via `SslStream`, check issuer + optional SHA-256 pin | `Subject CN=<your-vpn-hostname> / Issuer CN=YE1, O=Let's Encrypt / Pin: SHA-256 match` |
+| **2** | Remove stale `<vpn-connection-name>*`/`<your-vpn-hostname>*` VPN connections + cmdkey entries | `(no leftover profiles)` |
+| **3** | `Add-VpnConnection -TunnelType IKEv2 -EapConfigXmlStream (New-EapConfiguration)` | `Profile created: <vpn-connection-name>` |
+| **4** | `Set-VpnConnectionIPsecConfiguration` → AES128/SHA256128/Group14/SHA256/PFS2048 | `AES128 / SHA256128 / Group14 / SHA256 / PFS2048` |
+| **5** | Registry: `HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters\NegotiateDH2048_AES256=2` + `PolicyAgent\AssumeUDPEncapsulationContextOnSendRule=2` | both set |
+| **6** | `RasSetCredentials` P/Invoke (rasapi32.dll) + `cmdkey` backup | `RasSetCredentials P/Invoke: OK` |
+| **7** | `rasdial <vpn-connection-name>` + 90s poll on `Get-VpnConnection` | `rasdial exit code: 703` (normal for IKEv2+EAP) → poll caught `Connected` |
 
 ---
 
@@ -128,7 +122,12 @@ $ExpectedIssuerMatch = "Let.?s Encrypt|ISRG"          # NEVER change
 Use this for **every** production customer. Catches DNS poisoning + compromised intermediate CA.
 
 ```powershell
-$ServerCertSha256 = "01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB"
+$ServerCertSha256 = "<your-current-le-cert-fingerprint>"
+```
+
+Get the current fingerprint:
+```bash
+ssh root@<your-hostname> 'openssl x509 -in /etc/letsencrypt/live/<your-vpn-hostname>/cert.pem -noout -fingerprint -sha256'
 ```
 
 Behavior: Step 1 computes the cert's SHA-256 and refuses to proceed on mismatch. Verified live.
@@ -152,17 +151,17 @@ $ServerAddress = "lab-vpn.example.com"
 $RemoteId      = "lab-vpn.example.com"
 ```
 
-DO NOT do this for production customers. Hardcoded path is `myvpn.databyte.co.za` everywhere.
+DO NOT do this for production customers.
 
 ### 3.4 Variation D — Connection name (not recommended)
 
-Change `$ConnectionName` if customer already has a `DatabyteVPN` profile from a different operator. Default is `DatabyteVPN`.
+Change `$ConnectionName` if a customer already has a profile from a different operator. Default is your standard connection name.
 
-If you change this, the customer's `$ConnectionName` and any subsequent customer references (re-install, troubleshooting) must use the new name. Most customers have no pre-existing VPN — leave as default.
+If you change this, the customer's `$ConnectionName` and any subsequent customer references (re-install, troubleshooting) must use the new name.
 
 ### 3.5 Variation E — Crypto suite (NOT recommended for production)
 
-The crypto block (Step 4, lines ~281–301 in template) is locked to match `rw-eap.conf` server proposals:
+The crypto block (Step 4) is locked to match the server's strongSwan proposals:
 
 ```powershell
 $Crypto = @{
@@ -183,8 +182,8 @@ If you change any of these, the IKE handshake will either pick the wrong proposa
 
 ### 4.1 Get the customer identity + password
 
-**Source:** `host/vpn-portal/admin` operator page. Per portal:
-- `$Username` = customer identity (e.g. `acme-corp-laptop01`)
+**Source:** your portal's operator page. Per portal:
+- `$Username` = customer identity (e.g. `<customer-org>-laptop01`)
 - `$Password` = EAP secret (random 22-char base64)
 
 Both are operator-side. Never seen by customer in plain text — they're baked into the script.
@@ -192,12 +191,12 @@ Both are operator-side. Never seen by customer in plain text — they're baked i
 ### 4.2 Get the current LE cert SHA-256 fingerprint
 
 ```bash
-ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+ssh root@<your-hostname> 'openssl x509 -in /etc/letsencrypt/live/<your-vpn-hostname>/cert.pem -noout -fingerprint -sha256'
 ```
 
-Output (live 2026-07-10):
+Output (verify format with colons, lowercase):
 ```
-sha256 Fingerprint=01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB
+sha256 Fingerprint=<your-current-fingerprint>
 ```
 
 Format with colons (lowercase) — that's what `$ServerCertSha256` expects.
@@ -205,13 +204,13 @@ Format with colons (lowercase) — that's what `$ServerCertSha256` expects.
 ### 4.3 Copy the template to a working file
 
 ```bash
-cp /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/setup-databyte-vpn-windows.ps1 \
-   /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+cp <your-install-root>/host/vpn-portal/scripts/<your-template-name> \
+   /tmp/<your-template-name>-<customer>-<device>.ps1
 ```
 
-**Naming convention** (HARDLOCK — see MEMORY.md RULES):
+**Naming convention:**
 - Customer identity: `<customer-org>-<device-role><NN>` (e.g., `acme-corp-laptop01`)
-- File name: `setup-databyte-vpn-<customer>-<device>.ps1`
+- File name: `<your-template-name>-<customer>-<device>.ps1`
 - Device role examples: `laptop01`, `desktop-hq`, `phone-personal`, `win11-work`
 - Device role MUST match customer's portal entry. Customer references it in URLs/emails.
 
@@ -219,33 +218,33 @@ cp /root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/scripts/
 
 ```bash
 # $ServerCertSha256
-sed -i 's|\$ServerCertSha256 = "REPLACE-ME-sha256-fingerprint"|\$ServerCertSha256 = "01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB"|' /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+sed -i 's|\$ServerCertSha256 = "REPLACE-ME-sha256-fingerprint"|\$ServerCertSha256 = "<your-current-fingerprint>"|' /tmp/<your-template-name>-<customer>-<device>.ps1
 
 # $Username
-sed -i 's|\$Username = "REPLACE-ME-customer-device-name"|\$Username = "acme-corp-laptop01"|' /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+sed -i 's|\$Username = "REPLACE-ME-customer-device-name"|\$Username = "<customer>"|' /tmp/<your-template-name>-<customer>-<device>.ps1
 
 # $Password
-sed -i 's|\$Password = "REPLACE-ME-customer-password"|\$Password = "<eap-secret-from-portal>"|' /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+sed -i 's|\$Password = "REPLACE-ME-customer-password"|\$Password = "<eap-secret-from-portal>"|' /tmp/<your-template-name>-<customer>-<device>.ps1
 ```
 
-Or use `nano` / `vim` and edit lines 65, 71, 72 directly.
+Or use `nano` / `vim` and edit the lines directly.
 
 ### 4.5 Verify the bake
 
 ```bash
 # Confirm no REPLACE-ME remains
-grep -c "REPLACE-ME" /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+grep -c "REPLACE-ME" /tmp/<your-template-name>-<customer>-<device>.ps1
 # Expected: 0
 
 # Confirm values are baked
-grep -E '^\$ServerCertSha256|^\$Username|^\$Password' /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+grep -E '^\$ServerCertSha256|^\$Username|^\$Password' /tmp/<your-template-name>-<customer>-<device>.ps1
 
 # Syntax check (PowerShell 5.1 + 7.x)
-pwsh -NoProfile -Command "& { $tokens=$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile('/tmp/setup-databyte-vpn-<customer>-<device>.ps1',[ref]$tokens,[ref]$errors) | Out-Null; if($errors.Count -eq 0){'SYNTAX OK'} else { $errors | %{ '  '+$_.Message } } }"
+pwsh -NoProfile -Command "& { $tokens=$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile('/tmp/<your-template-name>-<customer>-<device>.ps1',[ref]$tokens,[ref]$errors) | Out-Null; if($errors.Count -eq 0){'SYNTAX OK'} else { $errors | %{ '  '+$_.Message } } }"
 # Expected: SYNTAX OK
 
-# Confirm ASCII-only (PS 5.1 irken|iex corruption rule — see §7.2)
-grep -cP "[^\x00-\x7F]" /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+# Confirm ASCII-only (PS 5.1 irm|iex corruption rule — see §7.3)
+grep -cP "[^\x00-\x7F]" /tmp/<your-template-name>-<customer>-<device>.ps1
 # Expected: 0
 ```
 
@@ -253,49 +252,49 @@ grep -cP "[^\x00-\x7F]" /tmp/setup-databyte-vpn-<customer>-<device>.ps1
 
 ```bash
 # Copy file to VPS
-scp /tmp/setup-databyte-vpn-<customer>-<device>.ps1 root@vpn-prod-01:/opt/vpn-portal/www/static/baked/
+scp /tmp/<your-template-name>-<customer>-<device>.ps1 root@<your-hostname>:<your-portal-web-root>/static/baked/
 
 # Set ownership + permissions
-ssh root@vpn-prod-01 'chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1 && chmod 644 /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@<your-hostname> 'chown <nginx-user>:<nginx-group> <your-portal-web-root>/static/baked/<your-template-name>-<customer>-<device>.ps1 && chmod 644 <your-portal-web-root>/static/baked/<your-template-name>-<customer>-<device>.ps1'
 ```
 
-**Why `vpn-portal:vpn-portal`:** the nginx user serving static files is `vpn-portal`. Wrong ownership = nginx 403s the file.
+**Why `<nginx-user>:<nginx-group>`:** the web server user serving static files. Wrong ownership = web server 403s the file. Verify on your deploy (e.g. `ps aux | grep nginx` to see the worker user, then `grep ^user /etc/nginx/nginx.conf`).
 
-**Why `chmod 644`:** nginx needs read; nothing needs write.
+**Why `chmod 644`:** web server needs read; nothing needs write.
 
 ### 4.7 Verify the URL is served
 
 ```bash
 curl -ksSL -o /dev/null -w "%{http_code} %{size_download}\n" \
-  https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+  https://<your-portal-domain>/static/baked/<your-template-name>-<customer>-<device>.ps1
 # Expected: 200 <size in bytes>
 ```
 
-If you get 403: perms wrong. If 404: file not at the path nginx expects. If 502/503: nginx down — check `ssh root@vpn-prod-01 'systemctl status nginx'`.
+If you get 403: perms wrong. If 404: file not at the path web server expects. If 502/503: web server down — check `ssh root@<your-hostname> 'systemctl status nginx'`.
 
 ### 4.8 Ship the URL to the customer
 
 **The canonical customer-facing invocation:**
 
 ```
-curl.exe -ksSL -o $env:TEMP\setup.ps1 https://vpn-portal.databyte.co.za/static/baked/setup-databyte-vpn-<customer>-<device>.ps1
+curl.exe -ksSL -o $env:TEMP\setup.ps1 https://<your-portal-domain>/static/baked/<your-template-name>-<customer>-<device>.ps1
 powershell -ExecutionPolicy Bypass -NoProfile -File $env:TEMP\setup.ps1
 ```
 
-**Shipping rules (HARDLOCK):**
+**Shipping rules:**
 - Send the **URL** to the customer via encrypted channel (portal message, PGP email, SFTP).
 - **NEVER email the `.ps1` file itself** — it contains plaintext credentials.
 - The customer does NOT need `$Username` or `$Password` — they're baked in.
 - The customer does NOT need to install PowerShell — it's built into Windows 10/11.
 
-### 4.9 Post-ship cleanup (on OC host / VPS)
+### 4.9 Post-ship cleanup (on operator host / VPS)
 
 ```bash
 # Remove working file (contains plaintext creds)
-shred -u /tmp/setup-databyte-vpn-<customer>-<device>.ps1
+shred -u /tmp/<your-template-name>-<customer>-<device>.ps1
 
 # Optional: remove from VPS too if customer only needs it for one install
-ssh root@vpn-prod-01 'rm /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@<your-hostname> 'rm <your-portal-web-root>/static/baked/<your-template-name>-<customer>-<device>.ps1'
 ```
 
 If the customer needs the URL later (e.g. new device), the file can be re-deployed at any time. There is no rotation requirement on the file itself; only the **LE cert fingerprint** rotates every ~60 days (see §7.5).
@@ -307,11 +306,11 @@ If the customer needs the URL later (e.g. new device), the file can be re-deploy
 If a customer has 2+ devices (laptop + desktop), generate **one file per device** with the SAME `$Username` is WRONG — each file has its own EAP identity.
 
 ```
-acme-corp-laptop01 → setup-databyte-vpn-acme-corp-laptop01.ps1
-acme-corp-desktop01 → setup-databyte-vpn-acme-corp-desktop01.ps1
+acme-corp-laptop01 → <your-template-name>-acme-corp-laptop01.ps1
+acme-corp-desktop01 → <your-template-name>-acme-corp-desktop01.ps1
 ```
 
-Both can share the same `$Password` (operator choice) or have different secrets. Either way: **each device has its own EAP identity in MariaDB radcheck.**
+Both can share the same `$Password` (operator choice) or have different secrets. Either way: **each device has its own EAP identity in FreeRADIUS/MariaDB radcheck.**
 
 To create the second identity: in the portal operator page, add a new device under the customer. Portal generates a new `$Username` + `$Password`. Use those in a new bake.
 
@@ -321,7 +320,7 @@ To create the second identity: in the portal operator page, add a new device und
 
 ### 6.1 What happens
 
-certbot auto-renews the LE cert via `dns-cloudflare` plugin. New cert has new SHA-256 fingerprint. The OLD fingerprint is invalidated.
+certbot auto-renews the LE cert via your DNS provider's ACME plugin. New cert has new SHA-256 fingerprint. The OLD fingerprint is invalidated.
 
 ### 6.2 What operator must do
 
@@ -329,7 +328,7 @@ certbot auto-renews the LE cert via `dns-cloudflare` plugin. New cert has new SH
 
 1. Get new fingerprint (post-rotation):
    ```bash
-   ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ssh root@<your-hostname> 'openssl x509 -in /etc/letsencrypt/live/<your-vpn-hostname>/cert.pem -noout -fingerprint -sha256'
    ```
 2. For each deployed baked file: re-run §4.3–§4.7 with the new fingerprint.
 3. Customers who try to install between rotation and re-bake will hit `[FAIL] Cert fingerprint mismatch!` (Step 1 exit code 1).
@@ -348,18 +347,18 @@ For lab / test customers, use **Variation B** (issuer-only). Zero maintenance.
 
 ## 7. Failure Modes — Real, Verified, With Fixes
 
-Every failure mode below was observed live (date in section), with evidence in MEMORY.md or session logs.
+Every failure mode below was observed live, with verified root cause and fix. Verify on your own deploy before applying.
 
 ### 7.1 `curl.exe: SEC_E_UNTRUSTED_ROOT` on cert chain
 
-**Symptom (msg #24704 + memory/2026-07-10.md entry 3, 2026-07-10 06:56 SAST):** customer's Windows tried `curl.exe -k -o $env:TEMP\setup.ps1 https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1`. Downloaded **35,167 bytes** of HTML — not 23,609 bytes of script. The HTML contained `input[type=date]`, `table > tbody`, SonicWall-style re-evaluation text, and verbatim "To have the rating of this web page re-evaluated".
+**Symptom:** customer's Windows tried `curl.exe -k -o $env:TEMP\setup.ps1 https://<your-vpn-hostname>/static/<your-template-name>`. Downloaded HTML (35,167 bytes in one real case) — not the expected script size. The HTML contained `input[type=date]`, `table > tbody`, SonicWall-style re-evaluation text, and "To have the rating of this web page re-evaluated".
 
-**Root cause (verified):** `myvpn.databyte.co.za` is flagged on Cloudflare's badware / SonicWall Content Filter Server (CFS) for Zun's network path (specific ISP/corporate firewall, not universal). OC host returns `200 23609` (clean) but Zun's network got the StopBadware HTML. The `vpn-portal.databyte.co.za` path was clean for Zun (different Cloudflare reputation profile — Google Trust Services WE1 vs LE).
+**Root cause (verified):** `<your-vpn-hostname>` is flagged on Cloudflare's badware / SonicWall Content Filter Server (CFS) for some network paths (specific ISP/corporate firewall, not universal). The operator's host returns `200 <correct-size>` (clean) but the customer's network got the StopBadware HTML. The `<your-portal-domain>` path was clean (different Cloudflare reputation profile).
 
-> **Note:** Whether `myvpn.databyte.co.za` returns badware HTML depends on the customer's network. Test before assuming. From OC host it returned 200/23609 as of 2026-07-10 15:50 UTC. From Zun's network it returned StopBadware HTML. Always use `vpn-portal.databyte.co.za` for delivery.
+> **Note:** Whether `<your-vpn-hostname>` returns badware HTML depends on the customer's network. Test before assuming. Always use `<your-portal-domain>` for delivery.
 
 **Fix:**
-1. Use `vpn-portal.databyte.co.za` for delivery URL instead of `myvpn.*`. Live 2026-07-10: working from Zun's network.
+1. Use `<your-portal-domain>` for delivery URL instead of `<your-vpn-hostname>`. Verified working from customer's network.
 2. If both fail: have customer install LE Root X2 manually (admin cmd):
    ```
    certutil -addstore -f Root C:\path\to\isrg-root-x2.pem
@@ -367,19 +366,19 @@ Every failure mode below was observed live (date in section), with evidence in M
 
 ### 7.2 `Invoke-WebRequest` returns HTML instead of .ps1
 
-**Symptom (msg #24704, 2026-07-10 12:48 UTC):** PowerShell `Invoke-WebRequest` to `https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1` returns Cloudflare badware HTML. Subsequent `& $env:TEMP\setup.ps1` tries to parse `<!DOCTYPE html>` as PowerShell → `Missing argument in parameter list` errors.
+**Symptom:** PowerShell `Invoke-WebRequest` to `https://<your-vpn-hostname>/static/<your-template-name>` returns Cloudflare badware HTML. Subsequent `& $env:TEMP\setup.ps1` tries to parse `<!DOCTYPE html>` as PowerShell → `Missing argument in parameter list` errors.
 
 **Root cause:** PowerShell 5.1's `Invoke-WebRequest` has known TLS 1.3 + ISRG Root X2 chain issues. Cloudflare returns HTML when the URL is flagged, and PowerShell follows it.
 
 **Fix:**
 1. Use `curl.exe` not `Invoke-WebRequest`. `curl.exe` (Win 10 1803+) handles TLS 1.3 + LE chain correctly.
-2. Use `vpn-portal.databyte.co.za` for delivery URL (not `myvpn.*`).
+2. Use `<your-portal-domain>` for delivery URL (not `<your-vpn-hostname>`).
 
 ### 7.3 PowerShell parse error on em-dash / smart quote
 
 **Symptom:** script downloaded fine but PowerShell 5.1 throws `Missing closing '}' in statement block` at the line of the em-dash.
 
-**Root cause (MEMORY.md line 944):** Non-ASCII chars in scripts served via `irm|iex` get corrupted by ANSI codepage parsing in PS 5.1. Em-dash U+2014, smart quotes, en-dash, ellipsis all break.
+**Root cause:** Non-ASCII chars in scripts served via `irm|iex` get corrupted by ANSI codepage parsing in PS 5.1. Em-dash U+2014, smart quotes, en-dash, ellipsis all break.
 
 **Fix:**
 - Use ASCII only in PowerShell scripts.
@@ -391,9 +390,9 @@ Every failure mode below was observed live (date in section), with evidence in M
 
 ### 7.4 `rasdial: Error 703: The port was disconnected`
 
-**Symptom:** `rasdial` returns 703 immediately, but `Get-VpnConnection -Name DatabyteVPN` polls back `Connected` 5-15s later.
+**Symptom:** `rasdial` returns 703 immediately, but `Get-VpnConnection -Name <vpn-connection-name>` polls back `Connected` 5-15s later.
 
-**Root cause (MEMORY.md line 905):** Win10 native IKEv2 client has a known GUI-seed requirement. `rasdial` returns 703 because the EAP profile UI hasn't been seeded yet. The actual connection completes in the background.
+**Root cause:** Win10 native IKEv2 client has a known GUI-seed requirement. `rasdial` returns 703 because the EAP profile UI hasn't been seeded yet. The actual connection completes in the background.
 
 **Fix:** No action needed if the poll loop catches `Connected` state within 90s. This is normal behavior, not a failure.
 
@@ -411,7 +410,7 @@ If the poll NEVER catches `Connected`:
 **Fix:**
 1. Pull new fingerprint:
    ```bash
-   ssh root@vpn-prod-01 'openssl x509 -in /etc/letsencrypt/live/myvpn.databyte.co.za/cert.pem -noout -fingerprint -sha256'
+   ssh root@<your-hostname> 'openssl x509 -in /etc/letsencrypt/live/<your-vpn-hostname>/cert.pem -noout -fingerprint -sha256'
    ```
 2. Re-bake the file with the new fingerprint (re-do §4.4).
 3. Re-deploy (re-do §4.6).
@@ -424,7 +423,7 @@ If the poll NEVER catches `Connected`:
 **Root cause:** Profile doesn't exist yet (rare race condition between Steps 3 and 6), OR `$ConnectionName` mismatch.
 
 **Fix:**
-1. Verify profile exists: `Get-VpnConnection -Name DatabyteVPN` (should not error).
+1. Verify profile exists: `Get-VpnConnection -Name <vpn-connection-name>` (should not error).
 2. If profile exists, check the script's `$ConnectionName` matches what `Get-VpnConnection` reports.
 3. Re-run the script.
 
@@ -448,18 +447,18 @@ If the poll NEVER catches `Connected`:
 
 **Symptom:** rasdial returns Error 13868 / 0x3634. IKEv2 phase 1 (cert) completes, but phase 1.5 (EAP) fails.
 
-**Root cause:** EAP identity or password wrong in MariaDB radcheck on VPS.
+**Root cause:** EAP identity or password wrong in FreeRADIUS/MariaDB radcheck.
 
 **Fix:**
 1. Verify in MariaDB (MariaDB runs on VPS host directly, not in Docker):
    ```bash
-   ssh root@vpn-prod-01 'mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
+   ssh root@<your-hostname> 'mysql -u root -e "SELECT UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"$Username\""'
    ```
-   Expected output for `zun-iphone`:
+   Expected output for your test customer:
    ```
    UserName  Attribute          Value
-   zun-iphone Cleartext-Password lX7aAy21YSu5cYxdKufKgw
-   zun-iphone NT-Password        E579CDE7F5E74DF181F5A825BA58DA55
+   <customer> Cleartext-Password <eap-secret>
+   <customer> NT-Password        <nt-hash>
    ```
 2. If password missing or `DISABLED-...` marker: customer is disabled. Re-enable:
    ```sql
@@ -475,36 +474,36 @@ If the poll NEVER catches `Connected`:
 
 **Fix:** Try a different network (phone hotspot, home Wi-Fi). No script-side fix — the block is upstream.
 
-### 7.11 `Connected but no 10.99.0.x address`
+### 7.11 `Connected but no <vpn-pool> address`
 
-**Symptom:** `Get-VpnConnection -Name DatabyteVPN` shows `Connected`, but `ipconfig /all` doesn't show a 10.99.0.x interface.
+**Symptom:** `Get-VpnConnection -Name <vpn-connection-name>` shows `Connected`, but `ipconfig /all` doesn't show a `<vpn-pool>` interface.
 
 **Root cause:** Stale state from prior session.
 
 **Fix:**
 ```
-rasdial DatabyteVPN /disconnect
-rasdial DatabyteVPN
+rasdial <vpn-connection-name> /disconnect
+rasdial <vpn-connection-name>
 ```
 If second attempt fails: Control Panel → Network Connections → right-click main adapter → Disable, wait 5s, Enable. Then connect.
 
 ### 7.12 `[FAIL] Could not download ISRG Root X2`
 
-**Symptom:** Step 0 fails to download `isrg-root-x2.pem` from `vpn-portal.databyte.co.za`.
+**Symptom:** Step 0 fails to download `isrg-root-x2.pem` from `<your-portal-domain>`.
 
-**Root cause:** VPS `certs/` dir missing the file, or perms wrong, or VPS nginx down.
+**Root cause:** VPS `certs/` dir missing the file, or perms wrong, or VPS web server down.
 
 **Fix:**
 1. Verify file exists on VPS:
    ```bash
-   ssh root@vpn-prod-01 'ls -la /opt/vpn-portal/www/static/certs/'
+   ssh root@<your-hostname> 'ls -la <your-portal-web-root>/static/certs/'
    ```
-   Expected: `isrg-root-x2.pem` and `root-ye.pem` present, owned by `vpn-portal:vpn-portal`.
+   Expected: `isrg-root-x2.pem` and `root-ye.pem` present, owned by `<nginx-user>:<nginx-group>`.
 2. If missing, re-deploy from the source-of-truth chain:
    ```bash
-   ssh root@vpn-prod-01 'awk "/BEGIN CERT/{n++} n==4{print} /END CERT/{if(n==4)exit}" /etc/letsencrypt/live/myvpn.databyte.co.za/fullchain.pem > /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chown vpn-portal:vpn-portal /opt/vpn-portal/www/static/certs/isrg-root-x2.pem && chmod 644 /opt/vpn-portal/www/static/certs/isrg-root-x2.pem'
+   ssh root@<your-hostname> 'awk "/BEGIN CERT/{n++} n==4{print} /END CERT/{if(n==4)exit}" /etc/letsencrypt/live/<your-vpn-hostname>/fullchain.pem > <your-portal-web-root>/static/certs/isrg-root-x2.pem && chown <nginx-user>:<nginx-group> <your-portal-web-root>/static/certs/isrg-root-x2.pem && chmod 644 <your-portal-web-root>/static/certs/isrg-root-x2.pem'
    ```
-3. If file present but download fails: check nginx (`ssh root@vpn-prod-01 'systemctl status nginx'`) and the access log (`/var/log/nginx/vpn-portal.access.log`).
+3. If file present but download fails: check web server (`ssh root@<your-hostname> 'systemctl status nginx'`) and the access log.
 4. Customer can also proceed — Step 0 will skip the download but Step 1 will abort if cert chain is untrusted. They'll get a clear error message.
 
 ### 7.13 `rasapi32!RasSetCredentials P/Invoke` not loading
@@ -522,37 +521,37 @@ If second attempt fails: Control Panel → Network Connections → right-click m
 
 ### 7.14 `Could not connect to server` during Step 1
 
-**Symptom:** Step 1 fails with `TCP connect to myvpn.databyte.co.za:443 timed out after 10s` or similar.
+**Symptom:** Step 1 fails with `TCP connect to <your-vpn-hostname>:443 timed out after 10s` or similar.
 
 **Root cause:** Customer's network can't reach the VPS directly. Could be:
 1. Customer behind strict firewall (proxy required, blocks UDP 500/4500 AND also blocks HTTPS to non-whitelisted hosts).
 2. Customer's ISP blocks the VPS IP.
-3. `myvpn.databyte.co.za` DNS resolving to a blocked/intercepted IP on the customer's network path.
+3. `<your-vpn-hostname>` DNS resolving to a blocked/intercepted IP on the customer's network path.
 
 **Fix:**
 1. Test from another network (phone hotspot).
-2. Verify DNS: `nslookup myvpn.databyte.co.za 8.8.8.8` → expect `154.65.110.44`. Compare with `nslookup myvpn.databyte.co.za` (customer's default resolver) — different IPs mean DNS interception.
-3. If customer can reach the URL but the script fails: check if HTTPS is being MITMed by corp proxy (corporate CA injected, breaks cert chain). Check: `curl.exe -kv https://myvpn.databyte.co.za/ 2>&1 | grep -i "subject:|issuer:"` — if issuer isn't `Let's Encrypt`, there's a proxy in the path.
-4. Try `vpn-portal.databyte.co.za` instead — different Cloudflare IP range, may bypass the block.
+2. Verify DNS: `nslookup <your-vpn-hostname> 8.8.8.8` → expect `<your-public-ip>`. Compare with `nslookup <your-vpn-hostname>` (customer's default resolver) — different IPs mean DNS interception.
+3. If customer can reach the URL but the script fails: check if HTTPS is being MITMed by corp proxy (corporate CA injected, breaks cert chain). Check: `curl.exe -kv https://<your-vpn-hostname>/ 2>&1 | grep -i "subject:|issuer:"` — if issuer isn't `Let's Encrypt`, there's a proxy in the path.
+4. Try `<your-portal-domain>` instead — different Cloudflare IP range, may bypass the block.
 
 ---
 
-## 8. Deployment Patterns We've Used
+## 8. Deployment Patterns
 
-### 8.1 Self-test (Zun's machine, 2026-07-10)
+### 8.1 Self-test (operator's machine)
 
-- Baked with `zun-iphone` + `lX7aAy21YSu5cYxdKufKgw` (live EAP identity).
-- Deployed to VPS `/opt/vpn-portal/www/static/baked/setup-databyte-vpn-zun-iphone-test.ps1` (note `-test` suffix — this is the operator-side test artifact, nuked after verification).
-- Ran on Windows 11 24H2 build 26200 via `curl.exe` + `powershell -File`.
-- All 8 steps green, `Connected`, strongSwan SA established, 177 MB transferred.
+- Bake with your test customer's identity + EAP secret.
+- Deployed to VPS `<your-portal-web-root>/static/baked/<your-template-name>-<test>-<device>.ps1` (note `-test` suffix — operator-side test artifact, can be removed after verification).
+- Ran on your test machine via `curl.exe` + `powershell -File`.
+- All 8 steps green, `Connected`, strongSwan SA established.
 
-### 8.2 Real customer (post-verification)
+### 8.2 Real customer (production)
 
-Same workflow. Filename uses actual customer identity (`setup-databyte-vpn-<customer-org>-<deviceNN>.ps1`). Shipped via portal message.
+Same workflow. Filename uses actual customer identity (`<your-template-name>-<customer-org>-<deviceNN>.ps1`). Shipped via portal message.
 
 ### 8.3 Test / dev (lab-mode)
 
-Use `setup-databyte-vpn.ps1` v2.6.5 generic canonical instead. Customer identity comes from `-t <BASE64PACKED_SLUG_TOKEN>` parameter. Token burned after use. See `host/vpn-portal/installer_tokens.py` for token generation.
+Use the generic self-serve installer (customer enters creds via prompt at install) instead. See [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md) Section 12 for details on the two flows.
 
 ---
 
@@ -562,7 +561,7 @@ When a customer reports an issue, retrieve the exact file they were given:
 
 ```bash
 # Fetch from VPS
-ssh root@vpn-prod-01 'cat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1' > /tmp/customer-file.ps1
+ssh root@<your-hostname> 'cat <your-portal-web-root>/static/baked/<your-template-name>-<customer>-<device>.ps1' > /tmp/customer-file.ps1
 
 # MD5 + SHA-256
 md5sum /tmp/customer-file.ps1
@@ -572,27 +571,27 @@ sha256sum /tmp/customer-file.ps1
 grep -E '^\$ServerCertSha256|^\$Username|^\$Password' /tmp/customer-file.ps1
 
 # Was the script file edited after deploy? (modification time)
-ssh root@vpn-prod-01 'stat /opt/vpn-portal/www/static/baked/setup-databyte-vpn-<customer>-<device>.ps1'
+ssh root@<your-hostname> 'stat <your-portal-web-root>/static/baked/<your-template-name>-<customer>-<device>.ps1'
 
 # Is the customer still in radcheck?
-ssh root@vps-1 'docker exec <mariadb-container> mysql -u root -e "SELECT id, UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"<customer>\"\"'
+ssh root@<your-hostname> 'mysql -u root -e "SELECT id, UserName, Attribute, Value FROM radius.radcheck WHERE UserName=\"<customer>\""'
 ```
 
 ---
 
-## 10. References (live, in repo)
+## 10. References
 
 | Document | Purpose |
 |---|---|
-| `docs/DAT-VPN-INT-WIN-001.md` (v1.1.0) | Internal master doc for the v2.6.5 generic canonical + baked template — full architecture, server config, IPsec params, design decisions |
-| `reports/DAT-VPN-INT-WIN-001-v1.1.0.docx` | ISO 9001 formatted version of the above |
-| `reports/DAT-VPN-EXT-WIN-001-v1.0.0.docx` | Customer-facing quickstart (one-liner, troubleshooting) |
-| `scripts/README-windows-vpn.md` | Concise operator reference for both flows |
-| `scripts/setup-databyte-vpn-windows.ps1` v1.0.0 | The template itself |
-| `scripts/setup-databyte-vpn.ps1` v2.6.5 | Generic canonical (alternative flow) |
-| `host/vpn-portal/installer_tokens.py` | Token generator for self-serve flow |
-| `MEMORY.md` § RULES | HARDLOCK list for filenames, perms, paths |
+| [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md) | Master build manual — full architecture, server config, PowerShell script source, failure modes, lessons |
+| [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) | Top-level architecture, "Build from scratch" section |
+| [`docs/QUICKSTART.md`](QUICKSTART.md) | Gateway-only self-host (no FreeRADIUS/MariaDB) |
+| [`docs/DAT-VPN-INT-WIN-HOSTILE-001.md`](DAT-VPN-INT-WIN-HOSTILE-001.md) | Manual PowerShell entry for FortiGate/SonicWall hostile networks |
+| Your template script (`<your-template-name>`) | The PowerShell template with editable BAKED-IN CONFIG block |
+| `host/vpn-portal/` | Portal web app (customer/operator UI) |
+| LE docs | `letsencrypt.org/docs/` | ACME DNS-01 challenge, cert lifecycle |
+| strongSwan docs | `docs.strongswan.org/` | IKEv2, eap-radius plugin, strongSwan.conf |
 
 ---
 
-**END OF DOCUMENT — DAT-VPN-INT-WIN-GUIDE-001 v1.0.0**
+**Hand-curated 2026-10-17 for generic use.** This doc is the operator-side playbook for generating per-customer baked Windows installers. For the full VPN stack build (server config, FreeRADIUS, MariaDB, portal, bot), see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md). For the generic self-serve installer (customer enters creds at install), use the script template without operator baking.

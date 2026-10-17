@@ -1,3 +1,11 @@
+# ⚠️ SUPERSEDED — DO NOT USE
+
+> **This document was archived on 2026-10-17.** It is databyte's internal bug log (format: date — title — what — fix — lesson). The specific failures and databyte-internal phase numbers (5A.6, 5A.7, etc.) are not applicable to a generic template.
+>
+> Future users can start their own bug log with the same format. The content below is preserved as-is for databyte's own use.
+
+---
+
 # ISSUES-LOG
 
 Every bug we hit building strongSwan v1.2. Format: **date — title — what happened — fix — lesson**. Reverse-chronological.
