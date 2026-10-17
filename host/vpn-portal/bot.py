@@ -1187,12 +1187,11 @@ async def ct_notes_entered(update, context):
     days = days_map.get(dur_key, 10)
     expires_at = (_dt.datetime.utcnow() + _dt.timedelta(days=days)).strftime("%Y-%m-%d")
     context.user_data["ct_expires_at"] = expires_at
-    # Compute tier_name (matches existing convention: 3day_NN, 10d_NN, etc.)
+    # Compute tier_name (matches DB convention: {N}day_{cap}, e.g. "14day_uncap").
+    # Was previously f"{dur_key}_{cap_key}" which produced "14d_uncap" (short form, no "ay")
+    # and failed create_client with 400 -- DB has "14day_uncap" (id=19) not "14d_uncap".
     cap_key = context.user_data.get("ct_cap", "uncap")
-    if dur_key == "3d_demo":
-        tier_name = f"3day_{cap_key}"
-    else:
-        tier_name = f"{dur_key}_{cap_key}"
+    tier_name = f"{days}day_{cap_key}"
     context.user_data["ct_tier_name"] = tier_name
 
     name = context.user_data["ct_name"]
