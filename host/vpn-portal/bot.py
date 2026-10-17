@@ -1785,8 +1785,16 @@ async def cmd_orphans(update, context):
     if not (broken or users_no_device or broken_devices or customers_no_devices):
         lines.append("\u2705 No drift detected.")
         lines.append("")
-    lines.append(f"_Run at {datetime.now(SAST).strftime('%Y-%m-%d %H:%M')} SAST_")
-    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    lines.append(f"Run at {datetime.now(SAST).strftime('%Y-%m-%d %H:%M')} SAST")
+    text = "\n".join(lines)
+    try:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        # Markdown parse error (e.g., unclosed entity) -- fall back to plain text
+        # so the audit still reaches Zun instead of dumping a traceback to journal
+        logger.warning(f"cmd_orphans markdown parse failed, falling back to plain text: {e}")
+        plain = text.replace("*", "").replace("_", "").replace("`", "'")
+        await update.message.reply_text(plain)
 
 
 async def cmd_deleteuser(update, context):
