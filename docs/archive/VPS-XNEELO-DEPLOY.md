@@ -1,3 +1,11 @@
+# ⚠️ SUPERSEDED — DO NOT USE
+
+> **This document was archived on 2026-10-17.** It is databyte's older Xneelo VPS deploy guide. The specific hostnames, IP addresses, Xneelo control-panel steps, and databyte-account context are not applicable to a generic template.
+>
+> Future users should follow the current generic deploy guide ([`docs/DEPLOYMENT.md`](../DEPLOYMENT.md), if present) or the master build manual ([`docs/DAT-VPN-INT-WIN-001.md`](../DAT-VPN-INT-WIN-001.md)). The content below is preserved as-is for databyte's own use.
+
+---
+
 # VPS-XNEELO-DEPLOY — Databyte VPN Production Deploy (Xneelo VPS)
 
 | Field | Value |
