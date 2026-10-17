@@ -3199,6 +3199,12 @@ def portal_me(session: dict = Depends(portal_auth.require_portal_session)):
 # See installer_tokens.py for full design notes.
 # Registered AFTER db_query/db_exec/_q are defined, but BEFORE entrypoint.
 import installer_tokens  # noqa: E402
+
+# === Version constant (added 2026-10-17 per live fact-check, CORR-2026-10-17-001) ===
+# Makes the README's "Portal v2.2.1" claim falsifiable via /opt/vpn-portal/DEPLOYED_SHA
+# and (after Portal restart) any future /api/version endpoint.
+__version__ = "v2.2.1"
+
 installer_tokens.register(
     app,
     db_query=db_query,
