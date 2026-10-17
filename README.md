@@ -2,7 +2,7 @@
 
 Self-hosted IKEv2 VPN for customer + operator use — **strongSwan 6.0.7** (EAP-MSCHAPv2) + **FreeRADIUS** (MariaDB identity) + **FastAPI portal** (customer self-service) + **Telegram bot** (operator admin).
 
-Production: `<your-hostname>` (cloud VPS, `<your-public-ip>`), Debian 13 trixie. Portal v2.2.1, Bot v2.5.0. Last live fact-check: 2026-10-15.
+Production: `<your-hostname>` (cloud VPS, `<your-public-ip>`), Debian 13 trixie. Portal v2.2.1, Bot v2.5.1. Last live fact-check: 2026-10-17.
 
 ## If you are...
 
@@ -23,10 +23,10 @@ Historical/superseded docs (e.g. older deploy guides, Phase 4E migration notes, 
 | Component | Version | Where it lives |
 |---|---|---|
 | Portal (FastAPI) | v2.2.1 | this repo, HEAD `8e02a6e` |
-| Bot (Telegram) | v2.5.0 | `vpn-admin-bot` repo, HEAD `01ad543` |
+| Bot (Telegram) | v2.5.1 | `vpn-admin-bot` repo, HEAD `37bc3aa` |
 | strongSwan image | `6.0.7-mschapv2-attrsql` | built fresh per host, not registry-pushed |
 
-This repo uses commit-history versioning, not GitHub releases.
+Latest tag: **v2.6.14** (this commit). See [GitHub releases](https://github.com/Dippie-WP/databyte-Ikev2/releases) for full history.
 
 ## Maintainer
 
