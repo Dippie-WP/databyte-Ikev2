@@ -680,12 +680,11 @@ async def cmd_start(update, context):
 
 async def cmd_help(update, context):
     audit("help")
-    await update.message.reply_text(
-        "/status /stats /sessions /customers\n"
-        "/customer <id|name> /create <name> [display]\n"
-        "/creds <id|name> /disable /enable <id|name>\n"
-        "/disconnect <name> /logs <name> [n=20]"
-    )
+    parts = []
+    for i, (name, _h, desc) in enumerate(BOT_COMMANDS):
+        sep = "\n" if i and i % 3 == 0 else "  "
+        parts.append(f"{sep}/{name} -- {desc}")
+    await update.message.reply_text("".join(parts))
 
 
 async def cmd_status(update, context):
@@ -1750,6 +1749,12 @@ async def cmd_orphans(update, context):
           AND NOT EXISTS (SELECT 1 FROM devices d WHERE d.customer_id = c.id)
         ORDER BY c.id
     """)
+    users_no_radcheck = app.db_query("""
+        SELECT u.id, u.name FROM users u
+        LEFT JOIN radcheck r ON r.UserName COLLATE utf8mb4_unicode_ci = u.name COLLATE utf8mb4_unicode_ci
+            AND r.Attribute = 'Cleartext-Password'
+        WHERE r.UserName IS NULL ORDER BY u.id
+    """)
 
     lines = ["*Orphan audit*", ""]
     if broken:
@@ -1781,7 +1786,13 @@ async def cmd_orphans(update, context):
             lines.append(f"- customer.id={r['id']} `{r['name']}`")
         lines.append("")
 
-    if not (broken or users_no_device or broken_devices or customers_no_devices):
+    if users_no_radcheck:
+        lines.append("*users with no radcheck (orphan, no EAP identity):*")
+        for r in users_no_radcheck:
+            lines.append(f"- users.id={r['id']} `{r['name']}`")
+        lines.append("")
+
+    if not (broken or users_no_device or broken_devices or customers_no_devices or users_no_radcheck):
         lines.append("\u2705 No drift detected.")
         lines.append("")
     lines.append(f"Run at {datetime.now(SAST).strftime('%Y-%m-%d %H:%M')} SAST")
