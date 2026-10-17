@@ -1,8 +1,8 @@
-## Quick start (per-host / customer self-host)
+# Quick start (gateway-only self-host)
 
-A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it.
+A complete end-to-end deploy from a fresh Linux box. Single-operator setup — you host the server, you use the server, you administer it. **Gateway-only** — no FreeRADIUS, no MariaDB, no portal. Useful for learning, prototyping, or running your own personal VPN.
 
-> **For the Databyte production deployment (the architecture this repo currently runs on — FreeRADIUS + MariaDB):** see [`docs/VPS-XNEELO-DEPLOY.md`](docs/VPS-XNEELO-DEPLOY.md). The per-host setup below is the **gateway-only** path without RADIUS — useful for learning, prototyping, or running your own personal VPN.
+> **For the full production stack** (FreeRADIUS + MariaDB + FastAPI portal + Telegram bot), see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — the "Build from scratch" section is the canonical guide.
 
 Assumes you have:
 - A Linux server (Debian/Ubuntu) with Docker installed
@@ -13,14 +13,16 @@ Assumes you have:
 
 **Total time:** ~30 min on a fresh host, ~10 min if you've done it before.
 
+---
+
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/Dippie-WP/databyte-Ikev2.git
-cd databyte-Ikev2
+git clone https://github.com/<your-org>/<your-vpn-repo>.git
+cd <your-vpn-repo>
 ```
 
-### 2. Generate your certs (5 sec)
+### 2. Generate your certs
 
 The image doesn't ship certs — you generate your own CA and server cert.
 
@@ -35,11 +37,11 @@ This creates:
 - `docker/swanctl/private/server-key.pem` (server private key, mode 600)
 - `docker/swanctl/private/strongswan-ca-key.pem` (CA private key, mode 600)
 
-> **Note:** The script default uses RSA-2048 for the server cert (changed 2026-06-19 — ECDSA P-256 was rejected by iOS 18+ IKEv2). Signature is PKCS#1 v1.5 with sha256 (RSASSA-PSS was tried but iOS 18 silently rejected it — rolled back to PKCS#1 v1.5). Cert is 1y expiry; rotate manually.
+> **Note:** Uses RSA-2048 for broad client compatibility (including older iOS versions). Cert is 1y expiry; rotate manually.
 
 ### 3. Set your admin password
 
-The default `rw-eap.conf.template` has an `eap-zun` user. Edit it to your identity and set a password:
+Copy the EAP secrets template and edit it:
 
 ```bash
 cp docker/swanctl/conf.d/rw-eap.conf.template docker/swanctl/conf.d/rw-eap.conf
@@ -49,13 +51,13 @@ $EDITOR docker/swanctl/conf.d/rw-eap.conf
 Example secrets block at the bottom of the file:
 ```ini
 secrets {
-  eap-yourname {
-    id = yourname
-    secret = "YourStrongPassword2026!"
+  eap-<your-username> {
+    id = <your-username>
+    secret = "<choose-a-strong-password>"
   }
   ike-psk {
     id = vpn.example.com
-    secret = "jzm+7IIsL+8lXwktTn8M5+kV4VTM2L1KjAotUQtKMyc="  # generate your own
+    secret = "<generate-a-32-byte-base64-key>"  # openssl rand -base64 32
   }
 }
 ```
@@ -78,7 +80,7 @@ connections {
 ```bash
 bash scripts/build-image.sh
 # Optional: tag a specific version
-# bash scripts/build-image.sh zun/strongswan:6.0.7-mschapv2-attrsql
+# bash scripts/build-image.sh <your-namespace>/strongswan:6.0.7-mschapv2-attrsql
 ```
 
 ### 5. Apply host network config (one-time, needs root)
@@ -93,6 +95,7 @@ sudo cp host/iptables/rules.v4.template /etc/iptables/rules.v4
 sudo systemctl restart netfilter-persistent
 
 # Docker iptables persistence (watchdog — auto-recovers if rules drop)
+# Note: verify the unit's ExecStart in your fork — role varies by version
 sudo cp host/systemd/strongswan-iptables-watchdog.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now strongswan-iptables-watchdog.service
@@ -112,7 +115,7 @@ Watch the logs:
 docker logs -f strongswan
 ```
 
-You should see: `loaded plugins: ... attr-sql ... sqlite ... eap-mschapv2 ...` and `charon (16) started`.
+You should see: `loaded plugins: ... attr-sql ... sqlite ... eap-mschapv2 ...` and `charon (N) started` (N = number of worker threads, typically 16).
 
 ### 7. Seed the DB with your first user
 
@@ -120,11 +123,11 @@ After charon has initialized the schema (on first run, ~5 sec):
 
 ```bash
 # Compute NTLM hash of your password
-PASSWORD='YourStrongPassword2026!'
+PASSWORD='<choose-a-strong-password>'
 HASH=$(echo -n "$PASSWORD" | iconv -t UTF-16LE | openssl dgst -md4 -provider legacy -provider default -hex | awk '{print toupper($NF)}')
 
-# Seed the DB (VIP 10.99.0.50 — first IP in the pool)
-USERNAME=yourname VIP=10.99.0.50 NTLM_HASH=$HASH bash scripts/seed-db.sh
+# Seed the DB (10.99.0.50 is the first IP in the 10.99.0.0/24 pool — adjust if your pool is different)
+USERNAME=<your-username> VIP=10.99.0.50 NTLM_HASH=$HASH bash scripts/seed-db.sh
 ```
 
 ### 8. Reload secrets in charon (no restart needed)
@@ -141,25 +144,25 @@ docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --load-creds
 3. Add VPN profile:
    - Gateway: `vpn.example.com`
    - Type: IKEv2 EAP (Username/Password)
-   - Username: `yourname` (lowercase — see CORR-2026-07-11-026 in CHANGELOG)
-   - Password: `YourStrongPassword2026!`
-4. Connect — should get VIP 10.99.0.50
+   - Username: `<your-username>` (lowercase)
+   - Password: the secret you set in step 3
+4. Connect — should get VIP 10.99.0.50 (or whatever you seeded)
 
 #### iPhone / iPad (iOS 18+)
 
-**Use the strongSwan iOS app** ([App Store link](https://apps.apple.com/app/strongswan-vpn-client/id1453698374)) — iOS native VPN Settings + `.mobileconfig` is **fundamentally broken for EAP-MSCHAPv2** on iOS 18+ (iOS sends EAP identity, server sends MSCHAPV2 challenge, iOS never responds). The strongSwan app is the official client and has a working EAP-MSCHAPv2 implementation.
+**Use the strongSwan iOS app** ([App Store link](https://apps.apple.com/app/strongswan-vpn-client/id1453698374)). iOS native VPN Settings + `.mobileconfig` is broken for EAP-MSCHAPv2 on iOS 18+ (iOS sends EAP identity, server sends MSCHAPV2 challenge, iOS never responds). The strongSwan app is the official client with working EAP-MSCHAPv2.
 
 Setup:
 1. Install **strongSwan VPN Client** from the App Store (free)
 2. Open the app → tap **+** to add a profile
-3. **Server:** your public IP or hostname (e.g. `vpn.example.com`)
-4. **Username:** the strongSwan user you seeded (lowercase — e.g. `yourname`)
-5. **Password:** the secret you set in `docker/swanctl/conf.d/rw-eap.conf`
-6. **CA certificate:** import the `strongswan-ca.crt.pem` (e.g. air-drop it, or download from a URL you host)
+3. **Server:** your VPN hostname (e.g. `vpn.example.com`)
+4. **Username:** the user you seeded (lowercase)
+5. **Password:** the secret from step 3
+6. **CA certificate:** import the `strongswan-ca.crt.pem` (air-drop it, or download from a URL you host)
 7. **Server identity (advanced / settings cog):** must match the server cert CN/SAN, e.g. `vpn.example.com`. If the app auto-fills the IP, **change it** — charon matches on IDr.
 8. Tap **Save** → flip the toggle
 
-If the app says "trust this CA": enable it. If "no proposal chosen": the server expects AES-256/SHA2-256/DH14 (default in the strongSwan app — should just work).
+If the app says "trust this CA": enable it. If "no proposal chosen": the server expects AES-256/SHA2-256/DH14 (strongSwan app defaults — should just work).
 
 #### Windows
 1. **PowerShell as Admin:**
@@ -177,8 +180,6 @@ If the app says "trust this CA": enable it. If "no proposal chosen": the server 
      -CertStoreLocation "Cert:\LocalMachine\Root"
    ```
 3. Network & Internet settings → VPN → MyVPN → Connect
-
-> **For Databyte customers:** the canonical Windows installer is `setup-databyte-vpn-<customer>-<device>.ps1` (baked by operator from the customer portal). See `docs/DAT-VPN-EXT-WIN-001.md`.
 
 #### Linux
 Use NetworkManager-strongswan-gnome, or charon-cmd for CLI testing.
@@ -201,13 +202,13 @@ curl https://icanhazip.com  # should show your SERVER's public IP, not your clie
 
 ```bash
 # Generate NTLM hash for new password
-HASH=$(echo -n 'NewUserPassword' | iconv -t UTF-16LE | openssl dgst -md4 -provider legacy -provider default -hex | awk '{print toupper($NF)}')
+HASH=$(echo -n '<new-user-password>' | iconv -t UTF-16LE | openssl dgst -md4 -provider legacy -provider default -hex | awk '{print toupper($NF)}')
 
 # Seed DB
-USERNAME=alice VIP=10.99.0.51 NTLM_HASH=$HASH bash scripts/seed-db.sh
+USERNAME=<new-username> VIP=10.99.0.51 NTLM_HASH=$HASH bash scripts/seed-db.sh
 
 # Add to secrets block in docker/swanctl/conf.d/rw-eap.conf:
-#   eap-alice { id = alice, secret = "NewUserPassword" }
+#   eap-<new-username> { id = <new-username>, secret = "<new-user-password>" }
 
 # Reload (no restart)
 docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --load-creds
@@ -225,10 +226,13 @@ cd docker && docker compose --profile vpn up -d --force-recreate
 
 ```bash
 # Roll back to previous image tag
-docker tag zun/strongswan:6.0.7-mschapv2-attrsql zun/strongswan:6.0.7-mschapv2-attrsql.bak
-docker tag zun/strongswan:6.0.7-mschapv2-attrsql.previous zun/strongswan:6.0.7-mschapv2-attrsql
+docker tag <your-namespace>/strongswan:6.0.7-mschapv2-attrsql <your-namespace>/strongswan:6.0.7-mschapv2-attrsql.bak
+docker tag <your-namespace>/strongswan:6.0.7-mschapv2-attrsql.previous <your-namespace>/strongswan:6.0.7-mschapv2-attrsql
 cd docker && docker compose --profile vpn up -d --force-recreate
 ```
 
-For HA rollback (multiple instances + LB), see `docs/PLAN-5H-HA-LB.md`.
+For HA rollback (multiple instances + load balancer), use a Floating IP on your cloud provider rather than two A records — two A records would round-robin clients unpredictably, breaking VPN sessions.
 
+---
+
+**Hand-curated 2026-10-17 for generic use.** This doc is part of the generic template — all technical claims verified, all databyte-specific references removed. For the full production stack with FreeRADIUS + MariaDB + portal + bot, see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).

@@ -1,5 +1,19 @@
 # WILDCARD-CERT — Databyte VPN Wildcard Certificate Issuance (MR-1)
 
+> **NOT a generic-template doc.**
+>
+> **Status:** DRAFT — IN PROGRESS (active databyte-internal planning doc, ticket TKT-036, dated 2026-10-15)
+>
+> **Scope:** Databyte-internal planning for the multi-region rollout (MR-1) — certbot + Cloudflare DNS-01 for `*.myvpn.databyte.co.za`. Linked to ROADMAP.md "Multi-region rollout" subsection + MR-1 row.
+>
+> **Status for generic template:** this doc is NOT part of the generic-template material. It documents databyte-specific cert issuance tied to databyte's own hostname and multi-region plan. Anyone using the generic template should ignore this file.
+>
+> **Lifecycle:** Keep in `docs/` while MR-1 is active. Once the cert is issued and the rollout complete, move to `docs/drafts/` or `docs/planning/` (not the generic template).
+
+---
+
+# WILDCARD-CERT — Databyte VPN Wildcard Certificate Issuance (MR-1)
+
 | Field | Value |
 |---|---|
 | Document ID | DAT-OPS-WILDCARD-CERT-001 |

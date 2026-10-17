@@ -1,3 +1,11 @@
+# ⚠️ SUPERSEDED — DO NOT USE
+
+> **This document was archived on 2026-10-17.** It is databyte's internal portal log retention guide. The specific paths, journald tuning values, and Xneelo VPS context are not applicable to a generic template.
+>
+> Future users should configure their own log retention based on their portal's actual layout. The content below is preserved as-is for databyte's own use.
+
+---
+
 # OPS-LOG-MANAGEMENT — VPN Portal Log Retention
 
 > **Added 2026-06-23 (LOW #3 polish).** Documents what logs the portal generates,
