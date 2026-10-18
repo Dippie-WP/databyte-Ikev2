@@ -1,0 +1,68 @@
+# rw-eap-attrsql.conf — Phase 5A lock-in
+# IKEv2 + EAP-MSCHAPv2 (server cert) + attr-sql pool assignment
+# Coexists with rw-psk (no port conflict; auth-type dispatch)
+
+connections {
+  rw-eap {
+    version = 2
+    send_cert = always
+    local_addrs  = 0.0.0.0
+    remote_addrs = %any
+    pools        = rw-pool
+    proposals    = aes256-sha256-modp2048,aes128-sha256-modp2048
+    unique       = replace
+    rekey_time   = 24h
+    reauth_time  = 24h
+    mobike       = yes
+    fragmentation = yes
+    dpd_delay    = 30s
+    dpd_timeout  = 120s
+
+    local {
+      auth = pubkey
+      certs = server.crt.pem
+      cacerts = strongswan-ca.crt.pem
+      id    = "vpn.homelab.local"
+    }
+    remote {
+      auth = eap-mschapv2
+      eap_id = %any
+    }
+
+    children {
+      net {
+        mode = tunnel
+        local_ts  = 0.0.0.0/0
+        remote_ts = dynamic
+        dpd_action   = clear
+        start_action = start
+        rekey_time   = 1h
+        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+      }
+    }
+  }
+}
+
+secrets {
+  eap-zun {
+    id     = zun
+    secret = "uA0h4PFN7ASKraKw"
+  }
+  eap-zun-iphone {
+    id     = zun-iphone
+    secret = "ZunIphoneEap2026"
+  }
+  eap-zun-windows {
+    id     = zun-windows
+    secret = "ZunWindowsEap2026"
+  }
+
+  eap-demo-phone {
+    id     = demo-phone
+    secret = "E6fkfBK6DvUHkG1jcipJrQ"
+  }
+  eap-demo-laptop {
+    id     = demo-laptop
+    secret = "F-IZedqA46cEsR3mNvOgqQ"
+  }
+}

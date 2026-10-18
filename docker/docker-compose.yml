@@ -49,7 +49,7 @@ services:
       - ./strongswan.d/00-virtual-ip.conf:/etc/strongswan.d/00-virtual-ip.conf:ro
       - ./strongswan.d/10-eap-radius.conf:/etc/strongswan.d/10-eap-radius.conf:ro
       # Host-side charon log (bind-mounted to container's filelog path)
-      - /var/log/charon-log-host/charon.log:/var/log/charon-filog.log:rw
+      - /var/log/charon-log-host/charon.log:/var/log/charon-host.log:rw
       # SQLite DB with user data + leases
       - /var/lib/strongswan:/var/lib/strongswan
     # Healthcheck: verify VICI socket AND charon responds.

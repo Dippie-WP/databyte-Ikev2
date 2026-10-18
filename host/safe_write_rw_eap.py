@@ -200,9 +200,27 @@ def atomic_write_conf_remote(
     ssh(["mkdir", "-p", backup_dir])
     ssh(["cp", conf_path, bak_path])
 
-    # 2. Write content to temp file via 'tee' so stdout/stderr stay clean
+    # 2. Write content to temp file via 'tee >/dev/null' so the content does
+    #    NOT also go to SSH stdout. The bare 'tee' (used pre-fix) caused
+    #    SafeWriteError with a 194-byte truncation on ~5KB content because
+    #    the subprocess stdout pipe + SSH channel window interaction could
+    #    drop the tail of the content (observed 2026-10-17, TKT-XXX).
+    #    Redirecting tee's stdout to /dev/null means SSH carries no payload
+    #    back -- only the temp file is written. Size check then sees the
+    #    full content.
     try:
-        ssh(["tee", tmp_path], stdin_data=content_bytes)
+        # Pass >/dev/null as a separate arg to tee (not inside a sh -c string).
+        # The previous version used ["sh", "-c", f"tee {tmp_path} >/dev/null"]
+        # which the remote shell parsed as: sh -c tee PATH >/dev/null
+        # meaning: sh runs `tee` (no file arg) with stdout redirected to /dev/null.
+        # Result: no file created, SafeWriteError on stat.
+        # By passing >/dev/null as a separate arg, the remote shell sees:
+        #   tee PATH >/dev/null
+        # and parses it as: tee writes to PATH, > redirects tee's stdout to /dev/null.
+        # This avoids the SSH channel carrying the content back through the
+        # subprocess stdout pipe (which was the root cause of the 194-byte
+        # truncation observed on 2026-10-17).
+        ssh(["tee", tmp_path, ">/dev/null"], stdin_data=content_bytes)
     except Exception:
         ssh(["rm", "-f", tmp_path])
         raise
