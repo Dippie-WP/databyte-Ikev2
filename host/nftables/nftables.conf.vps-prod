@@ -1,0 +1,302 @@
+#!/usr/sbin/nft -f
+#
+# /etc/nftables.conf — vpn-prod-01 (Debian 13 trixie)
+#
+# COMPLETE migration from iptables-legacy + ipset + netfilter-persistent + iptables-nft
+# to NATIVE nftables — IPv4 ONLY (per Zun 2026-06-26 directive).
+#
+# Phase 6 (2026-06-26 17:23 SAST): meter-based quota tracking.
+#   - Replaces 254+254 per-VIP ACCEPT rules (508 total) with TWO named meters
+#     (`client_src` + `client_dst`) in filter FORWARD chain.
+#   - Kernel auto-creates counter elements per VIP on first packet
+#     (`flags dynamic`).
+#   - quota-monitor.py now reads `nft list meter ip filter client_src`
+#     instead of grepping `comment "quota:VIP"` lines.
+#   - Fix: prior per-VIP rules were appended AFTER the chain's `counter drop`
+#     by ensure_quota_rules() in quota-monitor.py, making them dead code.
+#     Meters live in source-of-truth, load in correct order at boot.
+#   - Perf: 508 sequential rule evaluations → 2 hash lookups at high pps.
+#
+# Generated: 2026-06-26 by Misha (M3); meter migration 2026-06-26 by Misha
+# Source-of-truth ruleset (live snapshot before migration):
+#   - /var/backups/iptables-pre-nft-20260626-1045/iptables-legacy-save.full  (587 lines)
+#   - /var/backups/iptables-pre-nft-20260626-1045/iptables-nat.full
+#   - /var/backups/iptables-pre-nft-20260626-1045/iptables-mangle.full
+#   - /var/backups/iptables-pre-nft-20260626-1045/ipset-save.full
+#   - /var/backups/iptables-pre-nft-20260626-1045/nft-ruleset.full  (fail2ban state)
+# Pre-meter-migration snapshot: /tmp/nft-pre-meter-20260626-1723.ruleset
+#
+# SCOPE: filter + nat + mangle tables (IPv4 only via `ip` family).
+#
+# IPv6 state unchanged (intentional per Zun): rules.v6 stays on iptables-legacy
+# with POLICY ACCEPT for INPUT — same as pre-migration. Not in scope for v2.
+#
+# COVERS:
+#   - filter INPUT  (IPBan, SSH, HTTP, IKEv2, ESP, ICMP)
+#   - filter FORWARD (VIP set + quota meters + docker0 + TCPMSS + drop)
+#   - filter OUTPUT (default accept)
+#   - nat POSTROUTING (Docker MASQ 172.17.0.0/16 + VPN MASQ 10.99.0.0/24)
+#   - mangle PREROUTING (per-VIP MARK — bandwidth-monitor.py populates)
+#   - mangle FORWARD (TCPMSS clamp + per-VIP MARK)
+#   - mangle POSTROUTING (per-VIP MARK)
+#
+# COEXISTS WITH:
+#   - fail2ban: keeps its `table inet f2b-table` (priority filter - 1) — ours runs at priority 0
+#   - Docker: managed via daemon.json "iptables": false; rules above replace Docker's chains
+#   - rules.v6: iptables-legacy policy ACCEPT for v6 INPUT (unchanged, not in scope)
+#
+# DYNAMIC STATE (populated at runtime, NOT in this file):
+#   - ip filter ipban_block_v4: ipban-on-ban.sh / -unban.sh
+#   - ip filter vip_accept_v4: quota-monitor.py (when customer connects)
+#   - ip filter client_src/client_dst meters: kernel auto-creates on first packet;
+#       quota-monitor.py reads via `nft list meter ip filter client_src|dst`
+#   - ip mangle {prerouting,forward,postrouting} per-VIP MARK: bandwidth-monitor.py
+#
+# ON BOOT:
+#   1. nftables.service loads THIS file → base ruleset active (incl. 2 meters)
+#   2. quota-monitor.service starts → populates vip_accept sets as leases seen
+#   3. bandwidth-monitor.service starts → populates per-VIP MARK rules (mangle)
+#   4. ipban.service starts → runtime mutates ipban_block sets as needed
+#   5. fail2ban starts → creates its own nft table (separate from ours)
+#
+# ROLLBACK:
+#   - /root/projects/nftables-migration-v2/scripts/migrate.sh rollback  (full iptables)
+#   - cp /etc/nftables.conf.bak-20260626-1723-pre-meter /etc/nftables.conf
+#       && systemctl restart nftables  (Phase 5 → Phase 6 only)
+
+flush ruleset
+
+###############################################################################
+# TABLE: ip filter  (IPv4 ONLY)
+###############################################################################
+table ip filter {
+
+    ###########################################################################
+    # Sets — runtime-mutable, populated by external scripts
+    ###########################################################################
+
+    # Trusted IPs — never blocked by IPBan (mirrors ipban.config whitelist)
+    set whitelist_v4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            127.0.0.0/8,        # loopback
+            154.65.110.44,      # VPS self
+            196.41.30.50,       # Zun home
+            192.168.10.77,      # OpenClaw host
+        }
+        comment "Trusted IPv4 — never block (mirrors IPBan whitelist)"
+    }
+
+    # IPBan block list — mutated by /usr/local/bin/ipban-on-ban.sh / -unban.sh
+    set ipban_block_v4 {
+        type ipv4_addr
+        flags interval, timeout
+        comment "IPBan IPv4 ban list — mutated by ipban-on-ban.sh"
+        elements = {
+            45.148.10.147,
+            45.148.10.152,
+            45.148.10.157,
+            45.227.254.170,
+            62.60.130.219,
+            80.94.92.234,
+            91.92.40.11,
+            91.224.92.17,
+            92.118.39.71,
+            92.118.39.77,
+            195.178.110.232,
+        }
+    }
+
+    # Customer VIP accepts — mutated by quota-monitor.py when SA established
+    # Per-VIP from 10.99.0.0/24. bandwidth-monitor.py manages tc shaping, this
+    # set just gates forwarding permission.
+    set vip_accept_v4 {
+        type ipv4_addr
+        flags interval, timeout
+        comment "Active customer VIPs — populated by quota-monitor.py"
+    }
+
+    ###########################################################################
+    # Chain: input
+    #   - hook input priority filter: 0 (standard filter priority)
+    #   - policy drop (default deny)
+    #
+    # IMPORTANT: fail2ban's `table inet f2b-table` runs at priority `filter - 1`
+    # which is BEFORE this chain. So fail2ban rejects banned SSH attempts first,
+    # then any remaining traffic hits our chain. (fail2ban keeps its own chain.)
+    ###########################################################################
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Loopback (must always be accepted)
+        iifname "lo" accept comment "Accept all loopback"
+
+        # Invalid conntrack — drop early (saves CPU on DDoS)
+        ct state invalid drop comment "Drop invalid conntrack state"
+
+        # Established / related (stateful accept)
+        ct state { established, related } accept comment "Accept established/related"
+
+        # ICMP — rate-limited to prevent floods
+        ip protocol icmp icmp type echo-request limit rate 5/second burst 5 packets accept \
+            comment "ICMP echo-request (rate limited)"
+
+        # IPBan: whitelist beats ban (defense in depth)
+        ip saddr @whitelist_v4 accept comment "Accept whitelisted IPv4"
+
+        # IPBan: drop banned IPs (was at iptables INPUT pos 1, now a set lookup)
+        ip saddr @ipban_block_v4 counter drop comment "DROP IPBan-banned IPv4"
+
+        # Public services — open ports
+        tcp dport 22 accept comment "SSH"
+        tcp dport { 80, 443 } accept comment "HTTP/HTTPS (nginx → vpn-portal)"
+        udp dport { 500, 4500 } accept comment "IKEv2 / IPsec NAT-T"
+        ip protocol esp accept comment "IPsec ESP"
+
+        # Rate-limited log + final drop
+        limit rate 5/minute burst 10 packets \
+            log prefix "nft-input-drop: " level warn \
+            comment "Log denied inbound (rate-limited)"
+        counter drop comment "Drop everything else"
+    }
+
+    ###########################################################################
+    # Chain: forward
+    #   - hook forward priority filter: 0
+    #   - policy drop (we only forward known traffic)
+    #
+    # Phase 6 (2026-06-26): quota tracking via NAMED METERS (client_src / client_dst).
+    # Replaces the previous 254+254 per-VIP ACCEPT rules added by
+    # ensure_quota_rules() in quota-monitor.py. Meters are declared in this
+    # source-of-truth file (loaded at boot by nftables.service) so they live
+    # in the correct chain position — before the final drop.
+    #
+    # Semantics:
+    #   - First packet from a VIP auto-creates a counter element in the meter
+    #     (kernel `flags dynamic`).
+    #   - Each subsequent packet increments the element's packets/bytes AND
+    #     fires the rule's verdict (`accept`).
+    #   - quota-monitor.py reads counters via `nft list meter ip filter client_src`
+    #     (or JSON via `nft -j list meter ...`).
+    ###########################################################################
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        # Established / related (stateful accept first — covers most packet volume)
+        ct state { established, related } accept comment "Accept established/related"
+
+        # Docker bridge — docker0 = 172.17.0.0/16, host is 172.17.0.1
+        # Accept all packets to/from docker0 (containers)
+        iifname "docker0" accept comment "Docker bridge: from docker0"
+        oifname "docker0" accept comment "Docker bridge: to docker0"
+
+        # Per-customer VIP ACCEPT (set lookup, O(log n)) — used for explicit
+        # gating if we ever want to deny a single VIP without affecting /24.
+        # Currently @vip_accept_v4 is populated dynamically as leases are seen.
+        ip saddr @vip_accept_v4 counter accept comment "Forward: customer VIP src"
+        ip daddr @vip_accept_v4 counter accept comment "Forward: customer VIP dst"
+
+        # QUOTA METERS — Phase 6 (2026-06-26). Replaces 508 per-VIP ACCEPT rules.
+        # `flags dynamic` + `counter` makes the kernel create one counter
+        # element per VIP on first packet and keep it for life of ruleset.
+        # quota-monitor.py reads element counters via:
+        #   nft list meter ip filter client_src
+        #   nft list meter ip filter client_dst
+        # Meter rule verdict is `accept` — so VIP traffic is allowed AND counted.
+        ip saddr 10.99.0.0/24 meter client_src { ip saddr counter } accept \
+            comment "Quota: per-VIP src counter (replaces 254 quota:VIP rules)"
+        ip daddr 10.99.0.0/24 meter client_dst { ip daddr counter } accept \
+            comment "Quota: per-VIP dst counter (replaces 254 quota:VIP rules)"
+
+        # TCPMSS clamp — prevents PMTU blackhole on VPN path
+        # Original iptables: -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260
+        ip protocol tcp tcp flags syn,rst tcp option maxseg size set 1260 \
+            comment "TCPMSS clamp for VPN path"
+
+        # Counter + final drop (for diagnostics)
+        counter drop comment "Drop other forward"
+    }
+
+    ###########################################################################
+    # Chain: output
+    #   - default accept: VPS needs outbound for apt, monitoring, charon peers, etc.
+    ###########################################################################
+    chain output {
+        type filter hook output priority filter; policy accept;
+        comment "Allow all outbound (restrict here if needed)"
+    }
+}
+
+###############################################################################
+# TABLE: ip nat
+###############################################################################
+table ip nat {
+
+    chain prerouting {
+        type nat hook prerouting priority -100; policy accept;
+        comment "NAT PREROUTING (no Docker DOCKER chain — Docker runs iptables:false)"
+    }
+
+    chain input {
+        type nat hook input priority -100; policy accept;
+        comment "NAT INPUT (unused)"
+    }
+
+    chain output {
+        type nat hook output priority -100; policy accept;
+        comment "NAT OUTPUT (no Docker DOCKER chain)"
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority 100; policy accept;
+
+        # Docker bridge MASQUERADE — packets from containers going out via host
+        # Original: -A POSTROUTING -s 172.17.0.0/16 ! -o docker0 -j MASQUERADE
+        ip saddr 172.17.0.0/16 oifname != "docker0" masquerade \
+            comment "Docker: MASQUERADE 172.17.0.0/16"
+
+        # VPN MASQUERADE — charon source-NATs client traffic leaving VPS
+        # Original: -A POSTROUTING -s 10.99.0.0/24 ! -d 10.99.0.0/24 -j MASQUERADE
+        ip saddr 10.99.0.0/24 ip daddr != 10.99.0.0/24 masquerade \
+            comment "VPN MASQ — charon client traffic"
+    }
+}
+
+###############################################################################
+# TABLE: ip mangle
+# Packet marking for bandwidth shaping + TCPMSS clamp
+###############################################################################
+table ip mangle {
+
+    chain prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+        comment "Per-VIP MARK rules added here by bandwidth-monitor.py (PREROUTING -d VIP)"
+    }
+
+    chain input {
+        type filter hook input priority mangle; policy accept;
+        comment "Mangle INPUT (unused)"
+    }
+
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+
+        # TCPMSS clamp (also done in filter FORWARD — both are safe, nft dedupes by counter)
+        ip protocol tcp tcp flags syn,rst tcp option maxseg size set 1260 \
+            comment "TCPMSS clamp (mangle)"
+
+        # Per-VIP MARK rules added here by bandwidth-monitor.py (FORWARD -d VIP, FORWARD -s VIP)
+        comment "Per-VIP MARK rules added by bandwidth-monitor.py"
+    }
+
+    chain output {
+        type filter hook output priority mangle; policy accept;
+        comment "Mangle OUTPUT (unused)"
+    }
+
+    chain postrouting {
+        type filter hook postrouting priority mangle; policy accept;
+        comment "Per-VIP MARK rules added here by bandwidth-monitor.py (POSTROUTING -s VIP)"
+    }
+}

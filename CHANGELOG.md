@@ -1,0 +1,1205 @@
+# Changelog
+
+All notable changes to databyte-Ikev2 are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+this project adheres to [Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+### v1.4.0 — 2026-06-26
+
+**Phase 5/6 quota metering on nftables + repo alignment with deployed state.**
+
+#### 1. nft METER migration (replaces 508 per-VIP rules)
+
+The quota engine (`quota-monitor.py`) was reading counters from 254
+outbound + 254 inbound per-VIP ACCEPT rules (508 rules total) in the
+nftables FORWARD chain. Replaced with **two named meters** in source:
+
+```
+ip saddr 10.99.0.0/24 add @client_src { ip saddr counter } accept
+ip daddr 10.99.0.0/24 add @client_dst { ip daddr counter } accept
+```
+
+- **Why:** Per-VIP rules were appended after `counter drop` in FORWARD
+  by `ensure_quota_rules()` (Phase 5 2026-06-26 11:30 UTC), making them
+  **dead code**. Quota tracking silently broke. (Bug #189 in MEMORY.)
+- **How:** Meters use `flags dynamic` — kernel auto-creates counter
+  elements per VIP on first packet. 508 sequential rule evaluations
+  become 2 hash lookups at high pps.
+- **Source-of-truth:** `host/nftables/nftables.conf.vps-prod` (tracked
+  in repo, applied via `host/nftables/apply.sh`).
+
+#### 2. Fix `swanctl --list-sas` EAP identity parsing
+
+strongSwan 6.0.7 changed `swanctl --list-sas` output format. The old
+regex expected `remote '<eap-id>' @ ip[port] [vip]`, but actual output
+is `remote '<outer-ip>' @ ip[port] EAP: '<eap-id>' [vip]`. New regex
+captures EAP identity after `EAP:` and VIP from the bracketed IP at end
+of line.
+
+- **Impact:** All quota billing was silently returning empty since
+  2026-06-22 (last commit before format change). Existing customers
+  with pre-fix data (zunaid) had stale `data_used_bytes`. New
+  customers (saalieg, zade, …) had `data_used_bytes = 0` forever.
+- **Fix:** `quota-monitor.py:228-230` — regex updated to match actual
+  format. Verified end-to-end: saalieg now bills correctly.
+
+#### 3. Bandwidth monitor: iptables-legacy → nft mangle MARK
+
+`bandwidth-monitor.py` now writes nft mangle MARK rules instead of
+iptables-legacy. Phase 5D nft edition (committed 2026-06-26).
+
+- **Why:** Phase 5 (2026-06-26) migrated firewall manager from
+  iptables-legacy to nftables. bandwidth-monitor was still using
+  iptables-legacy, which now has empty FORWARD chain.
+- **Helper module:** `quota/bandwidth-monitor-nft.py` provides
+  `add_mark_rule`, `remove_mark_rule`, `mark_rule_present`.
+
+#### 4. Repo alignment (deployed → canonical)
+
+Closed the canonical-vs-deployed drift that had accumulated since
+2026-06-22:
+
+- `quota/quota-monitor.py` — Phase 6 (meter + regex fix)
+- `quota/bandwidth-monitor.py` — Phase 5D nft edition
+- `quota/bandwidth-monitor-nft.py` — helper module (NEW)
+- `host/systemd/quota-monitor.service` — Phase 6 description
+- `host/systemd/bandwidth-monitor.service` — NEW (was only in `/etc`)
+- `host/nftables/nftables.conf.vps-prod` — NEW (production ruleset)
+- `host/nftables/apply.sh` — NEW (validates + installs to /etc)
+- `host/ssl/ISRG_Root_X1.crt` + `X2.crt` + `install-isrg-roots.sh` —
+  tracked for repeatable LE chain install on Debian 13
+- `host/ssl/README.md` — NEW
+- `docker/swanctl/conf.d/rw-eap.conf` — UNTRACKED (operator-managed,
+  contains 29 live EAP secrets). `.example` template tracked.
+- `docker/swanctl/conf.d/rw-psk.conf` — UNTRACKED (operator-managed).
+
+`.gitignore` updated to exclude operator-managed configs:
+```
+docker/swanctl/conf.d/rw-eap.conf
+docker/swanctl/conf.d/rw-psk.conf
+docker/swanctl.bak.*/         # full swanctl/ backups
+docker/swanctl/x509ca/*.srl   # OpenSSL bookkeeping
+```
+
+#### 5. Docker image: `zun/strongswan:1.4.0`
+
+Rebuilt from canonical source. Same strongSwan 6.0.7 base + EAP-MSCHAPv2
++ attr-sql + sqlite as before. Tagged `1.4.0` for traceability.
+
+**Important:** Container-side code (charon, swanctl) is unchanged from
+`6.0.7-mschapv2-attrsql`. The new tag is just a rebuild to align image
+metadata with repo tag `v1.4.0`. No production restart required — same
+image content, new label.
+
+#### 6. Verification
+
+- `nft list ruleset` — 127 lines, 2 meter rules in forward chain
+- `nft list meter ip filter client_src` — saalieg `10.99.0.1`
+  `packets 2614 bytes 535838`, ticking every 10s
+- `customers.data_used_bytes` — saalieg updates from 0 → 535786 (live)
+- All systemd services active: `nftables`, `fail2ban`, `docker`,
+  `quota-monitor`, `bandwidth-monitor`, `ipban`, `nginx`
+- charon ESTABLISHED SA: `rw-eap #5 saalieg-laptop @ 102.182.117.43`
+- `myvpn.databyte.co.za/api/health` → HTTP 200
+
+#### 7. Files changed
+
+```
+M  .gitignore                                     (+6 -0)
+M  docker/start.sh                                (chmod +x, path fix)
+D  docker/swanctl/conf.d/rw-eap.conf              (untrack; live preserved)
+A  docker/swanctl/conf.d/rw-eap.conf.example      (NEW: sanitized template)
+A  host/nftables/nftables.conf.vps-prod           (NEW: 13627 bytes)
+A  host/nftables/apply.sh                         (NEW)
+A  host/ssl/ISRG_Root_X1.crt                      (already there, now tracked)
+A  host/ssl/ISRG_Root_X2.crt                      (already there, now tracked)
+A  host/ssl/install-isrg-roots.sh                 (already there, now tracked)
+A  host/ssl/README.md                             (NEW)
+M  host/systemd/quota-monitor.service             (Phase 6 description)
+A  host/systemd/bandwidth-monitor.service         (NEW: was only in /etc)
+M  quota/bandwidth-monitor.py                     (Phase 5D nft edition)
+A  quota/bandwidth-monitor-nft.py                 (NEW: helper module)
+M  quota/quota-monitor.py                         (Phase 6 meter + EAP regex)
+```
+
+#### 8. Lessons (logged in ~/self-improving/memory.md)
+
+- **#189**: Migration scripts that append rules after `counter drop`
+  create dead code. Always check `nft -a list chain` order vs source.
+- **#190**: Meters > per-VIP rules for dynamic membership (`flags
+  dynamic`, hash lookup, trivial per-element reset).
+- **#191**: `nft -c -f <file>` BEFORE `nft -f <file>` for syntax safety.
+- **#192**: `git rm --cached` for files that can't be moved (bind-mount
+  paths). Lets you untrack without affecting live processes.
+- **#193**: Verify bind-mount sources before `git checkout` operations
+  on tracked files. Files in bind-mounted dirs are the live ones.
+
+### v1.8.0 — 2026-06-27
+
+**Download bandwidth cap working — FORWARD mangle mark + dynamic OUTPUT mark rule (2 commits).**
+
+#### 1. Bug: download cap (40 Mbps) didn't enforce at all
+
+Zun's iPhone iperf3 download test showed 84-93 Mbps through the VPN
+tunnel, even though the cap was supposed to be 40 Mbps. Speedtest
+confirmed the cap was loose, not tight. Investigation found **four
+cascading bugs** in the bandwidth-monitor:
+
+**Bug A — PREROUTING `ip daddr VIP` never matches.**
+At PREROUTING mangle time, conntrack NAT un-NATs the wire dst AFTER
+mangle runs (mangle priority -150, nat priority -100). Wire dst is
+still the VPS public IP 154.65.110.44, never the VIP 10.99.0.1.
+Verified with `nft add rule ip mangle prerouting ip daddr VIP counter`
+— packet counter stayed at 0 across full speedtest runs.
+
+**Bug B — PREROUTING `ct reply daddr VIP` never matches.**
+VIP is the conntrack ORIGINAL src, not the REPLY dst. For an upload
+packet (saddr=VIP → internet), the conntrack REPLY tuple has
+dst=internet, not VIP. Counter verified = 0.
+
+**Bug C — PREROUTING `ip saddr VIP` matches upload but mark lost on xfrm decrypt.**
+Matches outgoing upload packets (saddr=VIP), but xfrm INPUT decrypts
+and creates a NEW SKB that loses the mark. Mark 0x81 counter at
+POSTROUTING = 0 — the mark does not survive the decrypt→re-encrypt
+cycle.
+
+**Bug D — ifb0 ingress redirect was stealing ALL incoming tunnel traffic.**
+The OLD `setup_qdiscs()` added a catch-all u32 filter
+(`match 0/0 → action mirred egress redirect dev ifb0`) on ens3's
+ingress qdisc. This redirected ALL incoming IPsec-decrypted packets
+to ifb0 BEFORE ens3's egress tc could see them. Even with a correct
+mark rule, traffic never reached the egress tc. tcpdump confirmed:
+`ens3 In IP 10.99.0.1 > ...` then `ifb0 Out IP 10.99.0.1 > ...`.
+
+**Bug E — hex comparison bug in `download_mark_rule_present`.**
+Compared string `f"meta mark set 0x81"` against nft's output
+`meta mark set 0x00000081` (nft zero-pads to 8 hex digits).
+Present check always returned False → daemon added a DUPLICATE rule
+every 60s poll. Discovered by grepping journalctl for repeated
+"Added nft" log lines.
+
+#### 2. Fix
+
+| Bug | Fix |
+|---|---|
+| A | Use FORWARD mangle `ip daddr VIP` instead of PREROUTING — matches the **decrypted inner packet** going to the VIP. Mark survives through xfrm re-encrypt → POSTROUTING → ens3 egress → tc class. |
+| D | Removed ifb0 ingress redirect from `setup_qdiscs()` (kept ifb0 setup but disabled redirect). |
+| E | Added `_mark_in_nft_output(stdout, mark)` helper using regex `0x0*` prefix match + decimal form fallback. |
+
+#### 3. Files changed (commit c5820b9)
+
+- `quota/bandwidth-monitor-nft.py` — added `vip_to_download_mark()`,
+  `vip_to_download_classid()`, `add_download_mark_rule()` (FORWARD),
+  `download_mark_rule_present()`, `get_download_mark_rule_handle()`,
+  `remove_download_mark_rule()` (FORWARD), `_mark_in_nft_output()`
+  helper. (+136 lines)
+- `quota/bandwidth-monitor.py` — `apply_bandwidth()` now adds 6 steps
+  (was 5): UPLOAD mark + DOWNLOAD mark + UPLOAD egress class +
+  UPLOAD egress filter + DOWNLOAD egress class + DOWNLOAD egress
+  filter. `remove_bandwidth()` removes both. `setup_qdiscs()` ifb0
+  redirect code now `if INGRESS_SHAPING and False:` (always skipped).
+  `user_bandwidth_rules_present()` checks both UPLOAD mark and
+  DOWNLOAD mark. (+161 lines)
+
+#### 4. Architecture (nft edition, post-fix)
+
+| Direction | Rule | Where | Mark | TC class | Rate |
+|---|---|---|---|---|---|
+| Upload | `ip saddr VIP` | mangle POSTROUTING + FORWARD | 0x01 | 1:2 | up_mbps |
+| Download | `ip daddr VIP` | mangle **FORWARD** | 0x81 (0x80\|octet) | 1:130+ | down_mbps |
+| ifb0 setup | none | (disabled) | — | — | — |
+
+#### 5. Verified live (zunaid operator account, 40/20)
+
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+- UL class 1:2: 316 MB / 381k pkts / **185k overlimits / 10k drops**
+- Speedtest.net (Cape Town server): **35.6 Mbps down / 38.6 Mbps up**
+- iperf3 download (after OUTPUT rule): **36 Mbps** (was 92 before)
+- No duplicates after 60s poll cycle (present-check normalized hex)
+
+---
+
+### v1.7.1 — 2026-06-27
+
+**Download cap also catches locally-generated replies (dynamic OUTPUT mark rule).**
+
+#### 1. Bug: iperf3 download bypassed the cap (OUTPUT path uncovered)
+
+After the v1.8.0 FORWARD-mangle fix, speedtest download was capped
+correctly (35.6 Mbps), but iperf3 download was still uncapped
+(92 Mbps). Root cause: the iperf3 server is a local process on VPS.
+Its TCP replies have src=154.65.110.44:5201, dst=102.182.117.43
+(Zun's home IP), and go through **OUTPUT mangle**, not FORWARD.
+The FORWARD rule catches internet→VPS→tunnel traffic but misses
+locally-generated replies to tunnel clients.
+
+Verified empirically: counter rule
+`nft add rule ip mangle output ip daddr 102.182.117.43 counter`
+grew at ~30 pps during iperf3 download — the traffic IS in OUTPUT.
+
+#### 2. Fix (commit a8caa3c)
+
+Daemon now queries `swanctl --list-sas` for each active SA's remote
+IP and adds a parallel mangle OUTPUT rule:
+
+```
+table ip mangle {
+  chain output {
+    ip daddr REMOTE_IP meta mark set 0x81 comment "bw-dl-output:REMOTE_IP"
+  }
+}
+```
+
+Mark same as download (0x80|octet) → lands in same egress tc class
+1:130+ (rate=down_mbps). Mark survives xfrm encrypt to POSTROUTING.
+
+#### 3. IP rotation safety net
+
+When Zun disconnects with IP A and reconnects with IP B:
+- `run_iteration()` scans the OUTPUT chain for `bw-dl-output:*`
+  rules whose remote_ip is no longer in the active SA set
+- Stale A rule is removed
+- New B rule is added on the next iteration
+- No manual intervention required
+
+Without this safety net, a static `nft add rule ip mangle output ip
+daddr <old-ip>` rule would persist forever and silently break if
+RSAWeb rotated Zun's home IP.
+
+#### 4. Files changed
+
+- `quota/bandwidth-monitor-nft.py` — 4 new helpers:
+  `add_download_output_rule()`,
+  `download_output_rule_present()`,
+  `get_download_output_rule_handle()`,
+  `remove_download_output_rule()`. (+95 lines)
+- `quota/bandwidth-monitor.py` —
+  - New regex `SA_REMOTE_IP_RE` extracts tunnel client public IP
+    from `remote '...' @ IP[4500]` line in `swanctl --list-sas`
+  - `list_active_vips()` now returns `{vip: {username, remote_ip}}`
+    instead of `{vip: username}`
+  - `apply_bandwidth(vip, down, up, iface, remote_ip=None)` —
+    adds OUTPUT rule when remote_ip given
+  - `remove_bandwidth(vip, iface, remote_ip=None)` — removes OUTPUT
+    rule when remote_ip given
+  - `run_iteration()` scans for stale `bw-dl-output:*` rules and
+    removes any whose remote_ip is no longer active. (+30 lines)
+
+#### 5. Verified live
+
+- Daemon log: `Added nft DOWNLOAD OUTPUT MARK rule: remote_ip=102.182.117.43 mark=0x81`
+- OUTPUT chain has 1 rule per active SA, comment `bw-dl-output:REMOTE_IP`
+- Zun iperf3 download retest: **36 Mbps** (was 92 — at cap)
+- No duplicates after 60s poll cycle
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+
+### v1.2.15 — 2026-06-21
+
+**Edit Customer modal: fix PATCH not firing (Zun reported)** — reported via Telegram that editing customer "saalieg" was a no-op.
+
+**Root cause:** The Save button's click handler called `$('#ed-disp')` (the IIFE's `$` helper) to fetch form fields. In this specific modal context, `$()` returned `null` even though `document.getElementById('ed-disp')` returned the input. Same `$` source (`id => document.getElementById(id)`), same call shape, different result — a closure-capture quirk we couldn't fully explain.
+
+**Fix:** Define a local `$` inside the Save handler. Local `$` works correctly; the IIFE-level `$` didn't.
+
+#### 1. Three earlier modal bugs also fixed in this version
+
+Found while diagnosing the Save bug (5-question gate applied):
+
+- **Bug A: `labeledField()` undefined** — `openEditCustomerModal` called `labeledField(...)` 8 times but the function was never defined. Caused `ReferenceError` and prevented the modal from opening at all.
+- **Bug B: `openModal(modal)` undefined** — Called at end of `openEditCustomerModal` but never defined. `closeModal` existed, `openModal` did not.
+- **Bug C: Tier dropdown showed wrong tier** — `el()` helper set `setAttribute('selected', 'false')` on non-matching `<option>` elements. But `selected` is a boolean HTML attribute — **presence alone selects the option**, regardless of value. Last option with `selected="false"` won.
+
+**Fixes (all in `host/vpn-portal/www/static/app.js`):**
+- `el()` helper rewritten: skip `null/undefined/false`; for boolean attributes (`selected`, `disabled`, `checked`, `readonly`, `required`, `multiple`, `hidden`, `autofocus`) set both the IDL property AND the attribute as `''`.
+- `labeledField` defined inline in `openEditCustomerModal` (only used there).
+- `openModal(modalEl)` added next to `closeModal` (paired helper).
+- Edit modal Save handler uses local `const $ = id => document.getElementById(id)`.
+
+#### 2. Verification
+
+- Operator smoke: **15/15 passed in 78s** (`tools/portal-smoke.js`)
+- Customer smoke: **10/10 passed in 14.8s** (`tools/portal-customer-smoke.js`)
+- End-to-end PATCH via UI: confirmed `display_name` and `notes` persist
+- saalieg (id=66) restored to original state after testing
+
+#### 3. Files changed
+
+- `host/vpn-portal/www/static/app.js` — el() helper, labeledField, openModal, Save handler
+- `tools/portal-smoke.js` — added check #15 (modal opens with populated fields)
+- `tools/debug_final_verify.js` — E2E PATCH test (kept for regression)
+
+### v1.3.0 — 2026-06-21
+
+**Customer portal (lab). Operator dashboard polish + tooling.**
+
+#### 1. Customer portal at `/portal/` — web UI for clients to see their own tier + usage
+
+A new lightweight web UI at `http://192.168.10.98:8080/portal/`. Customers
+log in with their VPN credentials (EAP identity + password). Same NTLM
+hash that charon uses for MSCHAPv2 — **no new secrets stored**.
+
+**What it shows (and only this):**
+- Tier name (e.g. "Demo 100 MB", "Tier 10 GB")
+- Progress bar with used / remaining / cap
+- Over-quota indicator (red bar + warning)
+
+**What it does NOT do (Zun's rules):**
+- No notifications (no email, no Telegram)
+- No session history, no alerts, no other features
+- No password reset flow (use the operator)
+
+**Isolation guarantees (defense in depth):**
+
+1. Cookie name `portal_session` (different from operator `session` cookie)
+2. Cookie `Path=/api/portal/` — browser doesn't send it to operator endpoints
+3. New `require_portal_session` dep — only accepts `portal_session` cookies
+4. Operator `require_session` dep explicitly REJECTS `portal_session` cookies
+5. All SQL scoped to `session["customer_id"]` — never takes a customer_id from input
+6. Constant-time NTLM hash compare
+7. Login rate-limited 5/IP/min
+8. HttpOnly + SameSite=Strict cookies
+9. No file I/O, no shell exec in `/api/portal/*` routes
+10. Audit log: every login (success + fail) and every portal API call logged
+
+**Schema change:** new table `customer_portal_sessions` (additive, no
+migrations to existing tables). Created via direct `CREATE TABLE IF NOT
+EXISTS` on `/var/lib/strongswan/ipsec.db`.
+
+**New files:**
+- `host/vpn-portal/portal_auth.py` — NTLM verify, session helpers, FastAPI deps
+- `host/vpn-portal/www/portal/index.html` — single-page mobile-first UI
+- `host/vpn-portal/www/static/portal.js` — vanilla JS, no framework
+- `tools/portal-customer-smoke.js` — 10-check headless-browser smoke test
+
+**New API endpoints:**
+- `POST /api/portal/login` — `{identity, password}` → cookie + customer info
+- `POST /api/portal/logout` — clear cookie + delete session
+- `GET /api/portal/usage` — `{tier, used, limit, pct, no_cap, over_quota}` (scoped to own customer)
+- `GET /api/portal/me` — `{name, email, logged_in_as}`
+
+**Tested:** 10/10 headless-browser checks passing in 14.8s. Operator
+dashboard still 14/14 green (no regression). Live test with `demo-phone`
+account.
+
+**Lab build (LAN-only).** No HTTPS, no public exposure. Zun confirmed
+lab mode — re-do for production when going client-facing (TLS, public
+DNS, CSP headers, audit log shipping, etc.).
+
+#### 2. Operator dashboard polish (v1.2.11 → v1.2.14)
+
+Rolled up under v1.3.0 per Zun's "stop micro-tagging" rule. The four
+intermediate v1.2.11 / v1.2.12 / v1.2.13 / v1.2.14 tags are kept on
+origin (history) but not in CHANGELOG as separate entries:
+
+- **v1.2.11** — Self-hosted GitHub Actions runner on LXC 903
+  (`actions-runner-linux-x64-2.319.1.tar.gz`, system Chromium runtime deps,
+  runs-on `[self-hosted, lxc-903, vpn]`)
+- **v1.2.12** — Customer management (edit / archive / delete, search, filter,
+  layout polish, toast notifications)
+- **v1.2.13** — Bulk operations (POST /api/customers/bulk-action,
+  atomic SQLite + EAP cleanup, checkbox UI, 2-step delete confirm)
+- **v1.2.14** — Column sort (whitelisted ORDER BY, operator-pinned first) +
+  active-sessions indicator (green dot, 30s polling)
+
+All four ship-tested at 14/14 green on self-hosted CI. v1.2.12's
+`status='archived'` schema choice (no migration) carried forward — the
+portal DB now has `status` semantics: `active` (default) or `archived`.
+
+#### 3. Diagnosis protocol skill baked
+
+After 5 false-positive bug diagnoses in one day (CGNAT, iptables, Ruijie
+IKE ×2, bulk script escape), Zun called for a structured gate before
+any "I found a bug" report. The 5-gate protocol is now a live skill
+(`openclaw skills workshop apply diagnosis-protocol-20260621-744eb4ed1e`).
+
+#### 4. Charon defaults audit
+
+`docs/charon-defaults-audit.md` — 28 tunables reviewed, 0 hard bugs.
+Documentation-only. Audit complete.
+
+---
+
+### v1.2.10 — 2026-06-21
+
+**Two bug fixes from operator feedback + the failed CI run.**
+
+#### 1. `quota/reset_demo.sh` now detects KILLED/BLOCKED EAP secrets
+
+The demo-account reset script used to exit early ("Already at pristine
+state. No action needed") whenever the DB rows for `demo-customer` were
+clean (`data_used_bytes=0, over_quota=0`). It **didn't check**
+`rw-eap.conf` for the `eap-demo-phone` block — so if quota-monitor had
+replaced the secret with `KILLED-...` or `BLOCKED-...` during a 100% cut
+run, and the DB happened to be reset but the conf wasn't, the iPhone
+demo account would silently fail to authenticate.
+
+This was the exact failure mode Zun hit on 2026-06-21 at 07:33 UTC.
+Fix: extract the `eap-demo-phone` block from `rw-eap.conf` with awk,
+check the secret value against `^(KILLED|BLOCKED)-`, and if matched,
+restore from the latest pre-cut backup + reload charon creds — even if
+the DB is already pristine.
+
+**Added**
+
+- AWK extraction of `eap-demo-phone.secret` from `rw-eap.conf`
+- `KILLED_BLOCKED` detection flag (treated as "needs work" alongside
+  `data_used_bytes != 0 || over_quota != 0`)
+- Auto-restore from latest `rw-eap.conf.bak-quotamon-*` backup when
+  matched, then `docker exec strongswan swanctl --load-creds`
+- 4 env-var overrides for non-standard deploy paths (`DB_PATH`,
+  `CONF_FILE`, `CONF_BACKUP_DIR`, `DOCKER_CONTAINER`, `CHARON_URI`)
+- Status message: distinguishes "OK — reset" from "no-op — already
+  pristine"
+
+**Verified**
+
+- Test 1: fake KILLED secret → detected + reported ✅
+- Test 2: fake BLOCKED secret → detected + reported ✅
+- Test 3: live conf (clean `E6fkfBK6DvUHkG1jcipJrQ`) → no false
+  positive ✅
+- Test 4: conf without `eap-demo-phone` block → empty extraction,
+  treated as "no work needed" ✅
+- End-to-end: ran reset on live LXC 903 with secret just restored →
+  correctly detected "already pristine" + no-op exit 0 ✅
+
+#### 2. `.github/workflows/portal-smoke.yml` no longer fails on push
+
+The v1.2.9 workflow failed at step 4 "Install Chromium" in 6 seconds
+because `apt-get install chromium chromium-driver ...` doesn't work on
+`ubuntu-latest` (Ubuntu 24.04 ships a snap stub for `chromium` that
+pulls nothing). Failed-run emails went to Zun. Two fixes:
+
+**Fix A — Switched to full `puppeteer` package for CI**
+
+`tools/package.json` adds `puppeteer` (full) as a devDependency. The
+workflow now does `npm install` + `npx puppeteer browsers install
+chrome`, which downloads a pinned Chromium into the cache. ~280MB
+first run, cached thereafter. Local dev still uses `puppeteer-core` +
+system `/usr/bin/chromium` (no download), via the `tools/package.json`
+`dependencies` (not `devDependencies`).
+
+**Fix B — Skip cleanly when PORTAL_URL secret isn't set**
+
+Added a step that checks if `PORTAL_URL` secret is empty. If so, sets
+`skip=true` and all subsequent steps are gated on `steps.check.outputs.skip
+!= 'true'`. The job completes with exit 0 and logs a clear warning
+("PORTAL_URL secret is not set. Skipping portal smoke. See docs/CI.md
+for instructions."). No more failed-run emails.
+
+**Added**
+
+- `tools/package.json` `devDependencies.puppeteer` ^23.10.4
+- `tools/package.json` `scripts.install:chromium` for local testing
+- `.github/workflows/portal-smoke.yml`:
+  - Skip step at top of job (checks `PORTAL_URL` env, sets
+    `skip=true` if empty)
+  - `if: steps.check.outputs.skip != 'true'` gates on all install /
+    test steps
+  - Switched "Install Chromium" step to `npm install` + `npx puppeteer
+    browsers install chrome`
+  - Cleanup step (`rm -rf ~/.cache/puppeteer`) saves runner disk
+- Branch trigger list updated: now triggers on `v1.2.10`, `v1.3.*`
+
+**Verified**
+
+- YAML parses (Python `yaml.safe_load` ok)
+- Local smoke test: 8/8 pass in 14.5s against live LXC 903
+- The skip-guard logic: if `PORTAL_URL` is unset, the workflow exits
+  in ~2s with a warning annotation, no failed-run email
+
+### v1.2.9 — 2026-06-21
+
+**CI hook for the portal smoke test.** New `.github/workflows/portal-smoke.yml`
+runs the v1.2.8 headless-browser test on every push to `main` (and on PRs),
+gates future portal releases. The workflow is **not yet enabled** — it
+needs a staging portal URL the runner can reach (see `docs/CI.md` for
+three options: public staging tunnel, self-hosted runner on LXC 902, or
+WireGuard tunnel). For now, manual local runs against LXC 903
+(`PORTAL_URL=http://192.168.10.98:8080 node tools/portal-smoke.js`) are
+the verification path before tagging.
+
+**Also fixed (caught by v1.2.8 smoke test + manual investigation)**
+
+- `host/vpn-portal/www/static/app.js` `renderCustomers()` (~line 574):
+  v1.2.7.3 only fixed `usageBar()` and the customer detail `Quota` card
+  but missed the customers-list `Usage` cell, which still rendered
+  `fmtBytes(used) + ' / ' + fmtBytes(quota)` directly. For operator
+  accounts the row still showed `"0 B / 0 B"` and `"0.0%"` — the
+  opposite of the v1.2.7.3 fix's intent. Now the row uses `usageBar()`
+  (consistent with sessions table + detail), so operators get
+  `<bytes> · [NO CAP]` and the `%` column shows `—` instead of `0.0%`.
+  Tagged as v1.2.7.4.
+
+**LXC 903 network correction**
+
+- Reverted LXC 903 from static (`192.168.10.98/24`) back to DHCP.
+  Zun's rule: "Keep it dhcp. If you put static it will loose network."
+  Verified post-reboot: same IP (`192.168.10.98`), `scope global
+  dynamic eth0`, portal health `{"status":"ok"}`. Logged in
+  `~/self-improving/corrections.md`.
+
+**Demo-phone secret reset**
+
+- `eap-demo-phone` secret was `BLOCKED-6100b6929f585411` (KILLED during
+  a quota test) — iPhone demo-customer auth was failing because of
+  this. Restored original secret `E6fkfBK6DvUHkG1jcipJrQ` from latest
+  pre-cut backup. Charon reloaded. DB was already pristine
+  (`data_used_bytes=0`, `over_quota=0`). Zun's iPhone should now
+  reconnect cleanly.
+
+**Added**
+
+- `.github/workflows/portal-smoke.yml` (~150 LOC) — runs on push to
+  main / v1.2.7.x / v1.2.8 / v1.2.9 / master + PRs + manual
+  dispatch. Installs Chromium + puppeteer-core, patches config with
+  GitHub secrets (`PORTAL_URL`, `PORTAL_ADMIN_USER`, `PORTAL_ADMIN_PASS`),
+  runs the smoke test, uploads screenshots as artifacts (3-day
+  retention on success, 14-day on failure). Concurrency: same-branch
+  runs cancel in-flight.
+- `docs/CI.md` — what the workflow does, how to wire up the staging
+  portal (3 options), required secrets, local-usage parallel.
+
+**Bugs caught by the smoke test (and now fixed in v1.2.7.4)**
+
+- v1.2.7.3 incomplete: `usageBar()` was patched but the customers-list
+  row didn't use it. The smoke test's check #7
+  (`Operator row shows "no cap" pill`) caught it on the very first
+  run.
+
+**Verified**
+
+- Smoke test: 8/8 passing in 14.4s against live LXC 903
+  (`http://192.168.10.98:8080`).
+- LXC 903 reachable on `192.168.10.98` after revert + reboot
+  (07:35 UTC).
+- demo-phone secret restored, charon loaded, no active SAs (waiting
+  for iPhone reconnect).
+
+### v1.2.8 — 2026-06-21
+
+**Headless-browser smoke test for the portal.** New `tools/portal-smoke.js`
+drives a real Chromium against the portal UI and verifies 8 DOM-layer
+invariants that API-only testing misses. Specifically designed to catch
+the failure mode that bit v1.2.7.1 (the `el()` flatten bug — API worked,
+UI rendered empty DOM, sat broken for ~36h).
+
+**Added**
+
+- `tools/portal-smoke.js` (260 LOC) — Puppeteer-core driver running 8 checks
+  with screenshot capture on every step (success + failure)
+- `tools/portal-smoke.config.json` — base URL, credentials, Chromium path,
+  timeouts. Admin password is plaintext because the portal's admin
+  account is an internal test credential (see `TOOLS.md`).
+- `tools/package.json` + `tools/.gitignore` — `npm install` → `npm run smoke`
+  workflow. Uses puppeteer-core (no Chromium download — uses system
+  `/usr/bin/chromium`)
+- `tools/README.md` — usage docs + how to add a new check
+- `tools/example-screenshots/` — 4 reference screenshots from a real
+  passing run (login, dashboard, modal, operator "no cap" row)
+
+**The 8 checks**
+
+1. `/` renders login form (username + password inputs present)
+2. POST `/api/login` → 200 + dashboard cards appear
+3. Dashboard metric cards have non-empty values (not just skeletons)
+4. Customers page has ≥1 row in table
+5. `+ New client` modal opens with ≥11 fields
+6. Collision warning fires for `Zayd` / `Zayd-iphone` + submit disabled
+7. Operator row shows "no cap" pill (v1.2.7.3 + v1.2.7.4 regression guard)
+8. Operator customer detail `Used` card shows byte string + "no cap / tracking" subtitle
+
+**Run**
+
+```bash
+cd tools && npm install                                  # ~30s, downloads puppeteer-core only
+PORTAL_URL=http://192.168.10.98:8080 node portal-smoke.js
+# or: npm run smoke:live --prefix tools
+```
+
+**Verified**
+
+- 8/8 passing in 14.4s against live `http://192.168.10.98:8080` (LXC 903,
+  v1.2.7.4 deployed)
+- Catches the v1.2.7.1 class of bug (DOM render regression that API
+  tests can't see)
+- Exit code 0 = all pass, 1 = at least one fail, 2 = fatal
+
+**Bugs found + fixed while building this**
+
+- v1.2.7.4 — customers-list row used `fmtBytes()` directly instead of
+  `usageBar()`, so operators saw `"0 B / 0 B"` and `"0.0%"` instead of
+  the v1.2.7.3-intented `<bytes> · [NO CAP]` pill. Fixed + tagged as
+  v1.2.7.4.
+- Config-file password masking issue (smoke test sent literal `***` as
+  the password, got 401). Lesson: don't write masked values to config
+  files expecting the test to magically resolve them.
+
+### v1.2.7.4 — 2026-06-21
+
+**Operator usage visibility — list row follow-up.** v1.2.7.3 fixed the
+Usage column in `usageBar()` (sessions table + detail Quota card) but
+**missed the customers-list row** (~line 574 of `app.js`), which rendered
+`fmtBytes(c.used_bytes) + ' / ' + fmtBytes(c.quota_bytes)` directly. For
+operator accounts the row still showed `"0 B / 0 B"` and `"0.0%"` — the
+opposite of the v1.2.7.3 fix's intent. Discovered while writing the
+v1.2.8 headless-browser smoke test (check #7) which specifically asserts
+that operator rows show the "no cap" pill.
+
+**Fixed**
+
+- `host/vpn-portal/www/static/app.js` `renderCustomers()` (~line 574):
+  the Usage cell now calls `usageBar(used, quota, pct, over_quota,
+  is_operator)` (consistent with sessions table + detail), so operators
+  get `<bytes> · [NO CAP]` and the `%` column shows `—` instead of `0.0%`.
+
+### v1.2.7.3 — 2026-06-21
+
+**Operator usage visibility.** The portal was hiding all data usage
+numbers for operator accounts — `usageBar()` returned the literal
+text `"unlimited"` and the customer detail `Quota` card subtitle read
+`"operator (bypass)"` with no number. Operator bypasses still apply
+(no cut, no over_quota), but visibility is independent of that.
+
+**Changed**
+
+- `host/vpn-portal/www/static/app.js` `usageBar()`: for `is_operator=1`
+  OR `!limit`, now renders `<bytes> · <no cap|no quota>` instead of just
+  `"unlimited"`. Tooltip explains "Operator account — bypasses quota
+  (no cap, but usage is still tracked)".
+- `host/vpn-portal/www/static/app.js` `renderCustomerDetail()`:
+  when no cap applies, the progress bar is hidden entirely (no 0% green
+  bar clutter), the `Used` card subtitle reads `"no cap · usage tracked"`,
+  and the `Quota` card shows `"no cap"` with `"bypass"` subtitle. Color
+  is neutral (`dim`).
+- `host/vpn-portal/www/static/app.css`: added `.vp-usage-tag` (small
+  uppercase pill) and `.vp-bar-dim` (neutral bar background).
+
+### v1.2.7.2 — 2026-06-21
+
+**Bug fix + share controls.** Two improvements driven by operator feedback:
+(a) the `Zayd-Zayd-iphone` EAP-identity collision is now blocked at both
+server and browser layer, and (b) the one-shot password panel gets a
+Web Share API button so operators can hand the config to a client via
+WhatsApp / Telegram / SMS / email with one tap.
+
+**Added**
+
+- `host/vpn-portal/www/static/app.js` — `buildShareText()` builds a
+  multi-line plain-text config (server, remote ID, local ID, username,
+  password, per-OS setup steps, "save this — shown once" warning).
+- `renderShareControls()` on the one-shot panel:
+  - Mobile (Android Chrome, iOS Safari, …): Web Share API button
+    "↗ Share to WhatsApp / Telegram / etc." opens the native share sheet.
+    `navigator.canShare({text})` is checked first (iOS Safari requires
+    it; without it, share can throw).
+  - Desktop + iOS < 13 fallback: "⧉ Copy all" copies the same text via
+    Clipboard API, with `document.execCommand('copy')` last-resort for
+    very old browsers.
+- `host/vpn-portal/www/static/app.css` — `.vp-field-warn` (red text +
+  red-tinted border) and `.vp-inp-bad` (red input border) styles for
+  the collision warning.
+- Live device-name collision warning in the new-client form: as the
+  operator types the customer slug + device name, a red warning appears
+  below the device field if either condition is detected. Submit button
+  is disabled while the warning is shown.
+
+**Fixed**
+
+- `host/vpn-portal/app.py` `POST /api/customers` — collision guard:
+  rejects `device_name` that **equals** `customer.name` (case-insensitive)
+  OR **starts with** `{customer.name}-` (case-insensitive). Both cases
+  produce ugly / unusable EAP identities like `Zayd-Zayd-iphone`. Error
+  message tells the operator exactly what to rename it to (e.g. "use
+  'iphone' instead of 'Zayd-iphone'"). 400 with a precise message
+  (no DB write, no EAP block created).
+- The hint text under the device name field now reads "Friendly name.
+  EAP identity will be '{customer-name}-{device-name}'." (was: "Friendly
+  name. EAP identity = client-name-device-name" — cryptic).
+
+**Live data cleanup (one-shot, not in code)**
+
+- Customer `Zayd` (id=10) device `Zayd-iphone` (id=22) — created today
+  with device_name `Zayd-iphone` while customer slug was `Zayd`, producing
+  EAP identity `Zayd-Zayd-iphone`. **Never used**: `last_seen_at=NULL`,
+  no live SA, only audit entry was the original `create_client`. Safe
+  to rename in place.
+  - Renamed device → `iphone` (id=22, active=1)
+  - Renamed user row → `Zayd-iphone` (id=31)
+  - Renamed EAP block → `eap-Zayd-iphone { id = Zayd-iphone; secret = … }`
+  - Rotated password (computed via `openssl dgst -md4 -provider legacy`
+    on LXC 903 — Python `hashlib.md4` is unavailable on this OpenSSL
+    build, portal uses `openssl` subprocess for the same reason)
+  - Audit log: `zayd_device_rename` + `zayd_device_secret_fix` entries
+- New password delivered to operator via Telegram.
+
+**Verified**
+
+- POST /api/customers with `name=Zayd, device_name=Zayd` → 400 "device_name
+  duplicates the customer name 'Zayd' (would yield EAP identity 'Zayd-Zayd').
+  Use a different device name (e.g. 'iphone', 'laptop', 'pixel9')."
+- POST /api/customers with `name=Zayd, device_name=Zayd-iphone` → 400
+  "device_name 'Zayd-iphone' starts with the customer name 'Zayd-' …"
+- POST /api/customers with `name=acme-corp, device_name=ACME-CORP-laptop`
+  → 400 (case-insensitive)
+- POST /api/customers with `name=test-collision-1272, device_name=pixel9`
+  → 200 (legit; created + cleaned up)
+- Browser form: typing "Zayd" into customer slug then "Zayd" or "Zayd-iphone"
+  into device name triggers the red warning + disables submit
+- `charon --load-creds` picks up the renamed `eap-Zayd-iphone` block
+  (was `eap-Zayd-Zayd-iphone`)
+- Portal `/api/customers/10` shows device id=22, name="iphone", active=1
+
+**Out of scope (still backlog)**
+
+- Per-customer portal (clients see their own usage)
+- PATCH / DELETE customer endpoints
+- Mobileconfig generation (planned for v1.3 — operator types the URL into
+  iOS profiles via the share-text instructions)
+- Email integration (SMTP)
+- Tier management UI
+- POST /api/customers/{id}/devices (add another device to an existing
+  customer; v1.2.6 1-device-per-customer model keeps this gated)
+
+### v1.2.7.1 — 2026-06-21
+
+**Critical UI fix.** Pre-existing bug since 5C.2 — the portal's `el()`
+helper silently skipped arrays passed as children, dropping every
+array-passed DOM element. The portal UI has been UNUSABLE since 5C.2
+(login form, modals, customer detail rows, devices table all rendered
+with empty inner DOM); only the curl/API surface worked. Discovered
+while taking v1.2.7 release screenshots.
+
+**Fixed**
+
+- `host/vpn-portal/www/static/app.js` `function el()`: replaced
+  `for (const c of children) { if (Array.isArray(c)) continue; ... }`
+  with `const flat = children.flat(Infinity); for (const c of flat) { ... }`.
+  Now `el('div', {}, [a, b])` renders the same as `el('div', {}, a, b)`,
+  and `el('div', {}, sub ? [a, b] : null)` works in both branches.
+
+**Verified**
+
+- Login form: username + password inputs render
+- Dashboard: stat cards render with values (Service OK, Database
+  connected, charon reachable, ipBan active, 6 customers, 0 over
+  quota, etc.)
+- Customers list: 6 rows render with tier badges + usage + state pills
+- New client modal: 11 fields render with placeholders, hints, dropdowns
+- One-shot panel: copy-to-clipboard fields + per-OS setup cards render
+- Sessions page: active leases table + swanctl raw output render
+
+**Operator action**
+
+- Hard-refresh your browser (Ctrl+Shift+R) to bypass any cached
+  app.js from the broken version. Portal is now usable.
+
+**Why this didn't ship tests**
+
+- All UI work since 5C.2 was tested via `curl` against the JSON API,
+  not through the browser. The bug was invisible to API-only testing.
+  Going forward: every portal release should include a headless-browser
+  smoke test that loads `/`, fills the login form, and verifies the
+  dashboard renders. See `tools/portal-smoke.js` (to be added).
+
+**Out of scope (still backlog)**
+
+- Per-customer portal (clients see their own usage)
+- PATCH / DELETE customer endpoints
+- Mobileconfig generation
+- Email integration (SMTP)
+- Tier management UI
+
+(nothing in flight — all changes captured in next released version)
+
+### v1.2.7 — 2026-06-20
+
+Operator client onboarding — first-class UI + endpoint for creating a new
+client (customer + their single device + credentials) from the portal.
+Allows both existing-tier pick AND custom-cap tier auto-creation.
+
+**Added**
+
+- Backend `POST /api/customers` — single transaction: validates, resolves
+  tier (existing OR auto-creates `custom_<N>mb_<ts>`), generates 16-byte
+  URL-safe password, computes NTLM hash, inserts `customers` + `users` +
+  `devices` rows, appends EAP block to `rw-eap.conf`, reloads charon,
+  audit logs, returns the password ONE-SHOT in the response.
+- `quota/migrate_v127_billing_email.sh` — idempotent migration adding
+  `billing_id TEXT` (nullable) + `email TEXT` (nullable) to `customers`.
+- `GET /api/customers` and `GET /api/customers/{id}` extended to include
+  `billing_id`, `email`, and a `current_session` block
+  (public_ip, remote_port, vip, device, since, IKE proposal, bytes_in,
+  bytes_out, sa_state, established_secs) joined server-side from
+  active leases.
+- Frontend `+ New client` button on the Customers page head.
+- Frontend modal form with 11 fields: client name (slug), display name,
+  billing ID (optional), email (optional), Telegram (optional), notes
+  (optional), tier dropdown (existing tiers + "Custom (MiB)…"), custom
+  cap input, device name, device type (6 options), OS version (optional).
+  Live preview of the would-be new tier name when "Custom" is picked.
+  Auto-derives the client name slug from the display name if blank.
+- Frontend one-shot panel after successful create: copy-to-clipboard for
+  Server / Remote ID / Local ID / Username / Password, plus per-OS setup
+  step-by-step cards (iOS, Android, Windows, macOS, Linux NetworkManager).
+- Frontend customer detail view shows `billing_id` + `email` rows + a
+  "Current session" block (with 30s auto-refresh while detail is open).
+  Active session shows public IP, VIP, device, connection time, IKE
+  proposal, this-session bytes in/out. No-session state shows a dim
+  "no active session" line.
+- Fixed: `_audit()` was writing to `at` (the column was renamed to
+  `created_at` in the 5B era). Audit log has been silently failing since
+  v1.2. Also added `target_type` + `target_id` columns that were unused
+  but present in the schema — now properly populated.
+
+**Changed**
+
+- `GET /api/customers` SELECT extended with `billing_id, email`.
+- `GET /api/customers/{id}` SELECT extended; `current_session` block
+  added to response (None when no active SA).
+- `app.py` grew +363 LOC (helpers + ClientCreate model + POST endpoint
+  + extended GETs + audit fix).
+- `app.js` grew +625 LOC (modal form, one-shot panel, per-OS cards,
+  current_session block, live refresh).
+- `app.css` grew +178 LOC (vp-page-head, vp-modal-lg, vp-form-grid,
+  vp-oneshot-warn, vp-os-card, vp-cs-grid + responsive).
+
+**Operator flow (one client at a time)**
+
+1. Portal → Customers → `+ New client`
+2. Fill 8 required + 3 optional fields. Tier: pick existing OR "Custom
+   (MiB)…" and type a cap (e.g. 1500 for 1.5 GiB).
+3. Click `Create client`. Server creates customer + device + EAP block
+   in charon, reloads charon, audit-logs.
+4. Modal flips to a one-shot panel: copy the 5 fields (Server, Remote ID,
+   Local ID, Username, Password) or send the client the per-OS setup
+   card that matches their device.
+5. Close the modal. The customer is now in the list, with the password
+   only ever visible in that one-shot panel.
+
+**Behavior reminders**
+
+- 1 customer = 1 device (per v1.2.6). Adding a second device for the
+  same customer requires the (shelved) 5C.6 work — not in this PR.
+- 5C.6 is still SHELVED. Do NOT auto-resurrect.
+- The operator is the only credential issuer. No client self-service,
+  no email/SMTP integration, no Telegram bot.
+- If the operator needs to edit `billing_id` or `email` after the fact,
+  raw SQL is the only path in this PR (no PATCH endpoint).
+
+**Out of scope (backlog, not in this PR)**
+
+- PATCH /api/customers/{id} — edit billing_id/email/notes
+- DELETE /api/customers/{id} — soft/hard offboard via portal
+- Mobileconfig generation (.mobileconfig) for one-tap iOS install
+- Email integration (SMTP) for sending creds automatically
+- Tier management UI (today: SQLite-only)
+- Bulk import / CSV upload of customers
+
+**Test coverage**
+
+- POST /api/customers: existing tier (test-co) — 200
+- POST /api/customers: custom cap 1500 MiB (acme-demo) — 200,
+  tier `custom_1500mb_<ts>` auto-created
+- POST /api/customers: existing tier with full data (beta-test-client) — 200
+- POST /api/customers: bad email — 400
+- POST /api/customers: bad device_type — 400
+- POST /api/customers: missing custom_cap_mb when tier=custom — 400
+- POST /api/customers: duplicate name — 409
+- POST /api/customers: not authenticated — 401
+- GET /api/customers: includes billing_id + email for all rows
+- GET /api/customers/6 (test-co): includes devices[], current_session
+  (None — test-co hasn't connected)
+- Migration: idempotent re-run on LXC 903 (no-op)
+- charon reloaded after each create (EAP block visible in `swanctl
+  --load-creds` output)
+
+(nothing in flight — all changes captured in next released version)
+
+### v1.2.6 — 2026-06-20
+
+Revert 5C.5 self-service device management, lock model to **1 (creds pair) =
+1 device**. 5C.6 multi-device-per-customer SHELVED (strongSwan's 1-identity-1-VIP
+design blocks per-device tracking with shared creds under EAP-MSCHAPv2).
+
+**Changed**
+
+- `customers.max_devices` default changed from `2` to `1` (schema migration +
+  all existing customer rows updated).
+- Branches `v1.2.5-self-service-devices` and tag `v1.2.5` **deleted** (local
+  + remote). The 5C.5 work is dead code under the new model.
+- Live data cleanup: deactivated all but 1 active device per customer (canonical
+  = lowest device id). Audit logged.
+- 2-demo-account topology: `demo-customer` (100 MiB, tier `demo_100mb`) +
+  `friend-customer` (500 MB, tier `friend_500mb`) are the 2 demo accounts;
+  `zun-operator` is the single operator account (unlimited).
+
+**Removed**
+
+- `+ Add device` UI affordance and per-row device management actions (rotate,
+  deactivate) are no longer present in the dashboard (LXC 902 reverted to the
+  v1.2.4 code that predates 5C.5).
+- `POST /api/customers/{id}/devices`, `DELETE /api/devices/{id}`,
+  `POST /api/devices/{id}/rotate`, `GET /api/customers/{id}/devices` —
+  endpoints from 5C.5 that have no caller under the 1-device-per-customer
+  model.
+- `quota/migrate_5C5_add_max_devices.sh` (column default 2; superseded by
+  `quota/migrate_v126_max_devices_one.sh`).
+
+**Added**
+
+- `quota/migrate_v126_max_devices_one.sh` — idempotent migration: schema
+  change (max_devices DEFAULT 1) + data cleanup (deactivate extras) + audit log
+  entry per deactivation. Safe to re-run.
+- `docs/PLAN-5C6-MULTIDEVICE-CREDENTIALS.md` (Rev 2) — research + decision log
+  for the shelved 5C.6 phase. Retained as historical record.
+- Note in `docs/ROADMAP.md` flagging 5C.5 as **REVERTED** and 5C.6 as
+  **SHELVED** with rationale.
+
+**Fixed**
+
+- (No code fix in this release — `audit_log` `at` vs `created_at` bug from
+  5C.5 still exists in 5C.5-era code, but that code is reverted. Live
+  v1.2.6 = v1.2.4 + schema tweak, so the bug is not present in the running
+  portal.)
+
+**Operator action items (run once after upgrade)**
+
+- Run `quota/migrate_v126_max_devices_one.sh` on LXC 903.
+- Verify `rw-eap.conf` on LXC 903 — deactivated devices still have EAP
+  blocks loaded. To make auth fail at EAP rather than just succeed-and-replace,
+  set their `secret = "BLOCKED-<hex>"` (do this via a follow-up `update_rw_eap_conf.py`
+  pass if needed).
+- Reissue credentials for `friend-customer` (500 MB demo) if you want to test
+  it — the canonical device for that customer is the lowest-id active device
+  (see migration output).
+
+**Backlog (NOT auto-promoted)**
+
+- 5C.6 (multi-device-per-customer) — SHELVED. If revisited, the only clean
+  path is **Option 4** (per-device client certs / EAP-TLS) — much bigger
+  build (CA, cert generation, cert distribution, iOS/Android cert install UX).
+  Do NOT restart from the 5C.5 / 5C.6 EAP-MSCHAPv2 work.
+- Runtime SA-cap monitor — would let us *reject* (instead of *replace*) the
+  2nd device using the same creds. Today charon's default `uniqueids=yes`
+  makes the 2nd device take over. Different semantics from "reject."
+
+**Migration from v1.2.5 (if you were on the 5C.5 branch)**
+
+- DO NOT deploy the v1.2.5 code on a fresh install. The 5C.5 work has been
+  thrown away. Deploy v1.2.6 (= v1.2.4 + schema migration) instead.
+- If you already ran the 5C.5 migration (`migrate_5C5_add_max_devices.sh`),
+  the v1.2.6 migration handles the column change (DEFAULT 2 → DEFAULT 1)
+  and the data cleanup. Safe to run on top of a 5C.5-already-applied DB.
+
+## [Released]
+
+### v1.2.4 — 2026-06-20
+
+Active session device info on UI + CHANGELOG.md.
+
+Sessions page and customer detail UI now show real-time device + connection
+metadata for each active IKE_SA.
+
+**Added**
+
+- `GET /api/vpn/sessions/parsed` — structured parse of `swanctl --list-sas`.
+  Returns `{uniqueid, conn, state, version, local_id/ip/port, remote_id/ip/port,
+  vip, algo, established_secs, bytes_in/out, pkts_in/out}`.
+- `GET /api/devices` — list all devices with customer + metadata.
+- `GET /api/devices/{id}` — single device with metadata.
+- `PUT /api/devices/{id}` — partial-update metadata (device_type,
+  os_version, hostname, notes, is_active). Empty string clears a field.
+  Writes `audit_log` entry (actor=portal, action=device_update).
+- `devices` table migration: ADD COLUMN `device_type TEXT`,
+  `os_version TEXT`, `hostname TEXT` (all nullable).
+- IKE proposal fingerprinting helper `fingerprint_device(algo_str)` —
+  heuristic OS detection with confidence score. 10 known patterns
+  (iOS/macOS / Windows 10-11 / strongSwan Android / strongSwan desktop /
+  NetworkManager). UI shows amber "inferred" badge or cyan "manual" badge.
+
+**Changed**
+
+- Sessions page lease table: added columns Type, OS, Hostname, Public IP.
+- Customer detail Devices table: added columns Type, OS, Hostname,
+  inline ✎ edit button (modal editor).
+- `/api/vpn/leases` enriched with `public_ip`, `remote_port`,
+  `ike_proposal`, `sa_state`, `sa_established_secs`, `sa_bytes_in`,
+  `sa_bytes_out`, `sa_uniqueid` from live swanctl SA join.
+- `/api/customers/{id}` devices[] now includes `device_type`,
+  `os_version`, `hostname`, `notes`.
+
+**Fixed**
+
+- swanctl header regex: SPIs end with `_i` / `_r` role markers and the
+  responder SPI carries a trailing `*`. Old regex `[0-9a-f]+\s+[0-9a-f]+`
+  failed on these suffixes, so `/api/vpn/sessions/parsed` returned `[]`
+  even when SAs existed. New regex: `[0-9a-f]+_i [0-9a-f]+_r\*?`.
+
+**Known limits**
+
+- iOS / macOS native IKEv2 does NOT transmit device hostname or OS
+  version over IKE. Cells stay "—" until set manually via the portal
+  edit modal.
+- Type/OS detection is "inferred" only — never trust for auth.
+
+---
+
+## Released
+
+### v1.2.3 — 2026-06-20
+
+VICI envelope parser hardening for the quota exporter.
+
+**Changed**
+
+- `quota/quota-exporter.py` — replaced regex parser for
+  `swanctl --list-pools --raw` with a proper recursive-descent parser
+  (~60 LOC, no deps). Handles compact `--raw`, pretty `-P`, multi-pool,
+  empty leases, nested leases, list syntax.
+- Authoritative source: `charon/src/libcharon/plugins/vici/vici_message.c:556`
+  (`METHOD(vici_message_t, dump, ...)`).
+- 8 fixture tests pass; live verified `/metrics` returns 30 metric
+  families with `vpn_exporter_up=1` and `vpn_pool_size=254`.
+
+---
+
+### v1.2.2 — 2026-06-20
+
+5C.3 — quota layer Grafana integration.
+
+**Added**
+
+- `quota/quota-exporter.py` — Prometheus exporter on LXC 903:9102.
+  Polls SQLite + iptables FORWARD + swanctl every 30s. 17 vpn_* metrics
+  across customer / lease / pool / alert / audit / exporter_health
+  namespaces.
+- `host/systemd/quota-exporter.service` — systemd unit (enabled, after
+  docker.service, restart=always).
+- `host/grafana/dashboards/strongswan-quota.json` — 11-panel Grafana
+  dashboard (Active Leases, Active Customers, Over Quota, Scrape Errors,
+  Per-Customer Used, % Utilization, Customer Roster, Active Leases
+  table, Live Traffic 5m, Alerts Recorded, Audit Log Activity).
+- `host/grafana/README.md` — install + import instructions.
+- Prometheus scrape job `vpn-quota-exporter` added to
+  `/home/zunaid/monitoring/prometheus.yml`, hot-reloaded via
+  `docker kill -s HUP prometheus`.
+
+**Changed**
+
+- ROADMAP.md: 5C.3 marked done, 5C.4 cancelled (PBS full-LXC backup
+  replaces RustFS daily job), 5H noted as last-last phase.
+
+---
+
+### v1.2.1 — 2026-06-20
+
+Reboot fixes + portal polish.
+
+**Added**
+
+- `host/docker/daemon.json` — disables docker iptables/bridge/ip-forward
+  (safe because strongSwan uses `network_mode: host`). Fixes 4-min
+  docker cold-boot race against firewalld+nftables.
+- `host/docker/README.md` — install instructions for fresh LXC 903.
+
+**Changed**
+
+- `host/systemd/README.md` — documents that `strongswan-starter.service`
+  MUST be `disabled` on LXC 903. Host charon was binding UDP 500/4500
+  and rejecting IKE_SA_INIT with N(NO_PROP); container charon couldn't
+  bind the ports.
+- 5C.1+5C.2 portal patches folded in (audit log section in customer
+  detail, loading + empty states across all pages, GET /api/vpn/leases
+  endpoint with VIP→identity→device→customer resolution, POST
+  /api/quota/{id}/reset full 4-step flow, mobile responsive pass with
+  `data-label` attributes, Sessions auto-refresh, per-row ↺ reset button).
+
+**Fixed**
+
+- docker up at +10s (was 4 min).
+- iPhone reconnect in 6s (was 14 min) after cold reboot.
+- All 12 portal API endpoints respond 200 post-reboot.
+
+---
+
+### v1.2 — 2026-06-20
+
+5C portal — self-service VPN management UI.
+
+**Added**
+
+- `host/vpn-portal/app.py` — FastAPI backend, single file (~490 LOC).
+  15 endpoints: health, login (bcrypt + HMAC cookie, 5/IP/min rate
+  limit), logout, customers list/detail, tiers, quota live/reset,
+  vpn sessions/pools/leases, security bans/whitelist/unban/deadman.
+- `host/vpn-portal/www/index.html` — minimal shell, no external deps,
+  no Google Fonts.
+- `host/vpn-portal/www/static/app.js` — vanilla JS SPA, single IIFE
+  (~626 LOC), `vp-*` class prefix, dark/light theme via CSS vars +
+  `body[data-theme]`, localStorage persistence.
+- `host/vpn-portal/www/static/app.css` — themed CSS (~255 LOC).
+- `host/vpn-portal/systemd/vpn-portal.service` — systemd unit on LXC 902.
+- `host/vpn-portal/requirements.txt` — fastapi, uvicorn, bcrypt, pydantic.
+
+**Known limits**
+
+- `init()` uses `/api/customers` as session probe (will migrate to
+  `/api/me` once service account auth lands).
+- Single admin user (admin/totalconnect). Multi-admin on roadmap.
+
+---
+
+### v1.1.0 — 2026-06-19
+
+5B quota layer — per-customer data cap with hard cut.
+
+**Added**
+
+- `quota/` package — quota monitor + attr-sql SQLite schema.
+- `quota/quota-monitor.py` — daemon polling every 60s. Reads
+  per-VIP iptables FORWARD byte counters (254 outbound + 254 inbound
+  ACCEPT rules with `quota:VIP` comments). Resolves VIP → customer via
+  `swanctl --list-sas` (NOT leases table — stale on re-acquire).
+  80% warn (alerts + audit_log once per customer). 100% hard cut
+  (terminate SAs via `--terminate --ike-id N --force`, replace EAP
+  secret in rw-eap.conf with `KILLED-{random}`, reload charon, set
+  over_quota=1).
+- 6 quota tables: `customers`, `tiers`, `devices`, `customer_devices`,
+  `alerts`, `audit_log` (+ supporting indexes).
+- Tiers: tier_3gb / tier_10gb / tier_15gb / demo_100mb (100 MiB
+  persistent demo).
+- `host/systemd/quota-monitor.service` — systemd unit on LXC 903.
+- `host/systemd/strongswan-iptables-watchdog.service` — re-applies
+  `/etc/iptables/rules.v4` on strongSwan container lifecycle events.
+- `host/scripts/install_quota_rules.sh` — idempotent iptables rule
+  installer.
+
+**Fixed**
+
+- 5B.6 watchdog bug: original `strongswan-iptables-watchdog.sh`
+  re-applied `iptables-restore` on every docker container event
+  (incl. exec_create / exec_start / health_status*) which wiped byte
+  counters on every Prometheus scrape. Narrowed case statement to
+  `start|restart|unpause|die|stop|kill|oom`.
+
+**Verified**
+
+- 4 end-to-end demo runs with real iOS app traffic, all cut correctly.
+
+---
+
+### v1.0 — 2026-06-XX
+
+Initial release. Bare IKEv2 + EAP-MSCHAPv2 server.
+
+- strongSwan 6.0.7 in Docker (Debian trixie base, custom build with
+  `mschapv2` + `attr-sql` plugins).
+- `rw-eap` connection (server-cert + EAP-MSCHAPv2) for iOS native
+  IKEv2 client.
+- `rw-psk` connection (pre-shared key) as fallback.
+- IP pool `rw-pool` (10.99.0.0/24, VIP=10.99.0.1 gateway, 254 leases).
+- DNS pushed: 1.1.1.1, 8.8.8.8.
+- Certs persisted on LVM rootfs (`/home/zunaid/strongswan/swanctl/`).
+- iptables MASQUERADE for 10.99.0.0/24, FORWARD+DOCKER-USER ACCEPT.

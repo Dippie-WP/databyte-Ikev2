@@ -1,0 +1,15 @@
+# Backup snapshots excluded from image build
+swanctl.bak.*/
+*.bak-*
+
+# StrongSwan swanctl/ config (operator-managed, bind-mounted at runtime)
+# The live swanctl/ is mounted at /etc/swanctl/ when container runs.
+# But the COPY in Dockerfile would add them to the image. Excluding
+# keeps the image clean and uses bind-mount for runtime config.
+# Actually NO - we DO need swanctl/ in the image for the start scripts
+# to find confs. Don't exclude these.
+
+# Actually re-evaluated: swanctl/ is BOTH copied into image AND bind-mounted
+# at runtime. The COPY happens at build time, providing defaults; the
+# bind-mount at runtime overrides with operator-specific configs.
+# So we MUST include swanctl/ in image, and EXCLUDE only the .bak snapshots.

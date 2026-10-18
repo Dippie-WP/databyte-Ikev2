@@ -1,17 +1,89 @@
-# ⚠️ SUPERSEDED — DO NOT USE
-
-> **This document was archived on 2026-10-17.** It is databyte's internal bug log (format: date — title — what — fix — lesson). The specific failures and databyte-internal phase numbers (5A.6, 5A.7, etc.) are not applicable to a generic template.
->
-> Future users can start their own bug log with the same format. The content below is preserved as-is for databyte's own use.
-
----
-
 # ISSUES-LOG
 
 Every bug we hit building strongSwan v1.2. Format: **date — title — what happened — fix — lesson**. Reverse-chronological.
 
 ---
+## Phase 5 (2026-06-26 11:30 UTC) — per-VIP counter rules dead code
 
+**Symptom:** After Phase 5 iptables→nftables migration at 11:30 UTC,
+all per-VIP quota counters showed `packets 0 bytes 0` even when
+customers were actively connected. `data_used_bytes` updates stopped.
+
+**Root cause:** `quota-monitor.py`'s `ensure_quota_rules()` function
+appended 508 per-VIP ACCEPT rules to the FORWARD chain at runtime.
+But the chain's source-of-truth `/etc/nftables.conf` had `counter drop`
+at the END of forward. When `nft -f` loaded the source ruleset, it
+set up the chain with `counter drop` AFTER the per-VIP rules — meaning
+the appended rules were ALSO after drop. Order matters: nftables
+short-circuits on first match. The per-VIP rules never fired.
+
+**Verification:** `nft -a list chain ip filter forward` showed
+handles 33-517 (per-VIP rules) coming AFTER handle 31 (`counter drop`).
+
+**Fix:** Replaced all 508 rules with 2 named meters (`client_src` and
+`client_dst`) in source-of-truth. Meters use `flags dynamic` so kernel
+auto-creates counter elements per VIP on first packet match. Single
+hash lookup vs 254 sequential rule evaluations.
+
+**Lesson (MEMORY #189, #190, #191):**
+- Always check `nft -a list chain` order vs source file when migrating.
+- Meters beat per-VIP rules for dynamic membership.
+- Always `nft -c -f <file>` BEFORE `nft -f <file>` for syntax safety.
+
+---
+## Phase 5 swanctl regex (2026-06-22 → 2026-06-26) — silent billing failure
+
+**Symptom:** `customers.data_used_bytes` not updating for new customers
+after strongSwan 6.0.7 deployment. Existing customers (zunaid) had
+stale values. quota-monitor logs consistently showed "no active SAs —
+nothing to bill".
+
+**Root cause:** `quota-monitor.py:_build_sa_list()` regex expected
+`swanctl --list-sas` output format:
+```
+remote '<eap-identity>' @ <ip>[<port>] [<vip>]
+```
+But strongSwan 6.0.7 changed the format to:
+```
+remote '<outer-ip>' @ <ip>[<port>] EAP: '<eap-identity>' [<vip>]
+```
+
+The EAP identity moved to after `EAP:`, and the first quoted string
+became the outer (NAT'd) IP, not the EAP identity. Old regex matched
+the outer IP as the "username" and the bracketed port as the "VIP",
+resulting in garbage that got filtered out by `[s for s in out if
+s["username"] and s["vip"]]`.
+
+**Impact:** All quota billing was silently failing since 2026-06-22
+(last commit before format change, ~4 days of zero billing).
+
+**Verification before fix:**
+```
+PARSED SAS: [{'uniqueid': '5', 'username': None, 'vip': None}]
+FILTERED: []  # nothing returned
+```
+
+**Fix:** Updated regex to capture EAP identity after `EAP:` and VIP
+from the bracketed IP at end of line:
+```python
+m = re.search(r"EAP:\s+'([^']+)'\s+\[(\d+\.\d+\.\d+\.\d+)\]", line)
+```
+
+**Verification after fix:**
+```
+VIP 10.99.0.1 (saalieg/laptop): +535786 bytes, used=535786 / 104857600 (0.5%)
+DB: saalieg data_used_bytes = 535786 (was 0)
+```
+
+**Lesson (MEMORY #192, #193):**
+- When a tool's output format changes between versions, always check
+  the actual stdout against your regex expectations. Don't assume
+  backwards compatibility.
+- Maintain a regression test that compares parsed output to known
+  live SAs (e.g. `customer with active SA → data_used_bytes > 0`).
+- Bind-mount source paths mean `git checkout HEAD -- file` can break
+  production. Verify the bind-mount first.
+---
 ## 5A.7 — Server-side MSS clamp (2026-06-18)
 
 **Symptom:** After 5A.6 fix, 5G phone could connect and `ifconfig.me` worked, but other sites (iana.org, wikipedia.org) gave `ERR_TIMED_OUT` after "took too long to respond".
@@ -30,7 +102,6 @@ Calculation: 1400 (phone MTU) - 40 (TCP+IP) - 70 (ESP+UDP+IP) = 1290, use 1260 f
 - The server is the one talking to remote sites (post-MASQ), so the server clamps the MSS in the SYNs it sends on the phone's behalf.
 
 ---
-
 ## 5A.6 — `install_virtual_ip = no` (gateway mode) (2026-06-18)
 
 **Symptom:** Phone connected, SA ESTABLISHED, VIP 10.99.0.50 assigned, MASQ matching, but `ip -s xfrm state` showed `out 0 bytes, 0 packets`. Phone could only send DNS queries through tunnel, no responses came back. conntrack from 10.99.0.50 = 0 for fresh connections.
@@ -58,7 +129,6 @@ charon {
 - **Don't trust "fix applied" without verification.** A file on the host is NOT loaded by the container unless the docker-compose has a corresponding bind-mount.
 
 ---
-
 ## 5A.6 follow-on: bind-mount not added → fix not loaded (2026-06-18 17:48)
 
 **Symptom:** After applying the `install_virtual_ip = no` fix, the bug came back. SA in counter was 100KB+ but out counter was 0. 10.99.0.50 was on lo again.
@@ -76,7 +146,6 @@ Then `docker compose --profile vpn up -d` to recreate the container with the new
 - **This was the strongest evidence for "we only work with facts and evidence now".** I should have `docker exec strongswan ls /etc/strongswan.d/` after creating the file, not assumed it was loaded.
 
 ---
-
 ## iOS .mobileconfig silently fails cert validation (2026-06-17)
 
 **Symptom:** Generated `.mobileconfig` profile (IKEv2 + EAP, with the strongSwan CA cert embedded), installed on iPhone, profile shows as installed but IKE never connects. iOS gives no useful error. `swanctl --list-sas` on server shows nothing for the iOS client.
@@ -92,7 +161,6 @@ Then `docker compose --profile vpn up -d` to recreate the container with the new
 - The strongSwan app on iOS works (uses PSK instead of cert), but the native client is the goal.
 
 ---
-
 ## charon-cmd is a TEST client, not a production client (2026-06-17)
 
 **Symptom:** Tested "client-side" with `charon-cmd` on the OC host (192.168.10.77). charon-cmd connected to the strongSwan container, SA established, VPN worked. Marked 5A.3 GREEN.
@@ -110,7 +178,6 @@ This is **server-correctness only**, not public-path. The real test is: phone on
 - charon-cmd is useful for unit testing (server config is correct) but not for end-to-end public-path tests.
 
 ---
-
 ## 5G IP rotation causes brief MOBIKE gaps (2026-06-17, ongoing)
 
 **Symptom:** On Vodacom 5G, the public IP rotates every few minutes. During the rotation:
@@ -125,7 +192,6 @@ This is **server-correctness only**, not public-path. The real test is: phone on
 - For commercial use (5D), MOBIKE keep-alives or shorter rekey times are mandatory.
 
 ---
-
 ## Build lessons: `libsqlite3-dev` vs `libsqlite3-0` (2026-06-17)
 
 **Symptom:** First build of v1.2 image (with attr-sql) failed at runtime with `charon: unable to load plugin attr-sql: libsqlite3.so.0: cannot open shared object file`.
@@ -149,7 +215,6 @@ RUN \
 - **Test the runtime, not just the build.** The first build "succeeded" — the image was created. The bug only manifested when charon tried to load the plugin.
 
 ---
-
 ## `--enable-pools` is a no-op flag (2026-06-17)
 
 **Symptom:** Initially assumed I needed `--enable-pools` for charon's IP pool feature.
@@ -161,7 +226,6 @@ RUN \
 - charon has a built-in IP pool, no flag needed.
 
 ---
-
 ## DB initializes on FIRST QUERY, not first start (2026-06-17)
 
 **Symptom:** On a fresh deploy, `/var/lib/strongswan/` directory was empty. Ran `swanctl --list-pools`, got an empty list. Couldn't tell if the schema was there.
@@ -174,7 +238,6 @@ RUN \
 - **Lazy initialization is a strongSwan pattern.** Don't be alarmed by empty dirs on fresh deploys. Run a query first.
 
 ---
-
 ## charon `swanctl.conf` `secrets {}` block, NOT the `users` table (2026-06-17)
 
 **Symptom:** Initially tried to insert EAP credentials into the `users` table in SQLite.
@@ -192,7 +255,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
   - The `users` table is for a different plugin
 
 ---
-
 ## Daily report pipeline: NUKED 2026-06-15 (out of scope for this repo)
 
 **Why I mention it:** This was a 6h build/test cycle that ended with the daily HTML+PDF report pipeline being removed entirely. Cron entry, gen_dr_html.py, log, output dir, all templates, SOP skill, design spec, historical reports, inbound Telegram copies, mempalace copies — all moved to `.Trash/`. 428KB pre-nuke archive.
@@ -202,7 +264,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Why it doesn't affect this repo:** The daily report was a workspace thing, not a strongSwan thing. The strongSwan runbook is docx (DAT-OPS-SEC-002 v1.2), unaffected.
 
 ---
-
 ## ops-tracker duplicate cleanup (2026-06-16)
 
 **Symptom:** Two ops-tracker services on the Pi: a Docker container AND a FastAPI sibling at `/home/zunaid/operations-tracker/` (no service, just code, abandoned 2026-04-22).
@@ -214,7 +275,6 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Lesson:** When refactoring a service, check for orphans. systemd unit names don't always reflect what they actually run.
 
 ---
-
 ## Pre-v1.2: charon-cmd race condition with VICI (2026-06-16)
 
 **Symptom:** Original `start.sh` ran `swanctl --load-creds && swanctl --load-conns && swanctl --load-pools` before the VICI socket was up. Sometimes worked, sometimes didn't.
@@ -224,119 +284,84 @@ These are NOT interchangeable. EAP-MSCHAPv2 with attr-sql pool is `secrets {}` +
 **Lesson:**
 - **Don't try to outsmart charon's lifecycle.** Let charon manage loading.
 - The start-scripts option is exactly the right hook.
+## Download bandwidth cap didn't enforce (2026-06-26 → 2026-06-27)
 
-## 2026-06-23 — CP4 + CP5 audit findings (commit dcc0676, audit follow-up)
+**Symptom:** Zun's iPhone iperf3 download test (5 streams, 10s, 154.65.110.44:5201) showed 84-93 Mbps through the VPN tunnel, even though the cap was supposed to be 40 Mbps download. Speedtest confirmed cap was loose (not tight).
 
-### 🔴 CRITICAL — Portal unreachable from Cloudflare ✅ RESOLVED 2026-06-23 07:42 UTC (commit a64211f)
+**Root cause: 5 cascading bugs in `quota/bandwidth-monitor.py`:**
 
-**Bug:** OS firewall `iptables-legacy` INPUT chain had policy DROP and **no rules for TCP 80 or 443**. The Xneelo cloud firewall was open (verified by Zun), but the OS firewall then blocked all external traffic. The portal was unreachable from the internet.
+### Bug 1 — PREROUTING `ip daddr VIP` never matches
 
-**Resolution:** Inserted two ACCEPT rules at positions 9 + 10 (before RELATED/ESTABLISHED):
-```
--A INPUT -p tcp -m tcp --dport 80 -m comment --comment "vpn-portal: HTTP (nginx)" -j ACCEPT
--A INPUT -p tcp -m tcp --dport 443 -m comment --comment "vpn-portal: HTTPS (nginx)" -j ACCEPT
-```
-Persisted via `netfilter-persistent save` to `/etc/iptables/rules.v4`. Will survive reboot.
+At PREROUTING mangle time, conntrack NAT un-NATs the wire dst AFTER mangle
+runs (mangle priority -150, nat priority -100). Wire dst is still the VPS
+public IP 154.65.110.44, never the VIP 10.99.0.1.
 
-**External verification (OC host 192.168.10.77 → 154.65.110.44):**
-- TCP :443 → CONNECT_OK
-- TCP :80 → CONNECT_OK
-- HTTPS /api/health → 200, all 7 security headers
-- HTTPS /certs/strongswan-ca.crt.pem → 200, SHA256 matches client fingerprint
-- Login → Set-Cookie: Secure; HttpOnly; SameSite=lax
+**Diagnostic technique:** Counter rule
+`nft add rule ip mangle prerouting ip daddr VIP counter` — packet counter
+stayed at 0 across full speedtest runs.
 
-Reference rules snapshot committed at `host/firewall/rules.v4`.
+### Bug 2 — PREROUTING `ct reply daddr VIP` never matches
 
-**Original audit entry preserved below for the historical record:**
+VIP is the conntrack ORIGINAL src, not the REPLY dst. For an upload packet
+(saddr=VIP → internet), the conntrack REPLY tuple has dst=internet, not VIP.
+Counter verified = 0.
 
-### 🔴 CRITICAL — Portal unreachable from Cloudflare (RESOLVED — see above)
+### Bug 3 — PREROUTING `ip saddr VIP` matches upload but mark lost on xfrm decrypt
 
-**Bug (original):** OS firewall `iptables-legacy` INPUT chain had policy DROP and **no rules for TCP 80 or 443**.
+Matches outgoing upload packets (saddr=VIP), but xfrm INPUT decrypts and
+creates a NEW SKB that loses the mark. Mark 0x81 counter at POSTROUTING = 0 —
+the mark does not survive the decrypt → re-encrypt cycle.
 
-**Evidence:**
-- `iptables-legacy -L INPUT -n` — 9 rules, none for 80/443
-- `policy DROP 62 packets, 4146 bytes` — 62 packets dropped
-- `ss conntrack` — zero external connections (only 127.0.0.1 and self-to-self)
-- `tcpdump -i any "tcp[tcpflags] & tcp-syn != 0 and tcp dst port 443"` — 0 packets in 12s
-- VPS's public IP (154.65.110.44) is on `ens3` (verified via `ip -4 addr`)
+### Bug 4 — ifb0 ingress redirect was stealing ALL incoming tunnel traffic
 
-**Why missed in CP4:** Self-tests used `curl 127.0.0.1` and `curl <own public IP>` from the VPS itself — both succeed via the kernel's local routing table. The OS firewall is only consulted for external source IPs.
+The OLD `setup_qdiscs()` added a catch-all u32 filter
+(`match 0/0 → action mirred egress redirect dev ifb0`) on ens3's ingress
+qdisc. This redirected ALL incoming IPsec-decrypted packets to ifb0 BEFORE
+ens3's egress tc could see them. Even with a correct mark rule, traffic
+never reached the egress tc.
 
-**Proposed fix (AWAITING ZUN APPROVAL):**
-- Insert two rules in the correct position:
-  ```
-  -A INPUT -p tcp -m tcp --dport 80 -j ACCEPT
-  -A INPUT -p tcp -m tcp --dport 443 -j ACCEPT
-  ```
-- Persist via `netfilter-persistent save` (apt) or restore in `/etc/rc.local`
-- Defense in depth: Xneelo cloud firewall remains the primary filter (Cloudflare IP allowlist); OS firewall just opens the port on the host
+**Diagnostic technique:** tcpdump on both ens3 and ifb0 simultaneously:
+`ens3 In IP 10.99.0.1 > ...` then `ifb0 Out IP 10.99.0.1 > ...` — redirect
+was stealing traffic.
 
-### 🟠 HIGH
+### Bug 5 — hex comparison bug in `download_mark_rule_present`
 
-1. **Customer portal cookie missing `secure` flag.** The `/api/portal/login` `set_cookie` call doesn't include `secure=secure_cookie`. Cookie is HttpOnly + SameSite=strict, so risk is limited, but on HTTPS the Secure flag should be set. Fix: add `secure=secure_cookie` to the customer portal set_cookie call.
+Compared string `f"meta mark set 0x81"` against nft's output
+`meta mark set 0x00000081` (nft zero-pads to 8 hex digits). Present check
+always returned False → daemon added a DUPLICATE rule every 60s poll.
 
-2. **`/certs/` exposes `strongswan-ca.crt.srl` and `.gitkeep`.** Curl shows `/certs/strongswan-ca.crt.srl` returns 200 (41 bytes). The .srl is just a CA serial number (not sensitive) and .gitkeep is empty, but neither is meant to be public. Fix: in nginx `/certs/` location, add `location ~ \.(srl|gitkeep)$ { return 404; }` OR add `try_files $uri =404` + restrict to specific filenames (less flexible).
+### Bug 6 (post-fix-1) — OUTPUT mangle path bypasses FORWARD rule
 
-3. **Operator session cleanup is lazy-only.** `customer_portal_sessions` has `purge_expired_sessions()` defined at line 308 but it's **never called**. Operator sessions are only deleted when accessed after expiry (line 288-289 in `validate_operator_session`). Sessions never re-accessed stay forever. Current count: 3 total, 3 expired (all from my password rotation test). Fix: add a background cleanup task (systemd timer + sqlite query) OR call `purge_expired_sessions()` from the auth middleware.
+After fixing all 5 above, speedtest was capped at 35.6 Mbps but iperf3 was
+still 92 Mbps. Root cause: iperf3 server is a local process. Its TCP replies
+have src=154.65.110.44:5201, dst=Zun's home IP, and go through OUTPUT
+mangle, not FORWARD. The FORWARD rule catches internet → VPS → tunnel traffic
+but misses locally-generated replies to tunnel clients.
 
-### 🟡 MEDIUM (CP7 scope)
+**Fixes (commits c5820b9 + a8caa3c):**
 
-4. **No fail2ban portal jail** — only sshd jail exists. Add portal-login jail with logpath `/var/log/nginx/vpn-portal.access.log`, 3 retries → 24h ban.
-5. **No AIDE** — critical files (`/opt/vpn-portal/app.py`, `/etc/vpn-portal.env`, `/etc/ssl/cloudflare/*`, `/etc/nginx/sites-enabled/vpn-portal`) have no integrity baseline.
-6. **No backup of `/etc/vpn-portal.env` or `/etc/ssl/cloudflare/*`** — extend `strongswan-db-backup.sh` to include these, push to RustFS encrypted bucket.
-7. **No cert expiry monitoring** — Origin Cert valid until 2041-06-19. Add `/opt/scripts/check-cert-expiry.sh` + cron.
-8. **Over-broad INPUT rules** — `ACCEPT 0.0.0.0/0 :4502` (charon is 127.0.0.1 only); `ACCEPT 10.99.0.0/24` on INPUT (should be FORWARD only).
-9. **iptables-nft empty + policy ACCEPT** — currently using legacy backend, but nft is the default. Consolidate to one backend, document in DEPLOYMENT.md.
+| Bug | Fix |
+|---|---|
+| 1, 2, 3 | Use FORWARD mangle `ip daddr VIP` — matches DECRYPTED inner packet, mark survives xfrm re-encrypt to POSTROUTING → ens3 egress → tc class. |
+| 4 | Removed ifb0 redirect from `setup_qdiscs()` (`if INGRESS_SHAPING and False:`). ifb0 qdisc/HTB structure kept but unused. |
+| 5 | Added `_mark_in_nft_output(stdout, mark)` helper using regex `0x0*` prefix match + decimal form fallback. |
+| 6 | Daemon queries `swanctl --list-sas` for each active SA's remote IP, adds parallel mangle OUTPUT rule: `ip daddr REMOTE_IP meta mark set 0x81 comment "bw-dl-output:REMOTE_IP"`. IP rotation safe via `run_iteration()` stale-rule scan. |
 
-### 🟢 LOW (polish, not blocking)
+**Verified live (zunaid operator account, 40/20 Mbps):**
+- DL class 1:81: 487 MB / 422k pkts / **339k overlimits** (cap firing)
+- UL class 1:2: 316 MB / 381k pkts / **185k overlimits / 10k drops**
+- Speedtest.net: **35.6 Mbps down / 38.6 Mbps up** (both at cap)
+- iperf3 download: **36 Mbps** (was 92 before OUTPUT rule fix)
+- No duplicates after 60s poll cycle
 
-10. **systemd `RuntimeDirectoryMode` duplicate** (0750 in main unit + 0755 in drop-in). Remove 0750 from main unit.
-11. **CSP no `report-uri`** — add `report-uri /api/csp-report` + implement endpoint.
-12. **logrotate for portal logs not explicitly documented** — covered by `nginx` config `/var/log/nginx/*.log` glob, but no explicit entry.
+**Lessons (logged in MEMORY.md as #211-#219):**
 
-### New lessons
-- **#55:** Self-testing a network service via `curl <own public IP>` succeeds via kernel local routing even when OS firewall would block external sources. The real test is from an external IP. For services behind a cloud firewall, this means asking the user to test from a phone.
-- **#56:** "Ports are open" at the cloud layer doesn't imply OS-level iptables is open. The two are independent defense-in-depth layers; both must be configured.
-
-## 2026-06-23 07:58 UTC — Additional bugs found during dashboard smoke
-
-### ✅ FIXED — Customers table missing billing_id + email columns (commit ef43444)
-
-**Bug:** `/api/customers` SELECT references `c.billing_id` and `c.email` columns
-that don't exist in strongSwan's base customers schema. SQL fails with
-"Error: in prepare, no such column: c.billing_id". Endpoint returns 502.
-
-**Why missed in CP3:** CP3 verification tested login + health, not /api/customers.
-
-**Resolution:** 
-- `host/vpn-portal/portal_customers_extensions.sql` — idempotent ALTER TABLE
-- `host/vpn-portal/apply_customers_extensions.sh` — column-presence check + safe re-run
-
-### ✅ FIXED — Portal SSH fails to write known_hosts under systemd hardening (commit ef43444)
-
-**Bug:** systemd `ProtectSystem=strict` makes `/` read-only except for explicit
-`ReadWritePaths`. `/var/lib/vpn-portal` (where SSH `known_hosts` lives) was
-not in ReadWritePaths, so first SSH connection from portal to localhost
-fails with "mkstemp: Read-only file system".
-
-**Why missed in CP3:** The error was masked by a different SQL bug. Once SQL
-was fixed, this one surfaced.
-
-**Resolution:** Drop-in at `host/systemd/vpn-portal.service.d/readwrite-paths.conf`
-adds `/var/lib/vpn-portal` to ReadWritePaths. Idempotent (drop-ins overlay
-on the main unit).
-
-### 🔵 Cloudflare proxy confirmed ACTIVE
-
-DNS for myvpn.databyte.co.za now resolves to Cloudflare anycast IPs
-(172.67.219.8, 104.21.83.87) — Zun toggled between 07:46-07:54 UTC.
-Browser cert error resolved (Cloudflare presents publicly trusted cert).
-
-### Lessons
-- **#57:** When debugging cascading failures, isolate each layer. The SSH
-  known_hosts error and the SQL column missing were both real, but only
-  one was the actual cause of the 502. Reproduce the exact command from
-  app.py to find which error is the FIRST and real one.
-- **#58:** When app.py references columns not in the schema, it's a
-  deployment bug — code was deployed without the schema migration it
-  needed. Keep these in a separate extensions SQL file.
+- **#211**: FORWARD mangle is the ONLY correct placement for download-direction mark in `mode=tunnel` VPNs. PREROUTING doesn't work because the decrypted packet isn't there yet (xfrm hasn't consumed the outer packet).
+- **#212**: ifb0 ingress shaping is fundamentally incompatible with netfilter marks because TC ingress runs BEFORE mangle in the packet pipeline. Either shape at egress with a separate mark, or use ifb0 but accept that per-flow shaping needs a different mechanism (e.g. `police` on ingress qdisc).
+- **#213**: nft outputs hex marks with leading zeros (`0x00000081`), but code passed short form (`0x81`). String comparison fails. Always normalize hex representation. Same bug class would affect any per-rule presence check.
+- **#214**: NEVER make changes to a customer record (or any production data) without explicit confirmation. "Fix the cap bug + bump zunaid" requires TWO "yes" responses, not one.
+- **#215**: When fixing a cap, **enumerate all data paths** for the traffic you're capping. Speedtest worked because internet → VPS → tunnel uses the FORWARD path. Locally-responding services (iperf3, future file server, future webapp) use the OUTPUT path. The "fix" needs to cover ALL paths, not just the obvious one.
+- **#216**: When rules depend on user-specific IPs (like Zun's home IP for his tunnel), always note this as a fragility. Hardcoded IPs break silently when ISP rotates the assignment. Query the source of truth (strongSwan SA) dynamically instead.
+- **#217**: When a manual fix works but is brittle, the right move is to make it durable by querying the source of truth at runtime. The daemon already queries `swanctl --list-sas` to find active VIPs — adding remote IP extraction was a 5-line change with no new dependencies.
+- **#218**: Comment format matters for dynamic rules. Used `bw-dl-output:REMOTE_IP` (different prefix from `bw:VIP`) so the OUTPUT cleanup pass can grep by the right pattern and not confuse it with FORWARD/PREROUTING rules.
+- **#219**: When removing stale rules for resources that change identity (like tunnel IPs), always scan the rule list against current state — don't rely on application logic to remember what it added. The grep-based scan in `run_iteration()` handles IP rotation automatically.
