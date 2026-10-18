@@ -1,9 +1,25 @@
-// v1.3.0 — Customer portal SPA. Vanilla JS, no framework.
+// v1.4.0 — Customer portal SPA. Vanilla JS, no framework.
 // Login → /api/portal/login → cookie → /api/portal/usage → render.
 // On 401, show login. On logout, clear and show login.
+// v1.4.0: refactored fill.style.width → fill.style.setProperty('--pct', ...)
+// for strict-CSP compliance (no inline style attributes).
+// v1.4.1: add 30s auto-refresh on dashboard so data usage updates without
+// page reload. Matches operator portal cadence. Pauses on 401 / logout / page
+// hidden. Re-fires on visibility return.
 
 (function () {
   'use strict';
+
+  // v1.4.1 — auto-refresh state
+  const AUTO_REFRESH_MS = 30000;
+  let _refreshTimer = null;
+  function startAutoRefresh() {
+    stopAutoRefresh();
+    _refreshTimer = setInterval(loadUsage, AUTO_REFRESH_MS);
+  }
+  function stopAutoRefresh() {
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+  }
 
   function fmtBytes(n) {
     if (!n || n < 0) return '0 B';
@@ -55,6 +71,8 @@
         return;
       }
       await loadUsage();
+      // v1.4.1 — start 30s auto-refresh once we're past auth
+      startAutoRefresh();
     } catch (e) {
       showError('Network error: ' + e.message);
     } finally {
@@ -72,6 +90,7 @@
     } catch (e) {
       // best effort
     }
+    stopAutoRefresh();
     showLogin();
     document.getElementById('vp-identity').value = '';
     document.getElementById('vp-password').value = '';
@@ -85,15 +104,18 @@
       });
     } catch (e) {
       showLogin();
+      stopAutoRefresh();
       return;
     }
     if (r.status === 401) {
       showLogin();
+      stopAutoRefresh();
       return;
     }
     if (!r.ok) {
       showError('Failed to load usage (HTTP ' + r.status + ')');
       showLogin();
+      stopAutoRefresh();
       return;
     }
     const u = await r.json();
@@ -118,7 +140,10 @@
 
       const pct = Math.min(100, u.data_pct || 0);
       const fill = document.getElementById('vp-meter-fill');
-      fill.style.width = pct + '%';
+      // v1.4.0 — strict-CSP compliant: use CSS custom property via CSSOM API.
+      // element.setProperty is allowed by strict CSP per W3C CSP3 §6.7.3.1.
+      // Only the `style="..."` *attribute* is blocked; CSSOM writes are not.
+      fill.style.setProperty('--pct', pct + '%');
       fill.classList.remove('vp-warn', 'vp-over');
       if (u.over_quota || pct >= 100) {
         fill.classList.add('vp-over');
@@ -158,5 +183,25 @@
   document.getElementById('vp-logout-btn').addEventListener('click', doLogout);
 
   // On load: try to fetch usage. If 401, show login.
-  loadUsage();
+  loadUsage().then(() => {
+    // v1.4.1 — if we already have a valid session cookie (returning customer),
+    // loadUsage() rendered the dashboard. Start the 30s auto-refresh now.
+    const dashVisible = !document.getElementById('vp-dashboard-view').classList.contains('vp-hidden');
+    if (dashVisible) startAutoRefresh();
+  });
+
+  // v1.4.1 — pause auto-refresh when tab is hidden (Chrome throttles setInterval
+  // to 1s+ in background anyway, but stopping avoids spurious 401 storms if the
+  // server-side session expires while the tab is hidden). Resume on return.
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) {
+      stopAutoRefresh();
+    } else {
+      const dashVisible = !document.getElementById('vp-dashboard-view').classList.contains('vp-hidden');
+      if (dashVisible) {
+        loadUsage();
+        startAutoRefresh();
+      }
+    }
+  });
 })();

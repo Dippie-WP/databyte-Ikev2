@@ -61,3 +61,6 @@ docker/swanctl.bak.*/
 
 # OpenSSL CA serial number bookkeeping file (regenerated)
 docker/swanctl/x509ca/*.srl
+.archive/
+**/.backups/
+*.tmp-*

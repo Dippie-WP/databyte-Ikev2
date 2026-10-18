@@ -223,15 +223,30 @@ def get_download_mark_rule_handle(vip: str) -> str | None:
 
 
 def remove_download_mark_rule(vip: str) -> bool:
-    """Remove DOWNLOAD MARK rule from nft mangle PREROUTING. Idempotent."""
+    """Remove DOWNLOAD MARK rule from nft mangle PREROUTING. Idempotent.
+    
+    Race-safe: if the rule was already removed by another process (SA teardown
+    + bandwidth-monitor iteration, IP rotation cleanup, manual nft), the delete
+    fails with "No such file or directory". Treat that as a no-op success (INFO),
+    not an ERROR. See CORR-2026-07-27-078.
+    """
     handle = get_download_mark_rule_handle(vip)
     if not handle:
         log.debug("No DOWNLOAD MARK rule to remove: vip=%s", vip)
         return True
     cmd = ["/usr/sbin/nft", "delete", "rule", "ip", "mangle", "prerouting", "handle", handle]
-    result = run(cmd)
+    try:
+        result = run(cmd)
+    except Exception as e:
+        log.info("nft delete download mark rule race (already gone): vip=%s err=%s", vip, e)
+        return True
     if result.returncode == 0:
         log.info("Removed nft DOWNLOAD MARK rule: vip=%s handle=%s", vip, handle)
+        return True
+    # Race: handle existed at lookup time but rule was removed between lookup and delete.
+    stderr = (result.stderr or "").strip()
+    if "No such file or directory" in stderr or "not found" in stderr.lower():
+        log.info("nft delete download mark rule already gone (race): vip=%s", vip)
         return True
     log.error("nft delete download mark rule failed for %s: %s", vip, result.stderr)
     return False
