@@ -1,5 +1,2 @@
 *.pyc
 __pycache__/
-
-# Deploy receipt (auto-written by host/scripts/deploy-portal-vps.sh)
-.last_deployed
