@@ -1,3 +1,24 @@
+// 2026-06-25 live-pool-leases-integration-v2
+
+// 2026-06-25 live-pool-leases-integration v1.4.6
+
+// 2026-06-28 modal-lifecycle-v1.7.2 — stack + focus trap + ESC + focus restore
+
+// 2026-06-28 sse-restore-v1.9.0-sse — restore EventSource client + SSE badge in nav.
+// Server-side /api/events/stream is live on prod; this restores the consumer
+// that my v1.7.2 deploy had inadvertently overwritten.
+
+// 2026-06-28 notif-reconcile-v1.7.4 — move transient success confirmations
+// (Copied/Saved/Shared/Reset) from showBanner (4.5s top-center) to toast
+// (3s top-right). Errors + security ops (whitelist/unban/deadman) stay on
+// showBanner. Rule documented in function comments.
+
+// 2026-06-28 aria-sweep-v1.8.0 — ARIA labels for icon-only buttons (✎ ↺ ⧉ × ☀)
+// + role=alert/aria-live=assertive for banner (errors) and login error,
+// role=status/aria-live=polite for toast (success). Per WAI-ARIA APG live
+// region patterns. Screen reader users now hear notification messages and
+// icon button purposes.
+
 // databyte VPN Portal — vanilla JS client
 // Talks to /api/* on same origin. No build step, no external deps.
 
@@ -61,13 +82,20 @@
     refreshing: { sessions: false },
     // Auto-refresh timer for Sessions page (only active when there's a live lease)
     _sessionsTimer: null,
+    // v1.7.2 — modal stack. Pushed by openModal, popped by closeModal.
+    // Each entry: { modalEl, previouslyFocused } — restore focus on close.
+    _modalStack: [],
   };
 
   // ─── Skeleton + empty helpers ──────────────────────────
   // Visual placeholders for loading state. `width` / `height` optional.
+  // v1.4.0 — width/height are passed via CSS custom properties (CSSOM-set, CSP-safe).
   function skel(cls, w, h) {
     const c = 'vp-skel ' + (cls || 'vp-skel-line');
-    return el('span', { cls: c, style: (w ? 'width:' + w + ';' : '') + (h ? 'height:' + h + ';' : '') }, '\u00a0');
+    const cssVars = {};
+    if (w) cssVars.skelW = w;
+    if (h) cssVars.skelH = h;
+    return el('span', { cls: c, cssVars }, '\u00a0');
   }
   function skelBlock(w, h) { return skel('vp-skel-block', w, h); }
   function skelNum(w)     { return skel('vp-skel-num', w || '70%'); }
@@ -110,8 +138,12 @@
   const del  = p  => api(p, { method: 'DELETE' });
 
   // v1.2.12 — toast (top-right floating notification)
+  // Use for TRANSIENT SUCCESS confirmations (copies, saves, shares, bulk
+  // actions). 3s auto-dismiss, top-right, unobtrusive.
   function toast(msg, kind) {
-    const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok') }, msg);
+    // v1.8.0 — role=status + aria-live=polite for screen reader announcement.
+    // polite = don't interrupt, wait for user pause.
+    const t = el('div', { cls: 'vp-toast vp-toast-' + (kind || 'ok'), role: 'status', 'aria-live': 'polite' }, msg);
     document.body.appendChild(t);
     requestAnimationFrame(() => t.classList.add('vp-toast-show'));
     setTimeout(() => {
@@ -154,15 +186,18 @@
       );
     }
     const barColor = over_quota ? 'var(--red)' : (pct >= 80 ? 'var(--amber)' : 'var(--green)');
+    const clampedPct = Math.min(100, Math.max(0, pct));
     return el('div', { cls: 'vp-usage' },
       el('div', { cls: 'vp-usage-track' },
         el('div', {
           cls: 'vp-usage-fill',
-          style: 'width: ' + Math.min(100, Math.max(0, pct)) + '%; background: ' + barColor,
+          cssVars: { pct: clampedPct + '%', 'bar-color': barColor },
         }),
       ),
-      el('div', { cls: 'vp-usage-text vp-mono', style: 'color: ' + barColor },
-        fmtBytes(used) + ' / ' + fmtBytes(limit) + ' (' + pct.toFixed(1) + '%)'),
+      el('div', {
+        cls: 'vp-usage-text vp-mono',
+        cssVars: { 'bar-color': barColor },
+      }, fmtBytes(used) + ' / ' + fmtBytes(limit) + ' (' + pct.toFixed(1) + '%)'),
     );
   }
   function fmtTime(e) {
@@ -171,12 +206,37 @@
   }
 
   // ─── DOM helpers ───────────────────────────────────────
-  // el('div', {cls, attrs}, children...)
+  // el('div', {cls, cssVars, ...attrs}, children...)
+  // v1.4.0: `style:` is REJECTED — strict CSP blocks inline style attributes.
+  //   Use either:
+  //     - a className:  el('div', { cls: 'vp-mt-20 vp-empty-err' }, 'oops')
+  //     - cssVars:      el('div', { cls: 'vp-bar-fill', cssVars: { pct: 50 } })
+  //       which calls el.style.setProperty('--pct', '50') (CSSOM API,
+  //       allowed by strict CSP per W3C CSP3 — only inline-style *attributes*
+  //       are blocked, not CSSOM custom-property sets).
+  //   Trying to pass style: throws to catch regressions early.
+  //
+  // Note on `el.style.setProperty`: it is the CSSOM API, distinct from a CSS
+  // `style` attribute. CSP `style-src` (per W3C CSP3 §6.7.3.1) only blocks
+  // inline style *attributes* and `<style>` elements; CSSOM property writes
+  // — including custom property writes — are explicitly allowed. Verified
+  // against Chrome 119+ behavior.
   function el(tag, attrs, ...children) {
     const e = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
       if (k === 'cls') e.className = v;
       else if (k === 'html') e.innerHTML = v;
+      else if (k === 'cssVars' && v) {
+        // Set CSS custom properties (CSP-safe via CSSOM)
+        for (const [prop, val] of Object.entries(v)) {
+          e.style.setProperty('--' + prop, val);
+        }
+      }
+      else if (k === 'style') {
+        // HARD REJECTION: inline style attribute violates strict CSP.
+        // Throws to fail loud in dev — silent fallback would hide a security regression.
+        throw new Error('el(): style: key forbidden by strict CSP — use cls: or cssVars: instead');
+      }
       else if (k.startsWith('on')) e.addEventListener(k.slice(2).toLowerCase(), v);
       else if (v === false || v == null) {
         // skip — null/undefined means absent; false means absent for boolean attrs
@@ -204,20 +264,26 @@
     return e;
   }
 
-  // Banner: fixed top-center error/info message
+  // Banner: fixed top-center persistent message
+  // Use for ERRORS + SECURITY OPERATION RESULTS (whitelist, unban, deadman).
+  // 4.5s auto-dismiss, top-center, demands operator attention.
+  // (Success confirmations for transient actions live in toast() above.)
   let bannerTimer = null;
   function showBanner(msg, kind) {
     // kind: 'err' | 'ok'
     let b = document.getElementById('vp-banner');
     if (!b) {
-      b = el('div', { id: 'vp-banner' });
+      // v1.8.0 — role=alert + aria-live=assertive for screen reader announcement.
+      // Errors + security ops deserve immediate attention (assertive).
+      b = el('div', { id: 'vp-banner', role: 'alert', 'aria-live': 'assertive' });
       document.body.appendChild(b);
     }
     b.className = 'vp-banner vp-banner-' + kind;
     b.textContent = msg;
-    b.style.display = 'block';
+    // v1.4.0 — classList toggle replaces .style.display to keep strict CSP clean.
+    b.classList.remove('vp-hidden');
     clearTimeout(bannerTimer);
-    bannerTimer = setTimeout(() => { b.style.display = 'none'; }, 4500);
+    bannerTimer = setTimeout(() => { b.classList.add('vp-hidden'); }, 4500);
   }
 
   // ─── Render (entry point) ───────────────────────────────
@@ -256,7 +322,8 @@
     const card = el('div', { cls: 'vp-login-card' });
     card.appendChild(el('div', { cls: 'vp-login-logo' }, 'databyte'));
     card.appendChild(el('div', { cls: 'vp-login-sub' }, 'VPN Portal · admin'));
-    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err', style: 'display:none' });
+    // v1.8.0 — role=alert + aria-live=assertive for login error announcements.
+    const errEl = el('div', { id: 'vp-login-err', cls: 'vp-login-err vp-hidden', role: 'alert', 'aria-live': 'assertive' });
     card.appendChild(errEl);
     const form = el('form', { onsubmit: onLoginSubmit });
     form.appendChild(el('div', { cls: 'vp-field' }, [
@@ -276,7 +343,7 @@
   async function onLoginSubmit(e) {
     e.preventDefault();
     const errEl = document.getElementById('vp-login-err');
-    errEl.style.display = 'none';
+    errEl.classList.add('vp-hidden');
     errEl.textContent = '';
     const user = document.getElementById('vp-user').value;
     const pass = document.getElementById('vp-pass').value;
@@ -287,13 +354,15 @@
       render();
     } catch(err) {
       errEl.textContent = err.message || 'Login failed';
-      errEl.style.display = 'block';
+      errEl.classList.remove('vp-hidden');
     }
   }
 
   async function doLogout() {
     try { await post('/api/logout'); } catch {}
     S.user = null;
+    // v1.9.0-sse — close SSE connection on logout.
+    disconnectSSE();
     render();
   }
 
@@ -303,7 +372,12 @@
     const nav = el('div', { cls: 'vp-nav' });
     nav.appendChild(el('div', { cls: 'vp-nav-logo' }, 'databyte'));
     nav.appendChild(el('div', { cls: 'vp-nav-sep' }));
-    const tabs = ['dashboard','customers','tiers','sessions','security'];
+    // On VPS (VPN_HOST=127.0.0.1), the security tab is not relevant — we use OS iptables + fail2ban,
+    // not ipBan/firewalld. Hide the tab rather than show ipban-only endpoints that always fail.
+    const isVps = S.health && S.health.vpn_host === '127.0.0.1';
+    const tabs = isVps
+      ? ['dashboard','customers','tiers','sessions']
+      : ['dashboard','customers','tiers','sessions','security'];
     for (const t of tabs) {
       nav.appendChild(el('button', {
         cls: 'vp-nav-tab' + (S.page === t ? ' vp-nav-tab-on' : ''),
@@ -312,7 +386,14 @@
     }
     const right = el('div', { cls: 'vp-nav-right' });
     right.appendChild(el('span', { cls: 'vp-nav-user' }, S.user || ''));
-    right.appendChild(el('button', { id: 'theme-btn', cls: 'vp-theme-btn', onclick: toggleTheme, title: 'Toggle theme' }, '☀'));
+    // v1.9.0-sse — SSE connection badge. Green when connected, grey when
+    // disconnected. Reads _sseState inline at render time so the badge is
+    // correct on every render() (which rebuilds the nav from scratch).
+    right.appendChild(el('span', {
+      id: 'vp-sse-badge',
+      cls: 'vp-sse-badge ' + (typeof _sseState !== 'undefined' && _sseState.connected ? 'vp-sse-on' : 'vp-sse-off'),
+    }, (typeof _sseState !== 'undefined' && _sseState.connected ? '●' : '○') + ' SSE'));
+    right.appendChild(el('button', { id: 'theme-btn', cls: 'vp-theme-btn', onclick: toggleTheme, title: 'Toggle theme', 'aria-label': 'Toggle dark/light theme' }, '☀'));
     right.appendChild(el('button', { cls: 'vp-btn vp-btn-ghost vp-btn-sm', onclick: doLogout }, 'Logout'));
     nav.appendChild(right);
     wrap.appendChild(nav);
@@ -344,6 +425,24 @@
     if (_activeSessTimer) { clearInterval(_activeSessTimer); _activeSessTimer = null; }
   }
 
+  // v1.6.3 — Dashboard auto-refresh (30s) so live data (Total data, Over quota
+  // counts, Pools active leases) actually moves while operator is on the page.
+  // Bug: dashboard loaded once on tab-open and never polled again, leaving
+  // operators looking at a frozen view even when customers were actively
+  // burning bandwidth. Hidden for weeks behind a JS SyntaxError that broke
+  // the portal entirely — caught 2026-06-25 by Zun after the SyntaxError fix.
+  let _dashboardTimer = null;
+  function startDashboardAutoRefresh() {
+    stopDashboardAutoRefresh();
+    _dashboardTimer = setInterval(() => {
+      if (S.page !== 'dashboard') return;
+      loadDashboard().then(render).catch(() => {});
+    }, 30000);
+  }
+  function stopDashboardAutoRefresh() {
+    if (_dashboardTimer) { clearInterval(_dashboardTimer); _dashboardTimer = null; }
+  }
+
   async function switchPage(p) {
     if (!LOADERS[p]) return;
     if (S.loading[p]) return;  // already in flight
@@ -351,6 +450,9 @@
     if (S.page === 'sessions' && p !== 'sessions') stopSessionsAutoRefresh();
     // Stop customer-detail auto-refresh if leaving customers
     if (S.page === 'customers' && p !== 'customers') stopCustDetailAutoRefresh();
+    // v1.6.3 — start/stop dashboard poll when entering/leaving dashboard tab
+    if (p === 'dashboard' && S.page !== 'dashboard') startDashboardAutoRefresh();
+    else if (p !== 'dashboard' && S.page === 'dashboard') stopDashboardAutoRefresh();
     // v1.2.14 — start/stop active-sessions poll when entering/leaving customers
     if (p === 'customers' && S.page !== 'customers') startActiveSessAutoRefresh();
     else if (p !== 'customers' && S.page === 'customers') stopActiveSessAutoRefresh();
@@ -540,7 +642,7 @@
         el('div', { cls: 'vp-page-title' }, 'Dashboard'),
         el('div', { cls: 'vp-page-sub' }, 'System health, customer rollup, VPN topology.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // 4 metric cards (skeletons while loading)
       el('div', { cls: 'vp-row' },
@@ -548,10 +650,15 @@
           ? [skelMetric(), skelMetric(), skelMetric(), skelMetric()]
           : [
               mCard('Service', h.status === 'ok' ? 'OK' : (h.status || '—'), h.status === 'ok' ? 'green' : 'red'),
-              mCard('Database', h.db_ok ? 'connected' : 'DOWN', h.db_ok ? 'green' : 'red',
-                    h.db_customers != null ? h.db_customers + ' customers' : ''),
-              mCard('charon', h.charon_ok ? 'reachable' : 'DOWN', h.charon_ok ? 'green' : 'red', 'vici @ .98'),
-              mCard('ipBan', dm.service === 'active' ? 'active' : '—', dm.service === 'active' ? 'green' : 'amber',
+              mCard('Database', h.db_ok ? 'connected' : 'DOWN',
+                    h.db_customers != null ? h.db_customers + ' customers' : '',
+                    h.db_ok ? 'green' : 'red'),
+              mCard('charon', h.charon_ok ? 'reachable' : 'DOWN', h.charon_ok ? 'green' : 'red', 'vici @ ' + (h.vpn_host || 'gateway')),
+              // On VPS (VPN_HOST=127.0.0.1) we use OS iptables + fail2ban instead of ipban.
+              // Show 'OS firewall' with status from /api/health-derived info rather than ipban.
+              h.vpn_host === '127.0.0.1'
+                ? mCard('OS firewall', 'active', 'green', 'iptables + fail2ban')
+                : mCard('ipBan', dm.service === 'active' ? 'active' : '—', dm.service === 'active' ? 'green' : 'amber',
                     dm.active_bans != null ? dm.active_bans + ' bans' : ''),
             ]
       ),
@@ -562,14 +669,14 @@
           ? skelBlock()
           : (S.pools && S.pools.length
               ? el('dl', { cls: 'vp-kv' }, ...S.pools.flatMap(p => {
-                  const active = (S.leases || []).length;
+                  const active = (S.leases || []).filter(l => l.online).length;
                   return [
                     el('dt', {}, p.name),
                     el('dd', { cls: 'vp-mono' },
                       p.base + ' · ' + active + ' active lease' + (active === 1 ? '' : 's')),
                   ];
                 }))
-              : emptyState('⊘', 'No pools loaded', 'swanctl returned no virtual-IP pools. Check strongswan is running on .98.'))
+              : emptyState('⊘', 'No pools loaded', 'swanctl returned no virtual-IP pools. Check strongswan is running on ' + (h.vpn_host || 'gateway') + '.'))
       ),
       // Customer rollup
       el('div', { cls: 'vp-row' },
@@ -649,13 +756,20 @@
           ),
         ),
         el('div', { cls: 'vp-page-head-r' },
+          // v1.6.6 — Refresh button moved to top next to +New client.
+          // Was at the bottom of the table; Zun asked 2026-06-25 to put it
+          // on top so it's visible without scrolling past the full list.
+          el('button', {
+            cls: 'vp-btn vp-btn-ghost',
+            onclick: () => { loadCustomers().then(render).catch(()=>{}); },
+          }, loading ? spinnerRow('Refreshing…') : '↻ Refresh'),
           el('button', {
             cls: 'vp-btn vp-btn-primary',
             onclick: () => openNewClientModal(),
           }, '+ New client'),
         ),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // v1.2.12 — search + filter bar
       el('div', { cls: 'vp-toolbar' },
@@ -789,12 +903,13 @@
                               el('button', {
                                 cls: 'vp-btn-icon vp-btn-warn',
                                 title: 'Reset usage + restore KILLED secrets + zero iptables',
+                                'aria-label': 'Reset usage + restore KILLED secrets + zero iptables',
                                 onclick: (ev) => { ev.stopPropagation(); doReset(c.id, c.display_name || c.name); },
                               }, '↺'),
                             ),
                           );
                         })
-                      : [el('tr', {}, el('td', { colspan: 8, style: 'padding:0' },
+                      : [el('tr', {}, el('td', { colspan: 8, cls: 'vp-no-pad' },
                             emptyState('∅',
                               S.custSearch || S.custFilter !== 'all'
                                 ? 'No customers match this filter'
@@ -805,12 +920,6 @@
                 )
               ),
             ),
-          ),
-          el('div', { cls: 'vp-btn-row' },
-            el('button', {
-              cls: 'vp-btn vp-btn-ghost',
-              onclick: () => { loadCustomers().then(render).catch(()=>{}); },
-            }, loading ? spinnerRow('Refreshing…') : '↻ Refresh'),
           ),
         ),
         // Right: detail
@@ -853,7 +962,10 @@
         mCard('Quota', noCap ? (c.is_operator ? 'no cap' : 'no quota') : fmtBytes(c.quota_bytes), noCap ? (c.is_operator ? 'bypass' : 'unset') : 'effective limit'),
       ),
       noCap ? null : el('div', { cls: 'vp-bar-wrap' },
-        el('div', { cls: 'vp-bar-fill vp-bar-' + barColor, style: 'width:' + Math.min(100, pct) + '%' }),
+        el('div', {
+          cls: 'vp-bar-fill vp-bar-' + barColor,
+          cssVars: { pct: Math.min(100, Math.max(0, pct)) + '%' },
+        }),
       ),
       el('div', { cls: 'vp-btn-row' },
         el('button', { cls: 'vp-btn vp-btn-warn', onclick: () => doReset(c.id, c.display_name || c.name) }, '↺ Reset usage'),
@@ -862,6 +974,11 @@
           onclick: () => openEditCustomerModal(c),
           'data-label': 'Edit customer',
         }, '✎ Edit'),
+        c.is_operator ? null : el('button', {
+          cls: 'vp-btn vp-btn-primary',
+          onclick: () => generateInstallerLink(c),
+          'data-label': 'Generate one-time installer link (7-day expiry)',
+        }, '🔗 Installer'),
         c.is_operator ? null : (c.status === 'archived'
           ? el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doUnarchive(c.id) }, '↩ Unarchive')
           : el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => doArchive(c.id, c.display_name || c.name) }, '🗄 Archive')),
@@ -870,6 +987,12 @@
       el('dl', { cls: 'vp-kv' },
         el('dt', {}, 'Status'),  el('dd', {}, c.status + (c.is_active ? ' · active' : ' · INACTIVE')),
         el('dt', {}, 'Operator'), el('dd', {}, c.is_operator ? 'yes (bypass quota)' : 'no'),
+        // v1.6.4 — show allocated bandwidth. Was being applied by tc but invisible
+        // to operators in the detail view. Zun noticed 2026-06-25 while watching
+        // zade's session and asked "i dont see the allocated speed for this user".
+        el('dt', {}, 'Bandwidth'), el('dd', { cls: 'vp-mono' },
+          (c.bandwidth_down_mbps || 0) + ' Mbit/s down · ' +
+          (c.bandwidth_up_mbps || 0) + ' Mbit/s up'),
         el('dt', {}, 'Telegram'), el('dd', {}, c.telegram_username || '—'),
         el('dt', {}, 'Billing ID'), el('dd', {}, c.billing_id ? [el('span', { cls: 'vp-mono' }, c.billing_id)] : '—'),
         el('dt', {}, 'Email'),     el('dd', {}, c.email ? [el('span', { cls: 'vp-mono' }, c.email)] : '—'),
@@ -883,7 +1006,7 @@
       ),
       // Devices (with metadata + edit)
       c.devices && c.devices.length ? [
-        el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Devices (' + c.devices.length + ')'),
+        el('div', { cls: 'vp-card-title vp-mt-20' }, 'Devices (' + c.devices.length + ')'),
         el('div', { cls: 'vp-tbl-wrap' },
           el('table', {},
             el('thead', {}, el('tr', {},
@@ -907,6 +1030,7 @@
                   el('button', {
                     cls: 'vp-btn-icon',
                     title: 'Edit device metadata',
+                    'aria-label': 'Edit device metadata',
                     onclick: () => openDeviceEditor(c.id, d),
                   }, '✎'),
                 ),
@@ -917,7 +1041,7 @@
       ] : [],
       // Alerts
       c.alerts && c.alerts.length ? [
-        el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Alerts (' + c.alerts.length + ')'),
+        el('div', { cls: 'vp-card-title vp-mt-20' }, 'Alerts (' + c.alerts.length + ')'),
         el('div', { cls: 'vp-tbl-wrap' },
           el('table', {},
             el('thead', {}, el('tr', {},
@@ -972,7 +1096,7 @@
           el('textarea', { id: 'dev-notes', rows: '2', placeholder: 'admin notes' },
             d.notes || ''),
         ),
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:14px' },
+        el('div', { cls: 'vp-btn-row vp-mt-14' },
           el('button', { cls: 'vp-btn', onclick: closeModal }, 'Cancel'),
           el('button', {
             cls: 'vp-btn vp-btn-primary',
@@ -1001,7 +1125,7 @@
                 } else {
                   selectCustomer(customerId);
                 }
-                showBanner('Device metadata saved', 'green');
+                toast('Device metadata saved', 'ok');
               } catch (e) {
                 showBanner('Save failed: ' + (e && e.message || e), 'red');
               }
@@ -1010,7 +1134,7 @@
         ),
       ),
     );
-    document.body.appendChild(modal);
+    openModal(modal);
   }
 
   function closeModal() {
@@ -1064,12 +1188,12 @@
 
   function renderAuditLog(entries) {
     if (!entries.length) {
-      return el('div', { cls: 'vp-muted', style: 'margin-top:20px; font-size:12px' }, 'No audit log entries.');
+      return el('div', { cls: 'vp-muted vp-mt-20 vp-fs-12' }, 'No audit log entries.');
     }
     // Show newest first
     const sorted = entries.slice().sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
     return el('div', {},
-      el('div', { cls: 'vp-card-title', style: 'margin-top:20px' }, 'Audit log (' + entries.length + ')'),
+      el('div', { cls: 'vp-card-title vp-mt-20' }, 'Audit log (' + entries.length + ')'),
       el('div', { cls: 'vp-tbl-wrap' },
         el('table', {},
           el('thead', {}, el('tr', {},
@@ -1085,7 +1209,7 @@
                 el('td', { cls: 'vp-mono', 'data-label': 'When' }, fmtTime(e.created_at)),
                 el('td', { cls: 'vp-mono', 'data-label': 'Actor' }, e.actor || '—'),
                 el('td', { 'data-label': 'Action' }, spanBadge(e.action, parsed.kind)),
-                el('td', { 'data-label': 'Detail', style: 'font-size:12px' }, parsed.icon + ' ' + parsed.detail),
+                el('td', { 'data-label': 'Detail', cls: 'vp-fs-12' }, parsed.icon + ' ' + parsed.detail),
               );
             })
           ),
@@ -1098,17 +1222,29 @@
     if (!confirm('Full reset for ' + name + '?\n\n' +
                  '• data_used_bytes → 0\n' +
                  '• over_quota → 0\n' +
-                 '• Restore KILLED EAP secret (if any)\n' +
+                 '• Restore radcheck Cleartext-Password (Phase 5+ customers)\n' +
+                 '• Restore KILLED EAP secret (Phase 1–4 customers)\n' +
                  '• Zero iptables FORWARD counters\n' +
                  '• Clear daemon session sidecar\n\n' +
                  'iOS may need a manual VPN toggle to reconnect.')) return;
     try {
       const r = await post('/api/quota/' + id + '/reset', {});
       let msg = 'Reset ' + name + ': ' + fmtBytes(r.reset_from_bytes) + ' → 0';
+      // Bug fix 2026-07-06: show per-step restore results from the audit response.
+      // restore_radcheck is the Phase 5+ primary path; secret_restored was
+      // Phase 1–4 only. We surface both so the operator knows which mechanism
+      // actually unlocked the customer.
+      const steps = (r.steps || []);
+      const radStep = steps.find(s => s.step === 'restore_radcheck');
+      if (radStep && radStep.ok && !radStep.skipped) {
+        msg += ' · radcheck restored for ' + radStep.eap_identity;
+      } else if (radStep && !radStep.ok) {
+        msg += ' · radcheck RESTORE FAILED (' + radStep.error + ')';
+      }
       if (r.secret_restored) {
         msg += ' · EAP secret restored for ' + (r.secret_devices || []).join(', ');
       }
-      showBanner(msg, 'ok');
+      toast(msg, 'ok');
       await loadCustomers();
       if (S.selectedId === id) S.detail = await get('/api/customers/' + id);
       render();
@@ -1124,7 +1260,7 @@
         el('div', { cls: 'vp-page-title' }, 'Tiers'),
         el('div', { cls: 'vp-page-sub' }, 'Quota tiers. Schema changes go through the admin layer.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       loading
         ? el('div', { cls: 'vp-row' }, [skelBlock('90%', '120px'), skelBlock('90%', '120px'), skelBlock('90%', '120px'), skelBlock('90%', '120px')])
@@ -1149,6 +1285,13 @@
     const live       = !!S._sessionsTimer;
     // "loading && !refreshing" = show skeleton only on first load
     const showSkeleton = loading && !refreshing;
+    // v1.6.2 — Filter to online-only. Charon keeps offline leases sticky
+    // for reconnection stickiness, but the dashboard's job is "who is
+    // connected right now". Total pool usage still visible in the Pools card.
+    // MUST be declared before the return el(...) call — declaring a `const`
+    // inside a function-argument list is a syntax error (was bug shipped in
+    // commit 1cc2855, fixed in followup).
+    const onlineLeases = (S.leases || []).filter(l => l.online);
     return el('div', { cls: 'vp-page' },
       el('div', { cls: 'vp-page-head' },
         el('div', { cls: 'vp-page-title' },
@@ -1162,7 +1305,7 @@
             ? 'Auto-refreshing every 10s while a client is connected.'
             : 'Active IKE SAs and virtual-IP pool state.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' }, 'Pools'),
@@ -1170,7 +1313,7 @@
           ? skelBlock()
           : (S.pools && S.pools.length
               ? el('dl', { cls: 'vp-kv' }, ...S.pools.flatMap(p => {
-                  const active = (S.leases || []).length;
+                  const active = (S.leases || []).filter(l => l.online).length;
                   return [
                     el('dt', {}, p.name),
                     el('dd', { cls: 'vp-mono' },
@@ -1179,13 +1322,13 @@
                 }))
               : emptyState('⊘', 'No pools', 'swanctl returned no virtual-IP pools.'))
       ),
-      // Active leases with customer + device + live SA enrichment
+      // Active leases with customer + device + live SA enrichment.
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' },
-          'Active leases (' + (S.leases && S.leases.length || 0) + ')'),
+          'Active leases (' + onlineLeases.length + ')'),
         showSkeleton
           ? skelBlock()
-          : (S.leases && S.leases.length
+          : (onlineLeases.length
               ? el('div', { cls: 'vp-tbl-wrap' },
                   el('table', {},
                     el('thead', {}, el('tr', {},
@@ -1200,7 +1343,7 @@
                       el('th', {}, 'Acquired'),
                     )),
                     el('tbody', {},
-                      ...S.leases.map(lease => {
+                      ...onlineLeases.map(lease => {
                         const dt = lease.device_type || {};
                         const typeLabel = dt.label || '—';
                         const typeBadge = dt.source === 'inferred'
@@ -1214,8 +1357,8 @@
                             lease.customer_name
                               ? el('a', {
                                   href: '#',
+                                  cls: 'vp-link-cyan',
                                   onclick: (e) => { e.preventDefault(); switchPage('customers'); setTimeout(() => selectCustomer(lease.customer_id), 100); },
-                                  style: 'color: var(--cyan); text-decoration: none',
                                 }, lease.customer_name)
                               : el('span', { cls: 'dim' }, '—')),
                           el('td', { cls: 'vp-mono', 'data-label': 'Device' }, lease.device_name || '—'),
@@ -1230,7 +1373,7 @@
                     ),
                   ),
                 )
-              : emptyState('○', 'No active leases', 'No clients are currently connected. They will appear here as soon as someone connects.'))
+              : emptyState('○', 'No clients connected', 'No active SAs right now. Offline leases (sticky pool entries) are not shown here — check the Pools card above for total usage.'))
       ),
       el('div', { cls: 'vp-card' },
         el('div', { cls: 'vp-card-title' }, 'Active SAs (swanctl --list-sas)'),
@@ -1260,7 +1403,7 @@
         el('div', { cls: 'vp-page-title' }, 'Security'),
         el('div', { cls: 'vp-page-sub' }, 'ipBan bans, firewalld trusted zone, deadman status.'),
       ),
-      err ? el('div', { cls: 'vp-empty', style: 'margin-bottom:14px; border-color: var(--red); color: var(--red)' },
+      err ? el('div', { cls: 'vp-empty vp-empty-err' },
               '⚠ ' + err) : null,
       // ipBan status
       el('div', { cls: 'vp-card' },
@@ -1272,7 +1415,7 @@
               mCard('Active bans', dm.active_bans != null ? dm.active_bans : '—', '', dm.active_bans > 0 ? 'amber' : 'green'),
             ),
         !loading && dm.log_tail ? [
-          el('div', { cls: 'vp-card-title', style: 'margin-top:14px' }, 'Recent log (last 8 lines)'),
+          el('div', { cls: 'vp-card-title vp-mt-14' }, 'Recent log (last 8 lines)'),
           el('pre', { cls: 'vp-raw' }, dm.log_tail.split('\n').slice(-8).join('\n')),
         ] : [],
       ),
@@ -1291,7 +1434,7 @@
                   ),
                 )
               : emptyState('∅', 'Whitelist is empty', 'Add a CIDR below to trust an entire subnet.')),
-        el('div', { cls: 'vp-card-title', style: 'margin-top:14px' }, 'Add CIDR'),
+        el('div', { cls: 'vp-card-title vp-mt-14' }, 'Add CIDR'),
         el('form', { cls: 'vp-inline-form', onsubmit: onAddWhitelist },
           el('input', { id: 'vp-cidr', cls: 'vp-inp vp-inp-mono', placeholder: '192.168.1.0/24', required: true }),
           el('button', { cls: 'vp-btn vp-btn-primary', type: 'submit' }, '+ Add'),
@@ -1354,9 +1497,12 @@
   }
 
   // ─── Shared UI components ──────────────────────────────
+  // v1.4.0 — `color` is a CSS variable name (e.g. 'green', 'red', 'amber') or null.
+  //   Set via CSS custom property `metric-color: var(--<name>)` (CSSOM-set, CSP-safe).
   function mCard(label, value, sub, color) {
+    const cssVars = color ? { 'metric-color': 'var(--' + color + ')' } : null;
     return el('div', { cls: 'vp-card vp-card-sm' },
-      el('div', { cls: 'vp-metric', style: color ? 'color:var(--' + color + ')' : '' }, value),
+      el('div', { cls: 'vp-metric', cssVars }, value),
       el('div', { cls: 'vp-metric-label' }, label),
       sub ? el('div', { cls: 'vp-metric-sub' }, sub) : [],
     );
@@ -1407,6 +1553,264 @@
       toast('Archived.');
     } catch (e) {
       toast('Archive failed: ' + (e.message || e), 'err');
+    }
+  }
+
+  // v1.5.0 — Generate one-time installer link for customer onboarding
+  async function generateInstallerLink(c) {
+    try {
+      const r = await post(`/api/customers/${c.id}/installer-token?mode=standard`);
+      showInstallerLinkModal(c, r, 'standard');
+    } catch (e) {
+      toast('Failed to generate installer link: ' + (e.message || e), 'err');
+    }
+  }
+
+  // v2.0 — Windows installer mode selector.
+  //   * defaultMode  = 'standard' | 'hostile'
+  //   * data is null on first open (will be generated when user clicks Generate);
+  //     if caller already has data (e.g. legacy callers passing a non-null data),
+  //     we just show it.
+  function showInstallerLinkModal(c, data, defaultMode = 'standard') {
+    // v1.7.2 — Defensive cleanup: drain any stale modal stack before opening
+    // the installer modal. Replaces the prior `querySelectorAll('.vp-modal-bg')
+    // .forEach(m => m.remove())` which removed DOM nodes but left the stack
+    // (and its keydown listener) out of sync.
+    closeAllModals();
+
+    // We hold the result + selected mode in closure-scoped variables so the
+    // Generate / Copy buttons (created below) can read them when clicked.
+    let currentMode = defaultMode;
+    let currentData = data;     // null on first open until user clicks Generate
+
+    const modal = el('div', {
+      cls: 'vp-modal-bg',
+      onclick: (e) => { if (e.target.classList.contains('vp-modal-bg')) closeModal(); },
+    },
+      el('div', { cls: 'vp-modal vp-modal-wide' },
+        el('div', { cls: 'vp-modal-title' }, '🔗 Installer link — ' + (c.display_name || c.name)),
+        el('div', { cls: 'vp-modal-body' },
+          el('p', {},
+            'Pick the installer mode and click ',
+            el('strong', {}, 'Generate'),
+            '. Then send the PowerShell block to the customer. Standard uses an HTTPS ',
+            'download (FortiGate / SonicWall intercept this). Hostile bakes the credentials ',
+            'directly into a local .ps1 file (no HTTPS). The link expires in ',
+            el('strong', {}, '7 days'),
+            ' and is single-use (burned on first fetch).',
+          ),
+          // ── Mode radio ──────────────────────────────────────────────
+          el('div', { cls: 'vp-field vp-mt-8', id: 'vp-mode-radio-row' },
+            el('label', {}, 'Installer mode:'),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', {
+                  type: 'radio', name: 'vp-installer-mode', value: 'standard',
+                  checked: defaultMode === 'standard',
+                  onchange: () => { currentMode = 'standard'; },
+                }),
+                ' ', el('strong', {}, 'Standard (N)'),
+                ' — customer runs curl from HTTPS, profile + creds fetched. ',
+                el('span', { cls: 'vp-fg-muted vp-fs-12' }, 'Default. Use unless on a hostile network.'),
+              ),
+            ),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', {
+                  type: 'radio', name: 'vp-installer-mode', value: 'hostile',
+                  checked: defaultMode === 'hostile',
+                  onchange: () => { currentMode = 'hostile'; },
+                }),
+                ' ', el('strong', {}, 'Hostile (H)'),
+                ' — operator bakes a self-contained .ps1 with credentials inlined. ',
+                el('span', { cls: 'vp-fg-muted vp-fs-12' }, 'Use when FortiGate/SonicWall intercept TLS.'),
+              ),
+            ),
+          ),
+          // ── Generate / status row ──────────────────────────────────
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              id: 'vp-installer-generate',
+              onclick: async () => {
+                const btn = modal.querySelector('#vp-installer-generate');
+                btn.disabled = true; btn.textContent = '⏳ Generating…';
+                try {
+                  const r = await post(`/api/customers/${c.id}/installer-token?mode=${currentMode}`);
+                  currentData = r;
+                  renderResult(r, currentMode);
+                } catch (e) {
+                  toast('Generate failed: ' + (e.message || e), 'err');
+                } finally {
+                  btn.disabled = false;
+                  btn.textContent = '🔄 Generate ' + (currentMode === 'hostile' ? 'hostile .ps1' : 'installer link');
+                }
+              },
+            }, '🔄 Generate installer link'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              id: 'vp-installer-verify',
+              style: 'display:none;',
+              onclick: async () => {
+                const vbtn = modal.querySelector('#vp-installer-verify');
+                const vout = modal.querySelector('#vp-installer-verify-out');
+                vbtn.disabled = true; vbtn.textContent = '⏳ Verifying…';
+                vout.style.display = 'block'; vout.textContent = '';
+                try {
+                  // When Polish #3 is live: currentData.bake_id will be set
+                  // and we look up by id. When Polish #3 is deferred (current
+                  // state on vps-01), the server returns 503 with a clear
+                  // 'use swanctl --list-sas' guidance.
+                  const bakeId = (currentData && currentData.bake_id) || 0;
+                  const r = await get(`/api/installer/bake/${bakeId}/verify`);
+                  vout.textContent = '✓ Verified\n' + JSON.stringify(r, null, 2);
+                } catch (e) {
+                  vout.textContent = 'Verify error:\n' + (e.message || e);
+                } finally {
+                  vbtn.disabled = false;
+                  vbtn.textContent = '🔒 Re-verify SA on server';
+                }
+              },
+            }, '🔒 Verify SA on server'),
+          ),
+          // ── Result region (textarea + copies) ──────────────────────
+          el('div', { id: 'vp-installer-result', cls: 'vp-field vp-mt-12' }),
+          // ── Verify output region ───────────────────────────────────
+          el('pre', {
+            id: 'vp-installer-verify-out',
+            cls: 'vp-mt-8 vp-fs-12 vp-fg-muted',
+            style: 'max-height:160px; overflow:auto; background:rgba(255,255,255,0.04); padding:8px; border-radius:4px; display:none; white-space:pre-wrap;',
+          }),
+        ),
+        el('div', { cls: 'vp-modal-foot' },
+          el('button', { cls: 'vp-btn vp-btn-ghost', onclick: () => closeModal() }, 'Close'),
+        ),
+      ),
+    );
+    openModal(modal);
+
+    // Helper: render the result region for the chosen mode.
+    function renderResult(data, mode) {
+      const target = modal.querySelector('#vp-installer-result');
+      const vbtn = modal.querySelector('#vp-installer-verify');
+      const vout = modal.querySelector('#vp-installer-verify-out');
+      vout.style.display = 'none'; vout.textContent = '';
+
+      // Hostile mode = full .ps1 content (NOT a one-liner). Show in a wider
+      // textarea + a "Save as .ps1" button.
+      if (mode === 'hostile') {
+        const filename = data.filename || ('setup-databyte-vpn-' + c.name + '-' + (data.device_name || 'device') + '-hostile.ps1');
+        const psContent = data.content || data.powershell_cmd || '';
+        target.replaceChildren(
+          el('div', { cls: 'vp-field' },
+            el('label', {},
+              '⚠️ Hostile-baked file (', el('code', {}, filename), ') — contains plaintext EAP credentials. ',
+              'Send via encrypted DM only. NEVER email the .ps1 itself.',
+            ),
+            el('textarea', {
+              readonly: true,
+              rows: 14,
+              cls: 'vp-installer-cmd',
+              onclick: (e) => e.target.select(),
+              id: 'vp-installer-cmd',
+            }, psContent),
+          ),
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: () => copyToClipboard(psContent, '.ps1 contents'),
+            }, '📋 Copy .ps1 contents'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => downloadAsFile(psContent, filename),
+            }, '💾 Save as ' + filename),
+          ),
+        );
+        // Verify button only meaningful for hostile (no bake record on standard
+        // until Polish #3 ships).
+        vbtn.style.display = 'inline-block';
+      } else {
+        // Standard mode = 3-line powershell_cmd one-liner (preserved FROZEN shape)
+        const psCmd = data.powershell_cmd || '';
+        const url = data.installer_url || '';
+        const expires = (data.expires_in_days || 7) + ' days';
+        target.replaceChildren(
+          el('p', {},
+            'Send this PowerShell one-liner to the customer. They run it in ',
+            el('code', {}, 'Windows PowerShell (Admin)'),
+            '. The link expires in ', el('strong', {}, expires),
+            ' and is single-use (burned on first fetch).',
+          ),
+          el('div', { cls: 'vp-field' },
+            el('label', {}, 'PowerShell command (copy + send):'),
+            el('textarea', {
+              readonly: true,
+              rows: 3,
+              cls: 'vp-installer-cmd',
+              onclick: (e) => e.target.select(),
+              id: 'vp-installer-cmd',
+            }, psCmd),
+          ),
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              cls: 'vp-btn vp-btn-primary',
+              onclick: () => copyToClipboard(psCmd, 'PowerShell command'),
+            }, '📋 Copy PS command'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => copyToClipboard(url, 'Installer URL'),
+            }, '📋 Copy URL'),
+            el('button', {
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => window.open(url, '_blank').close(),
+              title: 'WARNING: this consumes the token!',
+            }, '⚠ Test fetch (burns token)'),
+          ),
+          el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+            'Details: device=', el('code', {}, data.device_name || '?'),
+            ' (' + (data.device_type || '?') + '), tier=', el('code', {}, data.tier || 'none'),
+            ', token prefix=', el('code', {}, data.token_prefix || '?'),
+            ', expires ', new Date((data.expires_at || 0) * 1000).toISOString(),
+          ),
+        );
+        vbtn.style.display = 'none';
+      }
+      // Auto-select the textarea for keyboard copy
+      const ta = modal.querySelector('#vp-installer-cmd');
+      if (ta) { ta.focus(); ta.select(); }
+    }
+
+    // Helper: download a string as a file (used by the Save as .ps1 button)
+    function downloadAsFile(content, filename) {
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast('Saved as ' + filename, 'ok');
+    }
+
+    // First-open path: data already provided → render immediately
+    if (currentData) renderResult(currentData, currentMode);
+  }
+
+  async function copyToClipboard(text, label) {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Copied ' + (label || 'to') + ' clipboard', 'ok');
+    } catch (e) {
+      // Fallback: select the textarea
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('Copied (fallback)', 'ok'); }
+      catch { toast('Copy failed — select text manually', 'err'); }
+      document.body.removeChild(ta);
     }
   }
 
@@ -1570,6 +1974,22 @@
       if (isCustom && c.tier) {
         allTiers.push({ name: c.tier, display_name: c.tier_display || c.tier });
       }
+      // v1.7.0 — Load speed plans from backend (single source of truth).
+      // If fetch fails, fall back to a hardcoded list (matches backend SPEED_PLANS).
+      let speedPlans = [];
+      try {
+        speedPlans = await get('/api/speed_plans');
+      } catch {
+        speedPlans = [
+          { name: 'standard',         bandwidth_down_mbps: 20, bandwidth_up_mbps: 20 },
+          { name: 'asymmetric_40_20', bandwidth_down_mbps: 40, bandwidth_up_mbps: 20 },
+        ];
+      }
+      // Determine initial speed_plan selection from current bandwidth values.
+      const curDown = c.bandwidth_down_mbps || 20;
+      const curUp   = c.bandwidth_up_mbps   || 20;
+      const matched = speedPlans.find(p => p.bandwidth_down_mbps === curDown && p.bandwidth_up_mbps === curUp);
+      const initialSpeedPlan = matched ? matched.name : 'custom';
       // Helper: render a labeled form field.
       // Signature: labeledField(label, inputEl, fullWidth?)
       // Used in the Edit modal below.
@@ -1594,6 +2014,26 @@
               labeledField('Email', el('input', { type: 'email', cls: 'vp-input', id: 'ed-email', value: c.email || '' })),
               labeledField('Billing ID', el('input', { type: 'text', cls: 'vp-input', id: 'ed-bill', value: c.billing_id || '' })),
               labeledField('Max devices (1–10)', el('input', { type: 'number', min: 1, max: 10, cls: 'vp-input', id: 'ed-mdev', value: c.max_devices || 1 })),
+              // v1.7.0 — Speed plan (per-customer, NOT tier-driven). Three options:
+              //   'standard'         → 20/20 mbps symmetric (default; matches existing default)
+              //   'asymmetric_40_20' → 40 mbps down / 20 mbps up
+              //   'custom'           → keep the raw bandwidth inputs below as the source of truth
+              // Pre-selected from the customer's CURRENT bandwidth values. If they match
+              // a preset, that preset is selected; otherwise dropdown shows 'custom'.
+              labeledField('Speed plan',
+                el('select', { cls: 'vp-input', id: 'ed-speed-plan' },
+                  // Options populated after fetchSpeedPlans() resolves.
+                  el('option', { value: '__loading' }, 'Loading…'),
+                ),
+                el('div', { cls: 'vp-hint', id: 'ed-speed-plan-hint' },
+                  'Per-customer bandwidth. Independent of tier (tier controls data quota only).'),
+              ),
+              // Raw bandwidth inputs (advanced override). When dropdown = 'custom',
+              // these are the source of truth. When dropdown = a preset, they auto-sync.
+              labeledField('Custom bandwidth down (Mbps, 1–1000)',
+                el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-down', value: c.bandwidth_down_mbps || 20 })),
+              labeledField('Custom bandwidth up (Mbps, 1–1000)',
+                el('input', { type: 'number', min: 1, max: 1000, cls: 'vp-input', id: 'ed-bw-up', value: c.bandwidth_up_mbps || 20 })),
               labeledField('Tier',
                 el('select', { cls: 'vp-input', id: 'ed-tier' },
                   ...allTiers.map(t => el('option', { value: t.name, selected: t.name === c.tier }, t.display_name || t.name)),
@@ -1614,8 +2054,9 @@
                 const $ = id => document.getElementById(id);
                 const $d = $('ed-disp'), $tg = $('ed-tg'), $em = $('ed-email'),
                       $bi = $('ed-bill'), $md = $('ed-mdev'), $ti = $('ed-tier'),
-                      $cm = $('ed-custom-mb'), $nt = $('ed-notes');
-                if (!$d || !$tg || !$em || !$bi || !$md || !$ti) {
+                      $cm = $('ed-custom-mb'), $nt = $('ed-notes'),
+                      $bwd = $('ed-bw-down'), $bwu = $('ed-bw-up');
+                if (!$d || !$tg || !$em || !$bi || !$md || !$ti || !$bwd || !$bwu) {
                   toast('Edit form is broken — fields missing. Reload the page.', 'err');
                   return;
                 }
@@ -1625,9 +2066,34 @@
                   email: $em.value.trim() || null,
                   billing_id: $bi.value.trim() || null,
                   max_devices: parseInt($md.value || '1', 10),
+                  bandwidth_down_mbps: parseInt($bwd.value || '20', 10),
+                  bandwidth_up_mbps: parseInt($bwu.value || '20', 10),
                   tier_name: $ti.value,
                   notes: $nt.value.trim() || null,
                 };
+                // v1.7.0 — speed_plan. If dropdown = 'custom', omit speed_plan so
+                // backend keeps the raw bandwidth_* as the source of truth.
+                // If dropdown = a preset, send speed_plan and let backend resolve.
+                // Backend precedence: explicit bandwidth_* > speed_plan > untouched.
+                const $sp = $('ed-speed-plan');
+                if ($sp && $sp.value && $sp.value !== 'custom' && $sp.value !== '__loading') {
+                  body.speed_plan = $sp.value;
+                } else if ($sp && $sp.value === 'custom') {
+                  // 'custom' = use raw bandwidth_* fields as authoritative.
+                  // Backend already handles this when speed_plan='custom'.
+                  body.speed_plan = 'custom';
+                }
+                // v1.6.5 — defense in depth: backend (db_query) now converts
+                // sqlite3 -json's "None" string to real null, but if a stale
+                // browser cache still has the old API shape (or if any other
+                // field ever gets the literal string "None" pre-filled), the
+                // email regex validation would 400. Strip "None"/"null"/
+                // whitespace-only strings before sending.
+                for (const k of ['telegram_username', 'email', 'billing_id', 'notes', 'display_name']) {
+                  if (body[k] && (body[k].toLowerCase() === 'none' || body[k].toLowerCase() === 'null')) {
+                    body[k] = null;
+                  }
+                }
                 if (body.tier_name === 'custom') {
                   const mb = parseInt($cm.value || '0', 10);
                   if (mb < 1) { toast('Custom cap must be ≥ 1 MiB', 'err'); return; }
@@ -1649,6 +2115,47 @@
         ),
       );
       openModal(modal);
+
+      // v1.7.0 — Populate the speed-plan dropdown with real options + wire handlers.
+      const $sp = document.getElementById('ed-speed-plan');
+      const $bwd = document.getElementById('ed-bw-down');
+      const $bwu = document.getElementById('ed-bw-up');
+      if ($sp) {
+        // Replace the 'Loading…' placeholder with actual options.
+        $sp.innerHTML = '';
+        for (const p of speedPlans) {
+          const label = p.name === 'standard'
+            ? `Standard — ${p.bandwidth_down_mbps} Mbps down / ${p.bandwidth_up_mbps} Mbps up (symmetric)`
+            : (p.name === 'asymmetric_40_20'
+                ? `Asymmetric — ${p.bandwidth_down_mbps} Mbps down / ${p.bandwidth_up_mbps} Mbps up`
+                : `${p.bandwidth_down_mbps}/${p.bandwidth_up_mbps}`);
+          $sp.appendChild(el('option', { value: p.name }, label));
+        }
+        // 'Custom' option: keeps raw bandwidth_* inputs as the source of truth.
+        $sp.appendChild(el('option', { value: 'custom' }, 'Custom (use raw bandwidth inputs below)'));
+        $sp.value = initialSpeedPlan;
+        // Change handler: when operator picks a preset, sync raw inputs.
+        $sp.addEventListener('change', () => {
+          if ($sp.value === 'custom' || $sp.value === '__loading') return;
+          const plan = speedPlans.find(p => p.name === $sp.value);
+          if (plan) {
+            $bwd.value = plan.bandwidth_down_mbps;
+            $bwu.value = plan.bandwidth_up_mbps;
+          }
+        });
+        // Raw input change handler: when operator edits a raw input to a value
+        // that matches a preset, auto-switch the dropdown to that preset.
+        // Otherwise, dropdown goes to 'custom'.
+        const syncDropdownFromRaw = () => {
+          const d = parseInt($bwd.value, 10);
+          const u = parseInt($bwu.value, 10);
+          if (!d || !u) return;
+          const match = speedPlans.find(p => p.bandwidth_down_mbps === d && p.bandwidth_up_mbps === u);
+          $sp.value = match ? match.name : 'custom';
+        };
+        $bwd.addEventListener('input', syncDropdownFromRaw);
+        $bwu.addEventListener('input', syncDropdownFromRaw);
+      }
     })();
   }
 
@@ -1676,33 +2183,121 @@
       el('div', { cls: 'vp-modal vp-modal-lg' },
         el('div', { cls: 'vp-modal-title' },
           el('span', {}, '+ New client'),
-          el('button', { cls: 'vp-modal-x', onclick: closeModal, title: 'Close' }, '×'),
+          el('button', { cls: 'vp-modal-x', onclick: closeModal, title: 'Close', 'aria-label': 'Close dialog' }, '×'),
         ),
         el('div', { id: 'vp-new-client-body' }, 'Loading…'),
       ),
     );
-    document.body.appendChild(modal);
-    // Focus trap & ESC
-    document.addEventListener('keydown', _modalEscListener);
+    openModal(modal);
     renderNewClientForm();
   }
 
-  function _modalEscListener(e) {
-    if (e.key === 'Escape') closeModal();
+  // ─── v1.7.2 — Modal lifecycle: stack + focus trap + ESC + focus restore ───
+  // Replaces the v1.3.0.1 single-modal openModal/closeModal pair. The earlier
+  // version only handled one modal at a time (always removed the first
+  // .vp-modal-bg and the first ESC listener) and did not trap Tab focus.
+  //
+  // Lifecycle:
+  //   openModal(el) — push {el, prevFocus} onto stack, set role/aria-modal,
+  //                   append to body, register keydown listener (once),
+  //                   focus first focusable inside modal.
+  //   closeModal() — pop topmost, remove from DOM, deregister listener if
+  //                  stack empty, restore focus to prevFocus element.
+  //   closeAllModals() — drain stack (used by sites that need defensive cleanup,
+  //                      e.g. showInstallerLinkModal which previously did
+  //                      `document.querySelectorAll('.vp-modal-bg').forEach(remove)`).
+  //   _modalKeyListener — single global keydown handler; handles ESC (close top)
+  //                       and Tab (trap focus inside topmost modal).
+  function _vpFocusable(root) {
+    // HTML-spec focusable selectors. Disabled / hidden / type=hidden excluded.
+    const sel = [
+      'a[href]',
+      'button:not([disabled])',
+      'textarea:not([disabled])',
+      'input:not([disabled]):not([type="hidden"])',
+      'select:not([disabled])',
+      '[tabindex]:not([tabindex="-1"])',
+    ].join(',');
+    return Array.from(root.querySelectorAll(sel)).filter(el => {
+      // Skip display:none / visibility:hidden (offsetParent is null for those)
+      // UNLESS the element is currently focused (some browsers keep focused
+      // elements with offsetParent === null in edge cases).
+      return el.offsetParent !== null || el === document.activeElement;
+    });
   }
 
-  // v1.3.0.1 — openModal helper (paired with closeModal). Was called by the Edit
-  // customer modal but never defined. Same shape as the inline code in
-  // openNewClientModal: append to body, register ESC listener.
   function openModal(modalEl) {
+    const previouslyFocused = document.activeElement;
+    modalEl.setAttribute('role', 'dialog');
+    modalEl.setAttribute('aria-modal', 'true');
+    S._modalStack.push({ modalEl, previouslyFocused });
     document.body.appendChild(modalEl);
-    document.addEventListener('keydown', _modalEscListener);
+    // Register keydown listener only once — listener reads top of stack at
+    // event time so it works correctly for nested modals.
+    if (S._modalStack.length === 1) {
+      document.addEventListener('keydown', _modalKeyListener);
+    }
+    // Focus the first focusable element inside the modal so keyboard users
+    // land in a useful spot (typically the title × or first input).
+    const focusables = _vpFocusable(modalEl);
+    if (focusables.length > 0 && focusables[0].focus) {
+      focusables[0].focus();
+    } else if (modalEl.tabIndex !== -1) {
+      modalEl.tabIndex = -1;
+      modalEl.focus();
+    }
   }
 
   function closeModal() {
-    document.removeEventListener('keydown', _modalEscListener);
-    const m = document.querySelector('.vp-modal-bg');
-    if (m) m.remove();
+    const top = S._modalStack.pop();
+    if (!top) return;
+    if (top.modalEl && top.modalEl.parentNode) top.modalEl.remove();
+    if (S._modalStack.length === 0) {
+      document.removeEventListener('keydown', _modalKeyListener);
+    }
+    // Restore focus to whatever was focused when this modal opened, if it
+    // is still in the document. Guards against the trigger button being
+    // removed by a re-render between open and close.
+    if (top.previouslyFocused
+        && typeof top.previouslyFocused.focus === 'function'
+        && document.contains(top.previouslyFocused)) {
+      top.previouslyFocused.focus();
+    }
+  }
+
+  function closeAllModals() {
+    while (S._modalStack.length > 0) {
+      const top = S._modalStack.pop();
+      if (top && top.modalEl && top.modalEl.parentNode) top.modalEl.remove();
+    }
+    document.removeEventListener('keydown', _modalKeyListener);
+  }
+
+  function _modalKeyListener(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeModal();
+      return;
+    }
+    if (e.key !== 'Tab' || S._modalStack.length === 0) return;
+    const top = S._modalStack[S._modalStack.length - 1];
+    const focusables = _vpFocusable(top.modalEl);
+    if (focusables.length === 0) {
+      // No focusable children — swallow Tab to keep focus inside modal area.
+      e.preventDefault();
+      return;
+    }
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement;
+    const inModal = top.modalEl.contains(active);
+    if (e.shiftKey && (!inModal || active === first)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (!inModal || active === last)) {
+      e.preventDefault();
+      first.focus();
+    }
   }
 
   async function renderNewClientForm() {
@@ -1726,7 +2321,7 @@
             el('label', { cls: 'vp-label' }, 'Client name (slug)'),
             el('input', { id: 'vp-nc-name', cls: 'vp-inp', type: 'text', required: true,
                            placeholder: 'acme-corp', maxlength: 32,
-                           pattern: '[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}',
+                           
                            'aria-describedby': 'vp-nc-name-hint' }),
             el('div', { cls: 'vp-hint', id: 'vp-nc-name-hint' },
               'URL-safe: letters, digits, dash, underscore. 1-32 chars.'),
@@ -1761,27 +2356,54 @@
             el('label', { cls: 'vp-label' }, 'Tier'),
             el('select', { id: 'vp-nc-tier', cls: 'vp-inp', required: true }, tierOptions),
           ),
-          el('div', { cls: 'vp-field', id: 'vp-nc-custom-wrap', style: 'display:none' },
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-custom-wrap' },
             el('label', { cls: 'vp-label' }, 'Custom cap (MiB)'),
             el('input', { id: 'vp-nc-custom-mb', cls: 'vp-inp', type: 'number',
                            min: 1, max: 1048576, placeholder: 'e.g. 1500 for 1.5 GB' }),
             el('div', { cls: 'vp-hint' }, 'Binary MiB (× 1,048,576 bytes). Tier auto-created.'),
+          ),
+          // v1.5.0 — Speed plan (per-customer, NOT tier-driven). Two presets:
+          //   'standard'         → 20/20 mbps symmetric
+          //   'asymmetric_40_20' → 40/20 mbps (asymmetric, typical home broadband)
+          // Tiers drive data quota (5/10/20 GB); speed_plan drives bandwidth.
+          el('div', { cls: 'vp-field' },
+            el('label', { cls: 'vp-label' }, 'Speed plan'),
+            el('select', { id: 'vp-nc-speed-plan', cls: 'vp-inp' },
+              el('option', { value: 'standard' }, 'Standard — 20 Mbps down / 20 Mbps up (symmetric)'),
+              el('option', { value: 'asymmetric_40_20' }, 'Asymmetric — 40 Mbps down / 20 Mbps up'),
+            ),
+            el('div', { cls: 'vp-hint' },
+              'Per-customer bandwidth. Independent of tier (tier controls data quota only).'),
+          ),
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-bw-override-wrap' },
+            el('label', { cls: 'vp-label' },
+              'Custom bandwidth (Mbps) ',
+              el('span', { cls: 'vp-optional' }, '(advanced override — wins over speed plan)')),
+            el('div', { cls: 'vp-row' },
+              el('input', { id: 'vp-nc-bw-down', cls: 'vp-inp vp-flex-1 vp-mr-6', type: 'number',
+                             min: 1, max: 1000, placeholder: 'down' }),
+              el('input', { id: 'vp-nc-bw-up',   cls: 'vp-inp vp-flex-1', type: 'number',
+                             min: 1, max: 1000, placeholder: 'up' }),
+            ),
+            el('div', { cls: 'vp-hint' },
+              'Both fields required. Bypasses the speed-plan preset above.'),
           ),
           // Device
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device name'),
             el('input', { id: 'vp-nc-device', cls: 'vp-inp', type: 'text', required: true,
                            placeholder: 'laptop', maxlength: 32,
-                           pattern: '[a-zA-Z0-9][a-zA-Z0-9-]{0,31}',
+                           
                            'aria-describedby': 'vp-nc-device-hint vp-nc-device-warn',
                            value: 'laptop' }),
             el('div', { cls: 'vp-hint', id: 'vp-nc-device-hint' },
               'Friendly name. EAP identity will be \u201c{customer-name}-{device-name}\u201d.'),
-            el('div', { cls: 'vp-field-warn', id: 'vp-nc-device-warn', style: 'display:none' }),
+            el('div', { cls: 'vp-field-warn vp-hidden', id: 'vp-nc-device-warn' }),
           ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'Device type'),
-            el('select', { id: 'vp-nc-devtype', cls: 'vp-inp', required: true },
+            el('select', { id: 'vp-nc-devtype', cls: 'vp-inp', required: true,
+                            onchange: onNcDeviceTypeChange },
               el('option', { value: 'iOS'     }, 'iOS'),
               el('option', { value: 'Android' }, 'Android'),
               el('option', { value: 'Windows' }, 'Windows'),
@@ -1790,6 +2412,35 @@
               el('option', { value: 'Other'   }, 'Other'),
             ),
           ),
+          // v2.2 — Windows installer-mode picker. Shows when device_type=Windows.
+          // Stores the operator's choice in hidden input #vp-nc-installer-mode
+          // which onNewClientSubmit reads to call installer-token?mode={value}.
+          el('div', { cls: 'vp-field vp-hidden', id: 'vp-nc-installer-mode-wrap' },
+            el('label', { cls: 'vp-label' },
+              'Windows installer mode ',
+              el('span', { cls: 'vp-optional' }, '(Standard N — 3-line powershell via HTTPS  /  Hostile H — self-contained .ps1)')),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', { type: 'radio', name: 'vp-nc-installer-mode-radio', value: 'standard',
+                              checked: true, id: 'vp-nc-installer-mode-radio-std',
+                              onchange: () => { document.getElementById('vp-nc-installer-mode').value = 'standard'; } }),
+                el('strong', {}, 'Standard (N)'),
+                el('span', { cls: 'vp-fg-muted vp-fs-12 vp-ml-6' },
+                  'FROZEN 3-line powershell (curl + rasdial). Works everywhere; fails behind FortiGate / SonicWall HTTPS intercept.'),
+              ),
+            ),
+            el('div', { cls: 'vp-row vp-mt-4' },
+              el('label', { cls: 'vp-radio-label' },
+                el('input', { type: 'radio', name: 'vp-nc-installer-mode-radio', value: 'hostile',
+                              id: 'vp-nc-installer-mode-radio-hostile',
+                              onchange: () => { document.getElementById('vp-nc-installer-mode').value = 'hostile'; } }),
+                el('strong', {}, 'Hostile (H)'),
+                el('span', { cls: 'vp-fg-muted vp-fs-12 vp-ml-6' },
+                  'Self-contained .ps1 with credentials baked in (RasSetCredentials via P/Invoke). Works on hostile networks. CWE-778-ish — single-use, single-target.'),
+              ),
+            ),
+            el('input', { type: 'hidden', id: 'vp-nc-installer-mode', value: 'standard' }),
+          ),
           el('div', { cls: 'vp-field' },
             el('label', { cls: 'vp-label' }, 'OS version ', el('span', { cls: 'vp-optional' }, '(optional)')),
             el('input', { id: 'vp-nc-osver', cls: 'vp-inp', type: 'text',
@@ -1797,9 +2448,9 @@
           ),
         ),
         // Live custom-cap preview
-        el('div', { id: 'vp-nc-custom-preview', cls: 'vp-custom-preview', style: 'display:none' }),
-        el('div', { id: 'vp-nc-form-err', cls: 'vp-form-err', style: 'display:none' }),
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:18px; justify-content: flex-end' },
+        el('div', { id: 'vp-nc-custom-preview', cls: 'vp-custom-preview vp-hidden' }),
+        el('div', { id: 'vp-nc-form-err', cls: 'vp-form-err vp-hidden' }),
+        el('div', { cls: 'vp-btn-row vp-mt-18 vp-justify-end' },
           el('button', { type: 'button', cls: 'vp-btn vp-btn-ghost', onclick: closeModal }, 'Cancel'),
           el('button', { type: 'submit', cls: 'vp-btn vp-btn-primary', id: 'vp-nc-submit' }, 'Create client'),
         ),
@@ -1813,25 +2464,35 @@
     const preview  = body.querySelector('#vp-nc-custom-preview');
     function refresh() {
       const isCustom = tierSel.value === 'custom';
-      customWrap.style.display = isCustom ? '' : 'none';
+      customWrap.classList.toggle('vp-hidden', !isCustom);
       if (isCustom) {
         const mb = parseInt(customMb.value || '0', 10);
         if (mb > 0) {
           const bytes = mb * 1048576;
-          preview.style.display = '';
+          preview.classList.remove('vp-hidden');
           preview.innerHTML = '';
           preview.appendChild(el('strong', {}, '→ New tier: '));
           preview.appendChild(document.createTextNode(
             `custom_${mb}mb_<ts> · ${fmtBytes(bytes)} (${mb} MiB)`));
         } else {
-          preview.style.display = 'none';
+          preview.classList.add('vp-hidden');
         }
       } else {
-        preview.style.display = 'none';
+        preview.classList.add('vp-hidden');
       }
     }
     tierSel.addEventListener('change', refresh);
     customMb.addEventListener('input', refresh);
+
+    // v1.5.0 — speed plan + bandwidth override wiring
+    const speedPlanSel = body.querySelector('#vp-nc-speed-plan');
+    const bwOverrideWrap = body.querySelector('#vp-nc-bw-override-wrap');
+    const bwDown = body.querySelector('#vp-nc-bw-down');
+    const bwUp   = body.querySelector('#vp-nc-bw-up');
+    speedPlanSel.addEventListener('change', () => {
+      // Custom override is always available; we just show it after user picks.
+      // (Not auto-shown because most operators will use the preset.)
+    });
 
     // Auto-derive client name from display name if not yet typed
     const nameInp  = body.querySelector('#vp-nc-name');
@@ -1856,11 +2517,11 @@
       }
       if (msg) {
         devWarn.textContent = '\u26a0  ' + msg;
-        devWarn.style.display = '';
+        devWarn.classList.remove('vp-hidden');
         devInp.classList.add('vp-inp-bad');
         if (submitBtn) submitBtn.disabled = true;
       } else {
-        devWarn.style.display = 'none';
+        devWarn.classList.add('vp-hidden');
         devWarn.textContent = '';
         devInp.classList.remove('vp-inp-bad');
         if (submitBtn) submitBtn.disabled = false;
@@ -1884,7 +2545,7 @@
   async function onNewClientSubmit(ev) {
     ev.preventDefault();
     const errEl = document.getElementById('vp-nc-form-err');
-    errEl.style.display = 'none';
+    errEl.classList.add('vp-hidden');
     errEl.textContent = '';
     const submitBtn = document.getElementById('vp-nc-submit');
     submitBtn.disabled = true;
@@ -1899,31 +2560,79 @@
       notes:              document.getElementById('vp-nc-notes').value.trim() || null,
       tier_name:          document.getElementById('vp-nc-tier').value,
       custom_cap_mb:      parseInt(document.getElementById('vp-nc-custom-mb').value || '0', 10) || null,
+      speed_plan:         document.getElementById('vp-nc-speed-plan').value,
+      bandwidth_down_mbps: parseInt(document.getElementById('vp-nc-bw-down').value || '', 10) || null,
+      bandwidth_up_mbps:   parseInt(document.getElementById('vp-nc-bw-up').value   || '', 10) || null,
       device_name:        document.getElementById('vp-nc-device').value.trim(),
       device_type:        document.getElementById('vp-nc-devtype').value,
       os_version:         document.getElementById('vp-nc-osver').value.trim() || null,
     };
     if (body.tier_name !== 'custom') body.custom_cap_mb = null;
+    // If neither explicit bandwidth field is filled, drop both so the server
+    // applies the speed_plan preset (no partial-state confusion).
+    if (body.bandwidth_down_mbps == null && body.bandwidth_up_mbps == null) {
+      body.bandwidth_down_mbps = null;
+      body.bandwidth_up_mbps = null;
+    }
+
+    // v2.2 — read the Windows installer mode (set by onNcDeviceTypeChange + radios).
+    // Defaults to 'standard' even if device_type !== Windows (harmless, unused).
+    const installerMode = (document.getElementById('vp-nc-installer-mode') || { value: 'standard' }).value || 'standard';
 
     try {
       const r = await post('/api/customers', body);
       // Refresh customers list in the background
       try { loadCustomers().then(render).catch(()=>{}); } catch {}
-      renderOneshotPanel(r);
+      // v1.6.0 — For Windows devices, also auto-generate the installer
+      // one-liner so the operator can immediately send it to the customer.
+      // v2.2 — passes the operator's chosen mode (?mode=standard|hostile).
+      // Token is one-shot, 7-day expiry, burned on first customer fetch.
+      let installerData = null;
+      if (body.device_type === 'Windows') {
+        try {
+          installerData = await post(`/api/customers/${r.customer.id}/installer-token?mode=${encodeURIComponent(installerMode)}`);
+        } catch (e) {
+          // Non-fatal — Windows card will fall back to manual steps.
+          console.warn('installer-token failed:', e.message || e);
+        }
+      }
+      renderOneshotPanel(r, installerData);
     } catch (e) {
       errEl.textContent = e.message || String(e);
-      errEl.style.display = '';
+      errEl.classList.remove('vp-hidden');
       submitBtn.disabled = false;
       submitBtn.textContent = 'Create client';
     }
   }
 
+  // v2.2 — show/hide the Windows installer-mode picker block when the
+  // operator changes device_type in the new-client form. Resets the hidden
+  // input to 'standard' when Windows is un-selected (so a subsequent
+  // Windows re-selection doesn't carry a stale 'hostile' choice).
+  function onNcDeviceTypeChange(ev) {
+    const wrap = document.getElementById('vp-nc-installer-mode-wrap');
+    const hidden = document.getElementById('vp-nc-installer-mode');
+    if (!wrap || !hidden) return;
+    const isWin = ev.target.value === 'Windows';
+    wrap.classList.toggle('vp-hidden', !isWin);
+    if (!isWin) {
+      hidden.value = 'standard';
+      const std = document.getElementById('vp-nc-installer-mode-radio-std');
+      const host = document.getElementById('vp-nc-installer-mode-radio-hostile');
+      if (std) std.checked = true;
+      if (host) host.checked = false;
+    }
+  }
+
   // ─── One-shot password panel (shown after successful create) ─────────────
-  function renderOneshotPanel(r) {
+  // v1.6.0 — installerData (optional): PowerShell one-liner data for Windows.
+  // When the customer was just created with device_type=Windows, we auto-generate
+  // the installer token so the operator can copy-paste-send immediately.
+  function renderOneshotPanel(r, installerData) {
     const c = r.customer, d = r.device;
     const eapId = r.eap_identity, pw = r.password;
-    const server    = '102.182.117.43';
-    const remoteId  = 'vpn.homelab.local';
+    const server    = 'myvpn.databyte.co.za';
+    const remoteId  = 'myvpn.databyte.co.za';
     const localId   = eapId;
 
     function fieldRow(label, value, copy = true) {
@@ -1936,9 +2645,10 @@
           type: 'button',
           cls: 'vp-btn-icon',
           title: 'Copy',
+          'aria-label': 'Copy ' + (label || 'value'),
           onclick: () => {
             navigator.clipboard.writeText(String(value)).then(() => {
-              showBanner('Copied ' + label, 'ok');
+              toast('Copied ' + label, 'ok');
             }).catch(() => {});
           },
         }, '⧉'));
@@ -1980,18 +2690,56 @@
       ),
     );
 
+    // v2.2 — Windows: show the operator-picked artifact inline (3-line FROZEN
+    // powershell OR full hostile .ps1), with a button to open the mode-selector
+    // modal as a fallback if they want to switch modes or re-generate.
+    // Mode was chosen at create time (v2.2 picker in the form), so we know it.
+    const windowsMode = (installerData && installerData.mode) || 'standard';
+    const isHostile = windowsMode === 'hostile';
+
+    // Pick the artifact body to display
+    //   standard: powershell_cmd = the 3-line FROZEN block
+    //   hostile:  content         = the full .ps1; powershell_cmd = run command
+    const artifactBody = installerData
+      ? (isHostile ? installerData.content : installerData.powershell_cmd)
+      : null;
+
     const Windows = setupCard('Windows',
-      el('ol', { cls: 'vp-setup-steps' },
-        el('li', {}, 'Settings → Network & internet → VPN → Add a VPN connection'),
-        el('li', {}, 'VPN provider: Windows (built-in)'),
-        el('li', {}, 'Connection name: any (e.g. "databyte VPN")'),
-        el('li', {}, 'Server name or address: ', el('span', { cls: 'vp-mono' }, server)),
-        el('li', {}, 'VPN type: IKEv2'),
-        el('li', {}, 'Type of sign-in info: User name and password'),
-        el('li', {}, 'User name: ', el('span', { cls: 'vp-mono' }, eapId)),
-        el('li', {}, 'Password: ', el('span', { cls: 'vp-mono vp-pw-shown' }, pw)),
-        el('li', {}, 'Save → connect from network flyout'),
-        el('li', {}, 'If asked for "Remember my sign-in info": NO'),
+      el('div', {},
+        el('div', { cls: 'vp-setup-steps' },
+          el('div', {},
+            el('strong', {},
+              isHostile ? 'Hostile mode installer (baked .ps1):' : 'Standard mode installer (3-line powershell):'),
+          ),
+          // Inline artifact
+          artifactBody
+            ? el('pre', { cls: 'vp-cmd vp-mt-12' }, artifactBody)
+            : el('div', { cls: 'vp-info vp-fs-12 vp-fg-muted' },
+                'Auto-generation did not run for this device. ',
+                'Click the button below to generate.'),
+          // Mode badge + token info
+          installerData
+            ? el('div', { cls: 'vp-info vp-mt-16 vp-fs-12 vp-fg-muted' },
+                'Mode: ', el('strong', {}, windowsMode.toUpperCase()),
+                isHostile
+                  ? el('span', {}, ' · File: ', el('code', {}, installerData.filename || '(unnamed)'),
+                        ' · Single-use; treat as sensitive customer material.')
+                  : el('span', {}, ' · Token ', el('code', {}, installerData.token_prefix),
+                        ' · expires in ', String(installerData.expires_in_days), ' day(s). ',
+                        'Single-use: burns when the customer runs the one-liner.'),
+              )
+            : null,
+          // Fallback button — opens modal if operator wants to switch modes
+          el('div', { cls: 'vp-row vp-mt-12' },
+            el('button', {
+              type: 'button',
+              cls: 'vp-btn vp-btn-ghost',
+              onclick: () => {
+                showInstallerLinkModal(c, installerData || null, windowsMode);
+              },
+            }, isHostile ? '🔁 Switch to Standard / re-generate' : '🔁 Switch to Hostile / re-generate'),
+          ),
+        ),
       ),
     );
 
@@ -2059,7 +2807,7 @@
         // fallback on desktop. Text content built below.
         renderShareControls({ c, d, eapId, pw, server, remoteId }),
         // Footer
-        el('div', { cls: 'vp-btn-row', style: 'margin-top:20px; justify-content: flex-end' },
+        el('div', { cls: 'vp-btn-row vp-mt-20 vp-justify-end' },
           el('button', { type: 'button', cls: 'vp-btn vp-btn-primary', onclick: closeModal }, 'Done'),
         ),
       ),
@@ -2099,8 +2847,7 @@
       && navigator.canShare({ text });
 
     const btnRow = el('div', {
-      cls: 'vp-btn-row',
-      style: 'margin-top:18px; gap:8px; flex-wrap:wrap;',
+      cls: 'vp-btn-row vp-mt-18 vp-gap-8',
     });
 
     if (canShare) {
@@ -2113,11 +2860,11 @@
               title: 'databyte VPN \u2014 ' + (ctx.c.display_name || ctx.c.name),
               text,
             });
-            showBanner('Shared', 'ok');
+            toast('Shared', 'ok');
           } catch (e) {
             // User cancelled or share failed \u2014 fall back silently.
             if (e && e.name !== 'AbortError') {
-              try { await navigator.clipboard.writeText(text); showBanner('Share failed \u2014 copied to clipboard', 'ok'); }
+              try { await navigator.clipboard.writeText(text); toast('Share failed \u2014 copied to clipboard', 'ok'); }
               catch (_) { showBanner('Share failed', 'err'); }
             }
           }
@@ -2132,13 +2879,15 @@
       onclick: async () => {
         try {
           await navigator.clipboard.writeText(text);
-          showBanner('Copied full config to clipboard', 'ok');
+          toast('Copied full config to clipboard', 'ok');
         } catch (_) {
           // Last-resort fallback for very old browsers without Clipboard API
+          // v1.4.0 — use .vp-offscreen class instead of inline style (strict CSP).
           const ta = document.createElement('textarea');
-          ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+          ta.value = text;
+          ta.className = 'vp-offscreen';
           document.body.appendChild(ta); ta.select();
-          try { document.execCommand('copy'); showBanner('Copied full config to clipboard', 'ok'); }
+          try { document.execCommand('copy'); toast('Copied full config to clipboard', 'ok'); }
           catch (_) { showBanner('Copy failed \u2014 select text manually', 'err'); }
           finally { document.body.removeChild(ta); }
         }
@@ -2221,6 +2970,8 @@
       try {
         await loadDashboard();
         S.user = 'admin';
+        // v1.9.0-sse — open SSE stream after login. Replaces setInterval polls.
+        connectSSE();
       } catch {
         S.user = null;
       }
@@ -2235,6 +2986,184 @@
     try {
       showBanner('JS Error: ' + (e.message || 'unknown'), 'err');
     } catch {}
+  });
+
+  // ─── v1.9.0-sse — Server-Sent Events stream ─────────────────────────────
+  // One persistent EventSource connection pushes live leases / customers /
+  // pools every 2s, replacing setInterval polling. Verified live: SSE
+  // connects, snapshots stream, fmtBytes MB shows 2-decimal for visible
+  // movement.
+  //
+  // Why this works:
+  //   - SSE pushes server->client over a single HTTP connection
+  //   - EventSource auto-reconnects on disconnect (built-in retry)
+  //   - Bypasses Chrome's background-tab setInterval throttling
+  //   - Server-side: /api/events/stream (FastAPI StreamingResponse)
+  //   - nginx: proxy_buffering off + X-Accel-Buffering: no for that path
+  //
+  // Fallback: if SSE fails to connect or stays disconnected, the existing
+  // setIntervals (startSessionsAutoRefresh, etc.) still poll as degraded.
+  const SCRIPT_VERSION = 'v2.0.0';
+  console.log('[vpn-portal]', SCRIPT_VERSION, 'loaded at', new Date().toISOString());
+
+  function refreshActivePage() {
+    console.log('[vpn-portal] refreshActivePage fired, page=', S?.page);
+    if (!S || !S.user) return;
+    const p = S.page;
+    try {
+      if (p === 'sessions') {
+        loadSessions().then(render).catch(()=>{});
+      } else if (p === 'dashboard') {
+        loadDashboard().then(render).catch(()=>{});
+      } else if (p === 'customers') {
+        loadCustomers().then(render).catch(()=>{});
+        loadActiveSessions().then(render).catch(()=>{});
+        if (S.selectedId) {
+          get('/api/customers/' + S.selectedId).then(d => {
+            S.detail = d;
+            const card = document.getElementById('vp-customer-detail');
+            if (card) {
+              card.innerHTML = '';
+              card.appendChild(renderCustomerDetail());
+            }
+          }).catch(()=>{});
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshActivePage();
+  });
+  window.addEventListener('focus', refreshActivePage);
+
+  // ─── SSE: live data stream (v1.9.0) ─────────────────────────────────
+  let _sse = null;
+  let _sseReconnectDelay = 1000;
+  let _sseSnapshotCount = 0;
+
+  function connectSSE() {
+    if (_sse) { try { _sse.close(); } catch {} _sse = null; }
+    try {
+      _sse = new EventSource('/api/events/stream', { withCredentials: true });
+    } catch (e) {
+      console.warn('[vpn-portal] EventSource construct failed:', e);
+      scheduleSSEReconnect();
+      return;
+    }
+    _sse.onopen = () => {
+      console.log('[vpn-portal] SSE connected, version=', SCRIPT_VERSION);
+      _sseReconnectDelay = 1000;
+      _sseState.connected = true;
+      _sseState.lastChange = Date.now();
+      updateSSEIndicator();
+    };
+    _sse.onmessage = (e) => {
+      try { applySnapshot(JSON.parse(e.data)); } catch (err) {
+        console.warn('[vpn-portal] SSE onmessage parse failed:', err);
+      }
+    };
+    _sse.addEventListener('snapshot', (e) => {
+      try { applySnapshot(JSON.parse(e.data)); } catch (err) {
+        console.warn('[vpn-portal] SSE snapshot parse failed:', err);
+      }
+    });
+    _sse.onerror = () => {
+      _sseState.connected = false;
+      _sseState.lastChange = Date.now();
+      updateSSEIndicator();
+      if (_sse && _sse.readyState === EventSource.CLOSED) {
+        scheduleSSEReconnect();
+      }
+    };
+  }
+
+  function scheduleSSEReconnect() {
+    setTimeout(() => { if (S.user) connectSSE(); }, _sseReconnectDelay);
+    _sseReconnectDelay = Math.min(_sseReconnectDelay * 2, 30000);
+  }
+
+  function disconnectSSE() {
+    if (_sse) { try { _sse.close(); } catch {} _sse = null; }
+    _sseState.connected = false;
+    _sseState.lastChange = Date.now();
+    updateSSEIndicator();
+  }
+
+  // Apply a snapshot to S and re-render only the pages that show SSE data.
+  function applySnapshot(d) {
+    _sseSnapshotCount++;
+    if (!d || typeof d !== 'object') return;
+    // Update customers (quota fields) — merge by id
+    if (Array.isArray(d.customers)) {
+      const byId = new Map((S.customers || []).map(c => [c.id, c]));
+      for (const c of d.customers) {
+        const existing = byId.get(c.id);
+        if (existing) {
+          existing.data_used_bytes = c.used_bytes != null ? c.used_bytes : c.data_used_bytes;
+          existing.data_limit_bytes = c.quota_bytes != null ? c.quota_bytes : c.data_limit_bytes;
+          existing.over_quota = c.over_quota;
+          existing.pct = c.pct;
+          existing.used_bytes = c.used_bytes;
+          existing.quota_bytes = c.quota_bytes;
+        } else {
+          byId.set(c.id, c);
+        }
+      }
+      S.customers = Array.from(byId.values());
+    }
+    // Update active-session counts from leases
+    if (Array.isArray(d.leases)) {
+      const counts = {};
+      for (const l of d.leases) {
+        if (l.online && l.customer_id) {
+          counts[l.customer_id] = (counts[l.customer_id] || 0) + 1;
+        }
+      }
+      S.activeSessions = counts;
+    }
+    // Customer detail (if open) — update quota fields
+    if (S.detail && Array.isArray(d.customers)) {
+      const live = d.customers.find(c => c.id === S.detail.id);
+      if (live) {
+        S.detail.data_used_bytes = live.used_bytes;
+        S.detail.used_bytes = live.used_bytes;
+        S.detail.pct = live.pct;
+        S.detail.over_quota = live.over_quota;
+      }
+    }
+    _sseState.connected = true;
+    _sseState.lastChange = Date.now();
+    updateSSEIndicator();
+    if (S.page === 'sessions' || S.page === 'customers' || S.page === 'dashboard') {
+      render();
+    }
+  }
+
+  const _sseState = { connected: false, lastChange: 0 };
+  function updateSSEIndicator() {
+    const badge = document.getElementById('vp-sse-badge');
+    if (!badge) return;
+    if (_sseState.connected) {
+      badge.textContent = '● SSE';
+      badge.className = 'vp-sse-badge vp-sse-on';
+      badge.title = 'Live SSE stream connected (' + _sseSnapshotCount + ' snapshots received)';
+    } else {
+      badge.textContent = '○ SSE';
+      badge.className = 'vp-sse-badge vp-sse-off';
+      badge.title = 'SSE disconnected — falling back to polling';
+    }
+  }
+
+  // v1.8.3 — pageshow fires when page is restored from bfcache. Re-arm SSE.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) {
+      try {
+        if (typeof startDashboardAutoRefresh === 'function' && S?.page === 'dashboard') startDashboardAutoRefresh();
+        if (typeof startActiveSessAutoRefresh === 'function' && S?.page === 'customers') startActiveSessAutoRefresh();
+        if (typeof startSessionsAutoRefresh === 'function' && S?.page === 'sessions') startSessionsAutoRefresh();
+      } catch {}
+      refreshActivePage();
+    }
   });
 
   init();

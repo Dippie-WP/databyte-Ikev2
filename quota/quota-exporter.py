@@ -55,6 +55,8 @@ import sys
 import time
 from pathlib import Path
 
+import pymysql
+import pymysql.cursors
 from prometheus_client import start_http_server, Gauge, Counter, Info
 
 log = logging.getLogger("quota-exporter")
@@ -62,9 +64,56 @@ log = logging.getLogger("quota-exporter")
 LISTEN_PORT = 9102
 SCRAPE_INTERVAL = 30  # seconds
 
-# Same paths the rest of the 5B stack uses
-DB_PATH = "/var/lib/strongswan/ipsec.db"
+# Charon DB -- authoritative for SA leases (addresses, identities)
+CHARON_DB_PATH = "/var/lib/strongswan/ipsec.db"
 VIP_PREFIX = "10.99.0."  # rw-pool range
+
+# MariaDB config (Phase 4E, since 2026-07-12). Portal data lives here.
+PORTAL_ENV_FILE = "/etc/vpn-portal.env"
+MARIADB_HOST = "127.0.0.1"
+MARIADB_PORT = 3306
+MARIADB_USER = "portal"
+MARIADB_PASSWORD = "portal"
+MARIADB_DB = "radius"
+
+
+def _read_mariadb_password():
+    """Read portal MariaDB password from /etc/vpn-portal.env (DB_URL=...).
+    Falls back to defaults if file missing or unparseable.
+    """
+    global MARIADB_PASSWORD, MARIADB_USER, MARIADB_HOST, MARIADB_PORT, MARIADB_DB
+    try:
+        with open(PORTAL_ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line.startswith("DB_URL="):
+                    continue
+                url = line.split("=", 1)[1]
+                m = re.match(r"mysql\+pymysql://([^:]+):([^@]+)@([^:/]+):?(\d+)?/(\w+)", url)
+                if m:
+                    user, pw, host, port, db = m.groups()
+                    MARIADB_USER = user
+                    MARIADB_PASSWORD = pw
+                    MARIADB_HOST = host
+                    MARIADB_PORT = int(port) if port else 3306
+                    MARIADB_DB = db
+                    log.info("MariaDB from %s: user=%s host=%s db=%s", PORTAL_ENV_FILE, user, host, db)
+                    return
+    except Exception as e:
+        log.warning("Could not read %s: %s -- defaults", PORTAL_ENV_FILE, e)
+
+
+_read_mariadb_password()
+
+
+def _maria_connect():
+    """Open a new pymysql connection. Fresh each call -- no idle pool on 30s scrape."""
+    return pymysql.connect(
+        host=MARIADB_HOST, port=MARIADB_PORT, user=MARIADB_USER,
+        password=MARIADB_PASSWORD, database=MARIADB_DB, charset="utf8mb4",
+        connect_timeout=5, read_timeout=10, write_timeout=10,
+        cursorclass=pymysql.cursors.DictCursor, autocommit=True,
+    )
 
 # Prometheus metrics
 g_customer_info = Gauge(
@@ -91,6 +140,16 @@ g_customer_active = Gauge(
     "vpn_customer_is_active",
     "1 if customer account is active, 0 if suspended",
     ["customer"],
+)
+g_customer_bytes_in = Gauge(
+    "vpn_customer_bytes_in_total",
+    "All-time cumulative bytes received per customer (sum of radacct acctinputoctets)",
+    ["customer", "tier"],
+)
+g_customer_bytes_out = Gauge(
+    "vpn_customer_bytes_out_total",
+    "All-time cumulative bytes sent per customer (sum of radacct acctoutputoctets)",
+    ["customer", "tier"],
 )
 g_lease_in = Gauge(
     "vpn_active_lease_bytes_in_total",
@@ -140,6 +199,28 @@ g_audit_total = Gauge(
     "Total audit log rows (by actor and action)",
     ["actor", "action"],
 )
+# RADIUS-based per-user data usage (added 2026-07-14, survives IKE_SA rekeys)
+g_radacct_active_bytes = Gauge(
+    "vpn_radacct_active_session_bytes",
+    "Bytes (in+out) for currently-open RADIUS sessions (acctstoptime IS NULL)",
+    ["username", "calling_station_id"],
+)
+g_radacct_active_duration = Gauge(
+    "vpn_radacct_active_session_duration",
+    "Seconds elapsed for currently-open RADIUS sessions",
+    ["username", "calling_station_id"],
+)
+g_radacct_sessions_7d = Gauge(
+    "vpn_radacct_sessions_total_7d",
+    "RADIUS sessions in last 7 days, by terminate cause",
+    ["cause"],
+)
+g_radacct_sessions_per_hour = Gauge(
+    "vpn_radacct_sessions_per_hour",
+    "RADIUS sessions started per hour, last 24h, by terminate cause "
+    "(for satellite link-flap trend analysis)",
+    ["hour_bin", "cause"],
+)
 c_scrape_errors = Counter(
     "vpn_exporter_scrape_errors_total",
     "Number of scrape failures (DB or iptables)",
@@ -163,11 +244,11 @@ QUOTA_COMMENT_RE = re.compile(r"quota:(\d+\.\d+\.\d+\.\d+)")
 
 # ---------- data sources ----------
 
-def db_query(sql: str) -> list[dict]:
-    """Run a SQL query on the strongSwan SQLite DB, return rows as dicts."""
-    if not Path(DB_PATH).exists():
+def db_query_charon(sql: str) -> list[dict]:
+    """Query charon SQLite (charon-internal tables only: addresses, identities)."""
+    if not Path(CHARON_DB_PATH).exists():
         return []
-    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn = sqlite3.connect(CHARON_DB_PATH, timeout=5)
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.execute(sql)
@@ -175,6 +256,18 @@ def db_query(sql: str) -> list[dict]:
     finally:
         conn.close()
     return rows
+
+
+def db_query_mariadb(sql: str, params=None) -> list[dict]:
+    """Query MariaDB `radius` DB. Returns [] on error -- caller decides."""
+    try:
+        with _maria_connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params or ())
+                return list(cur.fetchall())
+    except Exception as e:
+        log.warning("MariaDB query failed: %s -- sql=%s", e, sql[:200])
+        return []
 
 
 def iptables_counters() -> dict:
@@ -415,10 +508,13 @@ def _reset_gauges():
     for gauge in [
         g_customer_info, g_customer_used, g_customer_limit,
         g_customer_over, g_customer_active,
+        g_customer_bytes_in, g_customer_bytes_out,
         g_lease_in, g_lease_out, g_lease_acquired,
         g_customer_count,
         g_pool_size, g_pool_online,
         g_alerts_total, g_audit_total,
+        g_radacct_active_bytes, g_radacct_active_duration, g_radacct_sessions_7d,
+        g_radacct_sessions_per_hour,
     ]:
         try:
             gauge.clear()
@@ -427,123 +523,296 @@ def _reset_gauges():
             pass
 
 
+# ---------- main ----------
+
+# ---------- scrape steps (each isolated so one failure does not blank all) ----------
+
+def step_customers_and_tiers():
+    """Steps 1+2: customers + tiers (MariaDB).
+    Emits: vpn_customer_info, vpn_customer_data_used_bytes, vpn_customer_data_limit_bytes,
+           vpn_customer_over_quota, vpn_customer_is_active, vpn_active_customer_count.
+    """
+    customers = db_query_mariadb("""
+        SELECT c.id, c.name, c.display_name, c.is_operator, c.is_active,
+               c.over_quota, c.data_used_bytes, c.data_limit_bytes,
+               c.tier_id, COALESCE(t.name, 'operator') AS tier_name
+        FROM customers c
+        LEFT JOIN tiers t ON t.id = c.tier_id
+    """)
+    for c in customers:
+        name = c["name"]
+        tier = c["tier_name"] or "operator"
+        is_op = "1" if c["is_operator"] else "0"
+        is_act = "1" if c["is_active"] else "0"
+        g_customer_info.labels(
+            customer=name, tier=tier,
+            is_operator=is_op, is_active=is_act,
+        ).set(1)
+        g_customer_used.labels(customer=name, tier=tier).set(c["data_used_bytes"] or 0)
+        g_customer_limit.labels(customer=name, tier=tier).set(c["data_limit_bytes"] or 0)
+        g_customer_over.labels(customer=name).set(c["over_quota"] or 0)
+        g_customer_active.labels(customer=name).set(c["is_active"] or 0)
+
+    tier_counts = db_query_mariadb("""
+        SELECT COALESCE(t.name, 'operator') AS tier, COUNT(*) AS n
+        FROM customers c
+        LEFT JOIN tiers t ON t.id = c.tier_id
+        WHERE c.is_active = 1
+        GROUP BY tier
+    """)
+    for tc in tier_counts:
+        g_customer_count.labels(tier=tc["tier"]).set(tc["n"])
+
+    # Cumulative all-time bytes per customer (from radacct, never resets)
+    cum_rows = db_query_mariadb("""
+        SELECT c.id AS customer_id, c.name AS customer, c.tier_id,
+               COALESCE(t.name, 'operator') AS tier,
+               COALESCE(SUM(r.acctinputoctets), 0) AS in_bytes,
+               COALESCE(SUM(r.acctoutputoctets), 0) AS out_bytes
+        FROM customers c
+        LEFT JOIN users u ON u.id IN (SELECT strongswan_user_id FROM devices WHERE customer_id = c.id)
+        LEFT JOIN radacct r ON r.username = u.name
+        LEFT JOIN tiers t ON t.id = c.tier_id
+        GROUP BY c.id, c.name, c.tier_id, t.name
+    """)
+    for cr in cum_rows:
+        cust = cr["customer"]
+        tier = cr["tier"] or "operator"
+        g_customer_bytes_in.labels(customer=cust, tier=tier).set(int(cr["in_bytes"] or 0))
+        g_customer_bytes_out.labels(customer=cust, tier=tier).set(int(cr["out_bytes"] or 0))
+
+
+def step_active_leases():
+    """Step 3: active VIP leases -- radacct-derived (2026-07-14 revision).
+
+    Why radacct, not charon SQLite:
+      - Charon's `attr-sql` plugin is NOT loaded in this container
+        (no config in /etc/strongswan.conf), so `addresses` table is
+        always empty. The original code reading from charon SQLite was
+        a pre-existing no-op in this environment.
+      - The strongswan-iptables-watchdog is also inactive, so per-VIP
+        iptables rules (which the exporter used to read) don't exist.
+
+    What we do instead:
+      - Read open radacct sessions directly from MariaDB. radacct has:
+          - username (the EAP identity, e.g. "siraaj-iphone")
+          - framedipaddress (the VIP, e.g. "10.99.0.2")
+          - callingstationid (peer IP)
+          - updated interim-by-interim (300s) by FreeRADIUS
+      - Look up customer_name via the proper bridge:
+          radacct.username -> users.name -> users.id
+                            == devices.strongswan_user_id
+                            -> devices.customer_id
+                            == customers.id -> customers.name
+        (device_name in devices is a short label like "iphone" -- NOT
+        the same as radacct.username which is the full EAP identity)
+      - Set g_lease_count to the number of currently-open radacct
+        sessions (the metric dashboard panel 6 expects)
+      - Best-effort populate per-VIP byte counters from iptables
+        (will be 0 if watchdog isn't running; fall back to radacct
+        byte counters)
+    """
+    sessions = db_query_mariadb("""
+        SELECT username, framedipaddress, callingstationid,
+               COALESCE(acctinputoctets, 0) AS rad_bytes_in,
+               COALESCE(acctoutputoctets, 0) AS rad_bytes_out,
+               acctstarttime AS acquired_ts,
+               UNIX_TIMESTAMP(acctstarttime) AS acquired_epoch
+        FROM radacct
+        WHERE acctstoptime IS NULL AND framedipaddress IS NOT NULL
+        ORDER BY acctstarttime DESC
+    """)
+    if not sessions:
+        g_lease_count.set(0)
+        return
+
+    # Bridge radacct.username -> customers.name via users + devices.
+    usernames = [s["username"] for s in sessions if s.get("username")]
+    customer_map = {}
+    if usernames:
+        placeholders = ",".join(["%s"] * len(usernames))
+        rows = db_query_mariadb(
+            f"SELECT u.name AS username, "
+            f"       c.id AS customer_id, c.name AS customer_name "
+            f"FROM users u "
+            f"JOIN devices d ON d.strongswan_user_id = u.id "
+            f"JOIN customers c ON c.id = d.customer_id "
+            f"WHERE u.name IN ({placeholders})",
+            tuple(usernames),
+        )
+        customer_map = {r["username"]: r for r in rows}
+
+    ipt = iptables_counters()
+    g_lease_count.set(len(sessions))
+    for s in sessions:
+        vip = s.get("framedipaddress") or "unknown"
+        username = s.get("username") or "unknown"
+        cm = customer_map.get(username) or {}
+        customer = cm.get("customer_name") or "unmapped"
+        device = username
+        # Prefer iptables counters (kernel-authoritative); fall back to
+        # radacct counters if iptables rule for this VIP doesn't exist.
+        ctr = ipt.get(vip, {})
+        in_bytes = ctr.get("in_bytes") or int(s["rad_bytes_in"])
+        out_bytes = ctr.get("out_bytes") or int(s["rad_bytes_out"])
+        g_lease_in.labels(vip=vip, customer=customer, device=device).set(in_bytes)
+        g_lease_out.labels(vip=vip, customer=customer, device=device).set(out_bytes)
+        acquired_epoch = s.get("acquired_epoch")
+        if acquired_epoch is not None:
+            g_lease_acquired.labels(vip=vip, customer=customer).set(int(acquired_epoch))
+
+
+def step_pools():
+    """Step 5: strongSwan rw-pool state (swanctl, no DB)."""
+    pools = swanctl_pools()
+    for p in pools:
+        g_pool_size.labels(pool=p["name"]).set(p["size"])
+        g_pool_online.labels(pool=p["name"]).set(p["online"])
+    if pools:
+        g_pool_size_actual.set(254)
+
+
+def step_alerts():
+    """Step 6: alerts by severity (MariaDB)."""
+    alerts = db_query_mariadb("""
+        SELECT threshold, COUNT(*) AS n
+        FROM alerts
+        GROUP BY threshold
+    """)
+    for a in alerts:
+        severity = f"{a['threshold']}pct"
+        g_alerts_total.labels(severity=severity).set(a["n"])
+
+
+def step_audit_log():
+    """Step 7: audit_log by actor + action (MariaDB)."""
+    audit = db_query_mariadb("""
+        SELECT actor, action, COUNT(*) AS n
+        FROM (SELECT actor, action FROM audit_log ORDER BY id DESC LIMIT 1000) AS recent
+        GROUP BY actor, action
+    """)
+    for a in audit:
+        g_audit_total.labels(actor=a["actor"], action=a["action"]).set(a["n"])
+
+
+def step_radacct_active():
+    """RADIUS step (added 2026-07-14): currently-open accounting sessions.
+    Source of truth for "who is connected right now" from radacct's view.
+    Survives IKE_SA rekeys (radacct updates on every interim 300s).
+    """
+    sessions = db_query_mariadb("""
+        SELECT username, callingstationid,
+               acctsessiontime AS session_seconds,
+               COALESCE(acctinputoctets, 0) AS bytes_in,
+               COALESCE(acctoutputoctets, 0) AS bytes_out
+        FROM radacct
+        WHERE acctstoptime IS NULL
+        ORDER BY acctstarttime DESC
+    """)
+    for s in sessions:
+        username = s["username"] or "unknown"
+        csid = s["callingstationid"] or "unknown"
+        g_radacct_active_bytes.labels(
+            username=username, calling_station_id=csid,
+        ).set(int(s["bytes_in"]) + int(s["bytes_out"]))
+        g_radacct_active_duration.labels(
+            username=username, calling_station_id=csid,
+        ).set(int(s["session_seconds"]))
+
+
+def step_radacct_sessions_7d():
+    """RADIUS step (added 2026-07-14): 7-day session count by terminate cause.
+    Useful for satellite users -- track Lost-Service vs User-Request ratio.
+    """
+    rows = db_query_mariadb("""
+        SELECT COALESCE(NULLIF(acctterminatecause, ''), 'Unknown') AS cause,
+               COUNT(*) AS n
+        FROM radacct
+        WHERE acctstarttime > UNIX_TIMESTAMP() - 7*86400
+        GROUP BY cause
+    """)
+    for r in rows:
+        g_radacct_sessions_7d.labels(cause=r["cause"]).set(r["n"])
+
+
+def step_radacct_sessions_per_hour():
+    """RADIUS step (added 2026-07-14, second revision): sessions started
+    per hour, last 24h, by terminate cause. Lets dashboard show a trend
+    instead of just a snapshot.
+
+    Cardinality: 24 hours x ~3 causes = ~72 series max. Safe.
+
+    Schema note: acctstarttime is DATETIME (not INT), so WHERE clause
+    uses NOW() - INTERVAL 24 HOUR. Tested live 2026-07-14 07:09 UTC,
+    returns 30 rows for last 24h.
+    """
+    rows = db_query_mariadb("""
+        SELECT hour_bin, cause, n FROM (
+          SELECT
+            DATE_FORMAT(acctstarttime, '%%Y-%%m-%%d %%H:00:00') AS hour_bin,
+            COALESCE(NULLIF(acctterminatecause, ''), 'Unknown') AS cause,
+            COUNT(*) AS n
+          FROM radacct
+          WHERE acctstarttime > NOW() - INTERVAL 24 HOUR
+          GROUP BY DATE_FORMAT(acctstarttime, '%%Y-%%m-%%d %%H:00:00'), acctterminatecause
+        ) AS t
+        ORDER BY hour_bin DESC, cause
+    """)
+    for r in rows:
+        g_radacct_sessions_per_hour.labels(
+            hour_bin=r["hour_bin"],
+            cause=r["cause"],
+        ).set(r["n"])
+
+
+# ---------- main scrape ----------
+
 def scrape():
-    """One scrape cycle. Updates all metrics. Errors do not raise."""
+    """One scrape cycle. Each step has its own try/except so one failure
+    does not blank the whole dashboard.
+
+    Lesson learned 2026-07-14: the old design wrapped all steps in one giant
+    try/except. When step 1 (customers) started failing 5 days post-Phase-4E,
+    it short-circuited every other metric -- the dashboard went silently
+    wrong instead of visibly broken. Per-step isolation makes failures
+    observable (per-step exception logs + g_up = 0).
+    """
     t0 = time.monotonic()
-    errors = 0
+    errors = []
 
     try:
         _reset_gauges()
-
-        # 1) customers + tiers
-        customers = db_query("""
-            SELECT c.id, c.name, c.display_name, c.is_operator, c.is_active,
-                   c.over_quota, c.data_used_bytes, c.data_limit_bytes,
-                   c.tier_id, t.name AS tier_name
-            FROM customers c
-            LEFT JOIN tiers t ON t.id = c.tier_id
-        """)
-        for c in customers:
-            name = c["name"]
-            tier = c["tier_name"] or "operator"
-            is_op = "1" if c["is_operator"] else "0"
-            is_act = "1" if c["is_active"] else "0"
-            g_customer_info.labels(
-                customer=name, tier=tier,
-                is_operator=is_op, is_active=is_act,
-            ).set(1)
-            g_customer_used.labels(customer=name, tier=tier).set(c["data_used_bytes"] or 0)
-            g_customer_limit.labels(customer=name, tier=tier).set(c["data_limit_bytes"] or 0)
-            g_customer_over.labels(customer=name).set(c["over_quota"] or 0)
-            g_customer_active.labels(customer=name).set(c["is_active"] or 0)
-
-        # 2) customer count by tier
-        tier_counts = db_query("""
-            SELECT COALESCE(t.name, 'operator') AS tier, COUNT(*) AS n
-            FROM customers c
-            LEFT JOIN tiers t ON t.id = c.tier_id
-            WHERE c.is_active = 1
-            GROUP BY tier
-        """)
-        for tc in tier_counts:
-            g_customer_count.labels(tier=tc["tier"]).set(tc["n"])
-
-        # 3) active leases (the join that portal uses)
-        leases = db_query("""
-            SELECT hex(a.address)        AS hex_addr,
-                   i.id                 AS identity_id,
-                   CAST(i.data AS TEXT) AS identity_name,
-                   d.id                 AS device_id,
-                   d.device_name        AS device_name,
-                   c.id                 AS customer_id,
-                   c.name               AS customer_name,
-                   a.acquired           AS acquired_at
-            FROM addresses a
-            JOIN identities i ON i.id = a.identity
-            LEFT JOIN devices   d ON d.device_name = CAST(i.data AS TEXT)
-            LEFT JOIN customers c ON c.id = d.customer_id
-            WHERE a.acquired > 0 AND a.released = 0
-            ORDER BY a.acquired DESC
-        """)
-
-        # 4) iptables counters (per VIP)
-        ipt = iptables_counters()
-        g_lease_count.set(len(leases))
-        now = int(time.time())
-        for lease in leases:
-            hex_addr = lease.get("hex_addr") or ""
-            try:
-                vip = ".".join(str(int(hex_addr[i:i+2], 16)) for i in (0, 2, 4, 6))
-            except Exception:
-                vip = "unknown"
-            customer = lease.get("customer_name") or "unmapped"
-            device = lease.get("device_name") or lease.get("identity_name") or "unknown"
-            ctr = ipt.get(vip, {})
-            g_lease_in.labels(vip=vip, customer=customer, device=device).set(ctr.get("in_bytes", 0))
-            g_lease_out.labels(vip=vip, customer=customer, device=device).set(ctr.get("out_bytes", 0))
-            if lease.get("acquired_at"):
-                g_lease_acquired.labels(vip=vip, customer=customer).set(lease["acquired_at"])
-
-        # 5) pools (swanctl)
-        pools = swanctl_pools()
-        for p in pools:
-            g_pool_size.labels(pool=p["name"]).set(p["size"])
-            g_pool_online.labels(pool=p["name"]).set(p["online"])
-        if pools:
-            # rw-pool is the configured /24 (10.99.0.0/24, .1 = gateway, so 254 usable)
-            g_pool_size_actual.set(254)
-
-        # 6) alerts by severity
-        alerts = db_query("""
-            SELECT threshold, COUNT(*) AS n
-            FROM alerts
-            GROUP BY threshold
-        """)
-        for a in alerts:
-            severity = f"{a['threshold']}pct"
-            g_alerts_total.labels(severity=severity).set(a["n"])
-
-        # 7) audit_log by actor + action (last 1000 rows for now)
-        audit = db_query("""
-            SELECT actor, action, COUNT(*) AS n
-            FROM (SELECT actor, action FROM audit_log ORDER BY id DESC LIMIT 1000)
-            GROUP BY actor, action
-        """)
-        for a in audit:
-            g_audit_total.labels(actor=a["actor"], action=a["action"]).set(a["n"])
-
-        g_up.set(1)
     except Exception as e:
-        errors += 1
-        c_scrape_errors.inc()
+        errors.append(f"reset:{e}")
+
+    for step_fn in (
+        step_customers_and_tiers,    # MariaDB
+        step_active_leases,          # hybrid (charon SQLite + MariaDB)
+        step_pools,                  # swanctl
+        step_alerts,                 # MariaDB
+        step_audit_log,              # MariaDB
+        step_radacct_active,         # MariaDB (RADIUS)
+        step_radacct_sessions_7d,    # MariaDB (RADIUS)
+        step_radacct_sessions_per_hour,  # MariaDB (RADIUS, hourly trend)
+    ):
+        try:
+            step_fn()
+        except Exception as e:
+            errors.append(f"{step_fn.__name__}:{e}")
+            log.warning("step %s failed: %s", step_fn.__name__, e)
+
+    dt = time.monotonic() - t0
+    g_scrape_duration.set(dt)
+    g_scrape_ts.set(time.time())
+    if errors:
+        c_scrape_errors.inc(len(errors))
         g_up.set(0)
-        log.exception("scrape failed: %s", e)
-    finally:
-        dt = time.monotonic() - t0
-        g_scrape_duration.set(dt)
-        g_scrape_ts.set(time.time())
-        log.info("scrape ok in %.2fs (leases=%d, errors=%d)",
-                 dt, g_lease_count._value.get() if hasattr(g_lease_count, '_value') else 0, errors)
+        log.warning("scrape ok with %d errors in %.2fs: %s",
+                    len(errors), dt, errors[:3])
+    else:
+        g_up.set(1)
+        log.info("scrape ok in %.2fs (leases=%d)",
+                 dt, g_lease_count._value.get() if hasattr(g_lease_count, "_value") else 0)
 
 
 # ---------- main ----------
