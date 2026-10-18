@@ -22,7 +22,7 @@ connections {
       auth = pubkey
       certs = server.crt.pem
       cacerts = strongswan-ca.crt.pem
-      id    = "vpn.homelab.local"
+      id    = "myvpn.databyte.co.za"
     }
     remote {
       auth = eap-mschapv2
