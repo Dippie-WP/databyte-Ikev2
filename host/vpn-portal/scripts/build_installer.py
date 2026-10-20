@@ -290,7 +290,12 @@ def _render_hostile_script(
     Cert rotation:  NO EFFECT (hostile flow skips cert validation entirely).
 #>
 
-#Requires -RunAsAdministrator
+# Auto-elevation: if not running as Administrator, relaunch with UAC prompt
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {{
+    Start-Process PowerShell -Verb RunAs -ArgumentList "-File `"$PSCommandPath`""
+    exit
+}}
 
 $ErrorActionPreference = 'Stop'
 
@@ -358,9 +363,9 @@ public class Cred {{
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
     public struct RASCREDENTIALS {{
         public uint Size; public uint Mask;
-        [MarshalAs(UnmanagedType.LPWStr)] public string UserName;
-        [MarshalAs(UnmanagedType.LPWStr)] public string Password;
-        [MarshalAs(UnmanagedType.LPWStr)] public string Domain;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 257)] public string UserName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 257)] public string Password;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)] public string Domain;
     }}
     [DllImport("rasapi32.dll", CharSet=CharSet.Unicode)]
     public static extern uint RasSetCredentials(string phonebook, string entry, ref RASCREDENTIALS creds, bool fClear);
@@ -370,24 +375,58 @@ Add-Type -TypeDefinition $sig -Force
 
 $c = New-Object Cred+RASCREDENTIALS
 $c.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($c)
-$c.Mask = 0x87  # UserName | Password | Domain | Default
+$c.Mask = 0x7  # UserName | Password | Domain  (HOT-183: drop undefined 0x80 bit)
 $c.UserName = $EAP_USERNAME
 $c.Password = $EAP_PASSWORD
 $c.Domain = ""
 
 $ret = [Cred]::RasSetCredentials("", $ConnectionName, [ref]$c, $false)
-Write-Host "  RasSetCredentials returned: $ret (0=OK, 87=ERROR_INVALID_PARAMETER, 1162=ERROR_NOT_FOUND)" -ForegroundColor Yellow
-
+# Retry loop: RasSetCredentials can return 1162 (ERROR_NOT_FOUND) or 87
+# (ERROR_INVALID_PARAMETER) when called too soon after Add-VpnConnection, because
+# the profile propagation has not finished. 5 attempts with 2s sleep covers
+# the worst case. If all fail, the inline rasdial creds + cmdkey backup
+# still complete the auth, so we continue without error.
 if ($ret -ne 0) {{
-    Write-Host "  Non-zero RasSetCredentials return  -  re-run after profile propagation." -ForegroundColor Red
+    Write-Host "  RasSetCredentials returned $ret - retrying (1162/87 = profile not ready yet)..." -ForegroundColor Yellow
+    for ($i = 1; $i -le 5; $i++) {{
+        Start-Sleep -Seconds 2
+        $ret = [Cred]::RasSetCredentials("", $ConnectionName, [ref]$c, $false)
+        if ($ret -eq 0) {{ break }}
+        Write-Host "  RasSetCredentials attempt $($i + 1)/5: returned $ret" -ForegroundColor Yellow
+    }}
 }}
+if ($ret -eq 0) {{
+    Write-Host "  RasSetCredentials bound OK" -ForegroundColor Green
+}} else {{
+    Write-Host "  RasSetCredentials FAILED after 5 attempts (returned $ret) - falling back to cmdkey + inline rasdial creds" -ForegroundColor Yellow
+}}
+
+# cmdkey backup (FROZEN template pattern) - stores creds in Windows Credential Manager.
+# SIBLING binding path - if RasSetCredentials failed, cmdkey still gives
+# rasdial a working cred set.
+cmdkey /generic:$ServerAddress /user:$EAP_USERNAME /pass:$EAP_PASSWORD | Out-Null
+# Also store under the profile name (some Windows builds read creds from this target)
+cmdkey /generic:$ConnectionName /user:$EAP_USERNAME /pass:$EAP_PASSWORD | Out-Null
+
+# Seed the EAP credential cache via rasphone.
+# This is the canonical "seed the EAP cache" path for IKEv2+EAP on Windows 10/11.
+# On the FIRST run, this pops a "Connect DatabyteVPN" GUI dialog with the creds
+# pre-filled from the phonebook. User clicks OK once, and the EAP cache is seeded
+# for ALL future connections. On subsequent runs, the cache is already populated
+# so no dialog appears. The dialog auto-closes after the connect succeeds (~5s).
+Write-Host "  Seeding EAP credential cache (first run: click OK on dialog)..." -ForegroundColor Yellow
+rasphone -d $ConnectionName
+Start-Sleep -Seconds 3
+# Also store under the profile name (some Windows builds read creds from this target)
+cmdkey /generic:$ConnectionName /user:$EAP_USERNAME /pass:$EAP_PASSWORD | Out-Null
+
 
 # ============================================================================
 # STEP 5 - Connect
 # ============================================================================
 Write-Host "=== [5/5] Connecting ===" -ForegroundColor Cyan
 
-$connectOutput = rasdial $ConnectionName 2>&1
+$connectOutput = rasdial $ConnectionName $EAP_USERNAME $EAP_PASSWORD 2>&1
 $connectExit = $LASTEXITCODE
 Write-Host $connectOutput
 
@@ -404,7 +443,7 @@ for ($i = 1; $i -le 3; $i++) {{
     Write-Host "  Retry $i/3: status=$status, reconnecting..." -ForegroundColor Yellow
     rasdial $ConnectionName /disconnect 2>$null | Out-Null
     Start-Sleep -Seconds 1
-    rasdial $ConnectionName 2>$null | Out-Null
+    rasdial $ConnectionName $EAP_USERNAME $EAP_PASSWORD 2>$null | Out-Null
 }}
 
 if ($connected) {{
