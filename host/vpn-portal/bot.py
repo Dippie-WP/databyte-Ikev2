@@ -863,7 +863,7 @@ async def cmd_customers(update, context):
         else:
             flag = "R"  # red disabled
         name_disp = c.get("display_name") or ""
-        lines.append(f"[{flag}] `{c['id']}` `{c['name']}` - {name_disp}")
+        lines.append(f"[{flag}] `{c['id']}` `{c['name']}` - {_md(name_disp)}")
         lines.append(f"Created: {fmt_created(c.get('created_at'))} · Last session: {fmt_last_session(c.get('last_session_at'))}")
         lines.append("------")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
@@ -893,12 +893,12 @@ async def cmd_customer(update, context):
     for d in devs:
         flag = "G" if d.get("is_active") else "R"
         dev_lines.append(
-            f"  [{flag}] `{d['id']}` `{d.get('device_name')}` ({d.get('device_type')})"
+            f"  [{flag}] `{d['id']}` `{d.get('device_name')}` ({_md(d.get('device_type'))})"
         )
     text = (
         f"*Customer #{c['id']}*\n"
         f"Slug: `{c['name']}`\n"
-        f"Display: {c.get('display_name') or '-'}\n"
+        f"Display: {_md(c.get('display_name') or '-')}\n"
         f"Active: {bool(c.get('is_active'))} "
         f"Tier: {c.get('tier_id')} Created: {c.get('created_at')}\n"
         f"Devices:\n" + ("\n".join(dev_lines) if dev_lines else "  (none)")
@@ -940,6 +940,62 @@ CAPS = [
 def _kb(rows):
     return InlineKeyboardMarkup(rows)
 
+def _md(value) -> str:
+    """Escape legacy-Markdown delimiters in a DYNAMIC value.
+
+    ParseMode.MARKDOWN (legacy) treats * _ backtick [ as entity delimiters,
+    with backslash as the escape char. An ODD count of any delimiter inside
+    an otherwise literal string makes Telegram reject the WHOLE message
+    ("Can't parse entities: can't find end of the entity"), silently
+    dropping the entire response.
+
+    Use ONLY on values interpolated OUTSIDE backticks. A value already
+    inside a code span is safe and must NOT be escaped -- the backslash
+    would render literally inside the code span.
+    """
+    bs = chr(92)
+    s = "" if value is None else str(value)
+    s = s.replace(bs, bs + bs)
+    for ch in ("*", "_", "`", "["):
+        s = s.replace(ch, bs + ch)
+    return s
+
+
+async def safe_md_send(target, text: str, **kwargs):
+    """Send text as legacy Markdown, falling back to plain text on BadRequest.
+
+    Layer-2 defence: even if some un-audited dynamic value carries
+    unbalanced Markdown delimiters, the operator still receives the
+    content instead of the message vanishing into the journal.
+    """
+    kwargs.pop("parse_mode", None)
+    try:
+        return await target.reply_text(text, parse_mode=ParseMode.MARKDOWN, **kwargs)
+    except Exception as exc:
+        logger.warning("Markdown send rejected (%s); retrying as plain text", exc)
+        return await target.reply_text(text, **kwargs)
+
+
+async def _error_handler(update, context):
+    """Catch-all so a command NEVER fails silently.
+
+    Without this, PTB logs "No error handlers are registered" and the
+    operator sees nothing at all, with no clue which command broke.
+    """
+    logger.error("Unhandled error in update=%s: %s", update, context.error,
+                 exc_info=context.error)
+    try:
+        if update is None:
+            return
+        msg = "\u26a0\ufe0f Command failed. Error logged to bot journal."
+        if getattr(update, "effective_message", None) is not None:
+            await update.effective_message.reply_text(msg)
+        elif getattr(update, "callback_query", None) is not None:
+            await update.callback_query.message.reply_text(msg)
+    except Exception:
+        pass
+
+
 
 async def _safe_edit_text(q, text, **kwargs):
     """q.edit_message_text() that logs+swallows BadRequest on stale callbacks.
@@ -952,6 +1008,17 @@ async def _safe_edit_text(q, text, **kwargs):
     try:
         return await q.edit_message_text(text, **kwargs)
     except Exception as exc:
+        # Markdown entity-parse rejection: retry the SAME content as plain
+        # text so the conversation step still lands instead of vanishing.
+        if "parse entit" in str(exc).lower() or "can't parse" in str(exc).lower():
+            logger.warning("_safe_edit_text markdown rejected (%s); retrying plain", exc)
+            plain = dict(kwargs)
+            plain.pop("parse_mode", None)
+            try:
+                return await q.edit_message_text(text, **plain)
+            except Exception as exc2:
+                logger.warning("_safe_edit_text plain retry failed: %s", exc2)
+                return None
         logger.warning("_safe_edit_text suppressed: %s", exc)
         return None
 
@@ -1320,7 +1387,7 @@ async def ct_confirm(update, context):
         f"Server: `myvpn.databyte.co.za`\n"
         f"EAP identity: `{eap_id}`\n"
         f"Password: `{password}`\n"
-        f"Setup: {setup_url}\n"
+        f"Setup: {_md(setup_url)}\n"
         f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
     )
     msg = await _safe_edit_text(q, text, parse_mode=ParseMode.MARKDOWN)
@@ -1709,7 +1776,7 @@ async def cmd_logs(update, context):
         reply = r.get("reply") or "?"
         icon = "\u2705" if "Accept" in reply else "\u274c"
         user = r.get("username") or "?"
-        lines.append(f"{ad_sast} SAST \u00b7 {icon} `{user}` \u00b7 {reply}")
+        lines.append(f"{ad_sast} SAST \u00b7 {icon} `{user}` \u00b7 {_md(reply)}")
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
 
@@ -1797,14 +1864,9 @@ async def cmd_orphans(update, context):
         lines.append("")
     lines.append(f"Run at {datetime.now(SAST).strftime('%Y-%m-%d %H:%M')} SAST")
     text = "\n".join(lines)
-    try:
-        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    except Exception as e:
-        # Markdown parse error (e.g., unclosed entity) -- fall back to plain text
-        # so the audit still reaches Zun instead of dumping a traceback to journal
-        logger.warning(f"cmd_orphans markdown parse failed, falling back to plain text: {e}")
-        plain = text.replace("*", "").replace("_", "").replace("`", "'")
-        await update.message.reply_text(plain)
+    # safe_md_send falls back to plain text if Telegram rejects the entity
+    # parse, so the audit always reaches Zun instead of vanishing.
+    await safe_md_send(update.message, text)
 
 
 async def cmd_deleteuser(update, context):
@@ -2001,12 +2063,12 @@ async def cmd_cleanup_orphans(update, context):
         ph = ",".join(["?"] * len(ids))
         rows = app.db_query(f"SELECT id, name FROM users WHERE id IN ({ph})", ids)
         if not rows:
-            await update.message.reply_text(f"\u274c No users found for ids: {ids}", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"\u274c No users found for ids: {_md(ids)}", parse_mode=ParseMode.MARKDOWN)
             return
         found_ids = set(r['id'] for r in rows)
         missing = [i for i in ids if i not in found_ids]
         if missing:
-            await update.message.reply_text(f"\u274c Users not found: {missing}", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(f"\u274c Users not found: {_md(missing)}", parse_mode=ParseMode.MARKDOWN)
             return
         names = [r['name'] for r in rows]
 
@@ -2231,7 +2293,7 @@ async def cmd_renew_orphan(update, context):
 
     except Exception as e:
         await update.message.reply_text(
-            f"\u274c Renew orphan failed: {e}", parse_mode=ParseMode.MARKDOWN,
+            f"\u274c Renew orphan failed: {_md(e)}", parse_mode=ParseMode.MARKDOWN,
         )
 
 
@@ -2301,6 +2363,7 @@ def build_application() -> Application:
     application = Application.builder().token(TELEGRAM_TOKEN).persistence(persistence).post_init(_post_init_register_commands).build()
 
     whitelist = filters.User(user_id=ALLOWED_CHAT_ID)
+    application.add_error_handler(_error_handler)
     application.add_handler(MessageHandler(~whitelist, reject_non_admin))
 
     # /create is now a ConversationHandler (interactive onboarding).
