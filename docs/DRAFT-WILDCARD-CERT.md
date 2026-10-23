@@ -2,7 +2,7 @@
 
 > **NOT a generic-template doc.**
 >
-> **Status:** DRAFT — IN PROGRESS (active databyte-internal planning doc, ticket TKT-036, dated 2026-10-15)
+> **Status:** EXECUTED — MR-1 COMPLETE (wildcard cert issued + verified on prod 2026-10-23 19:05-19:07 UTC; see §8. Nginx vhost wiring deferred to MR-2)
 >
 > **Scope:** Databyte-internal planning for the multi-region rollout (MR-1) — certbot + Cloudflare DNS-01 for `*.myvpn.databyte.co.za`. Linked to ROADMAP.md "Multi-region rollout" subsection + MR-1 row.
 >
@@ -26,7 +26,7 @@
 | Live fact-check | 2026-10-15 11:00 UTC — verified against `vpn-prod-01` cert path `/etc/letsencrypt/live/myvpn.databyte.co.za/` (cert SAN: `myvpn.databyte.co.za`, `vpn-portal.databyte.co.za`; expires 2026-12-02), certbot `dns-cloudflare` plugin + `/root/.cloudflare.ini` (mode 0600) configured |
 | Companion docs | [`ROADMAP.md` "Multi-region rollout" subsection + MR-1 row](./ROADMAP.md) · [`VPS-XNEELO-DEPLOY.md`](./VPS-XNEELO-DEPLOY.md) (for the regional VPS deploy — MR-2) · [`CLOUDFLARE-DNS.md`](./CLOUDFLARE-DNS.md) (Cloudflare API token setup, for any new operator) · [LE DNS-01 challenge docs](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge) |
 | Ticket | TKT-036 |
-| Status | DRAFT — not yet executed |
+| Status | EXECUTED 2026-10-23 — cert live at /etc/letsencrypt/live/myvpn-wildcard/, expires 2027-01-21, renewal verified. §4 nginx vhost deferred to MR-2. |
 
 ---
 
@@ -271,17 +271,22 @@ The cert can be issued and sit idle. The nginx vhost update only matters when a 
 After execution, capture this:
 
 ```text
-Date executed (UTC):       ____________
-Operator:                  Zun / Misha
-Dry-run result:            PASS / FAIL
-Real issuance result:      PASS / FAIL
+Date executed (UTC):       2026-10-23 19:05 - 19:07
+Operator:                  Misha (executed autonomously on Zun's "can we move on", TKT-036 MR-1)
+Dry-run result:            PASS  ("The dry run was successful." - LE staging)
+Real issuance result:      PASS  ("Successfully received certificate.")
 Cert path:                 /etc/letsencrypt/live/myvpn-wildcard/
-Cert SHA-256:              ____________
-Cert notAfter:             ____________
+Cert SHA-256:              C4:16:7F:A4:77:66:66:D1:69:1E:EB:E2:9B:A9:16:08:D4:E1:D8:96:7A:09:D0:53:E3:17:5C:3C:70:34:CD:C9
+Cert notAfter:             2027-01-21 18:08:48 GMT (89 days at issue)
 Cert SAN:                  DNS:*.myvpn.databyte.co.za, DNS:myvpn.databyte.co.za
-Renewal config created:    YES / NO
-Nginx vhost updated:       YES / NO (deferred to MR-2)
-Existing cert touched:     NO (verified by /etc/letsencrypt/live/ listing)
+Cert subject / issuer:     CN=*.myvpn.databyte.co.za  /  C=US, O=Let's Encrypt, CN=YE1
+Key type:                  ecdsa (certbot 4.0.0 default) - pubkey SHA-256 matches cert: 3abbc0263d370a082d811baaba3734b8dc376e5c849460880a8a0ce646e3f7b8
+Renewal config created:    YES - /etc/letsencrypt/renewal/myvpn-wildcard.conf (authenticator=dns-cloudflare, server=acme-v02, key_type=ecdsa)
+Renewal proven:            certbot renew --dry-run -> "Congratulations, all simulated renewals succeeded"
+certbot.timer:             enabled, next run 2026-10-24 08:32 SAST
+Chain verify:              OK (openssl verify against chain.pem)
+Nginx vhost updated:       NO - deferred to MR-2 (sub-item tkt-036-4). Live SNI myvpn.databyte.co.za still serves the OLD cert by design.
+Existing cert touched:     NO - myvpn.databyte.co.za unchanged (notBefore 2026-09-03, notAfter 2026-12-02, SANs unchanged)
 LE rate-limit consumed:    1 of 5 (this cert counts as 1)
 ```
 
@@ -291,4 +296,5 @@ LE rate-limit consumed:    1 of 5 (this cert counts as 1)
 
 | Rev | Date (UTC) | Author | Notes |
 |---|---|---|---|
+| v0.2.0 | 2026-10-23 19:07 | Misha 🐻 | EXECUTED — MR-1 complete. Pre-flight clean, LE-staging dry-run PASS, real issuance PASS, verification PASS (SANs wildcard+apex, SHA-256 C4:16:7F:A4:77:66:66:D1:69:1E:EB:E2:9B:A9:16:08:D4:E1:D8:96:7A:09:D0:53:E3:17:5C:3C:70:34:CD:C9, key/cert pubkey PAIR MATCH, chain OK, renew --dry-run simulated renewals succeeded, certbot.timer enabled). Existing myvpn+vpn-portal cert untouched. §4 nginx vhost deferred to MR-2. §8 signature filled. |
 | v0.1.0 | 2026-10-15 11:15 | Misha 🐻 | DRAFT — initial procedure from TKT-036 work session. Pre-conditions all verified live against `vpn-prod-01` on 2026-10-15. Mirrors the certbot invocation from the prior session turn (chat session `322d9b8f-cfe4-45cb-8979-40495f8337aa`). |
