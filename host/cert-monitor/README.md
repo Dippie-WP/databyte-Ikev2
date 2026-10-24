@@ -95,3 +95,73 @@ valid for 15 years, but:
   skip checks.
 
 Always check explicitly, never trust "it should be fine".
+
+---
+
+## site-cert-watch — per-site watcher + auto-renewal activator
+
+Added 2026-10-24 for the per-site VPN model (TKT-041). The existing `cert-expiry-check.sh` watches two
+long-lived CA certs and knows nothing about the LE certificate. Under the per-site model the LE
+certificate IS the site's IKEv2 server identity, so it needs its own watcher.
+
+### Files
+
+- **`site-cert-watch.sh`** — per-site watcher. Three jobs:
+  1. **WATCH** — expiry of this site's LE cert and this site's strongswan CA.
+  2. **MATCH** — the cert strongswan is actually SERVING (`x509/server.pem`, which is what
+     `certs = server.pem` loads) must be byte-identical to this lineage's cert on disk. Catches a deploy
+     hook that failed to install the renewed cert, and catches a renewal on a DIFFERENT lineage
+     overwriting the identity.
+  3. **ACTIVATE** — ensure auto-renewal is armed: `certbot.timer` enabled and active, a renewal config
+     present for this lineage, and — when the cert is inside the renewal window — an actual targeted
+     renewal, then re-verification.
+
+  Exit codes: `0` ok · `1` WARN · `2` CRIT.
+
+- **`site-cert-watch.service`** — systemd oneshot, reads `SITE_FQDN` from `/etc/default/site-cert-watch`.
+- **`site-cert-watch.timer`** — 4x daily (01:00, 07:00, 13:00, 19:00 UTC), deliberately offset from
+  `certbot.timer` (00:00 / 12:00 UTC) so a run lands AFTER a certbot run and can verify its result.
+
+### Per-site configuration
+
+```
+# /etc/default/site-cert-watch
+SITE_FQDN=za-cpt-01-vpn.databyte.co.za
+```
+
+The same file is read by the certbot deploy hook, so the site identity is configured in exactly one place.
+Without it the hook refuses to install any certificate (exit 1) — failing closed is deliberate.
+
+### Environment overrides
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SITE_FQDN` | — (required) | this site's canonical public name |
+| `SITE_LINEAGE` | `$SITE_FQDN` | certbot lineage name, if the host names it differently |
+| `CHECK_ONLY` | `0` | `1` = report only: never enables a timer, never renews |
+| `ENABLE_TIMER` | `1` | `0` = report the timer state but never enable it |
+| `WARN_DAYS` | `30` | LE cert warn window |
+| `CRIT_DAYS` | `14` | LE cert critical window |
+| `RENEW_WINDOW_DAYS` | `30` | inside this window the watcher attempts a targeted renewal |
+
+### Install
+
+```bash
+sudo install -m 0755 site-cert-watch.sh /usr/local/bin/
+sudo install -m 0644 site-cert-watch.service /etc/systemd/system/
+sudo install -m 0644 site-cert-watch.timer /etc/systemd/system/
+sudo printf 'SITE_FQDN=<SITE_FQDN>\n' > /etc/default/site-cert-watch
+sudo systemctl daemon-reload
+sudo systemctl enable --now site-cert-watch.timer
+```
+
+### Verify
+
+```bash
+# report only, no mutation
+sudo SITE_FQDN=<SITE_FQDN> CHECK_ONLY=1 /usr/local/bin/site-cert-watch.sh
+
+sudo /usr/local/bin/site-cert-watch.sh          # full run
+sudo journalctl -u site-cert-watch.service --no-pager
+sudo systemctl list-timers site-cert-watch.timer
+```

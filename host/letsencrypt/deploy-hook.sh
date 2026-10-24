@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 # deploy-hook.sh — Let's Encrypt deploy hook for strongSwan IKEv2 server
 # ----------------------------------------------------------------------------
-# Runs after a successful certbot renewal on vpn-prod-01.
+# Runs after a successful certbot renewal on THIS host.
+#
+# PER-HOST LINEAGE GUARD (TKT-041)
+# --------------------------------
+# This hook installs a renewed certificate as the site's IKEv2 SERVER IDENTITY
+# (the leaf + key are copied into strongswan's x509 dir and charon is reloaded).
+# It must therefore only ever act on THIS host's own lineage. Without the guard,
+# a renewal of any OTHER lineage on the same host (for example the adminer
+# lineage on JHB) overwrites the site's server identity and breaks every
+# customer VPN on that host.
+#
+# The guard runs BEFORE any file is written. A guard placed after the reload
+# would detect the wrong certificate only after loading it.
+#
+# The expected lineage comes from the per-host file /etc/default/site-cert-watch
+# (SITE_FQDN=...), the same file the cert watcher service reads. The
+# SITE_FQDN environment variable overrides the file.
 #
 # Why this script exists
 # ----------------------
@@ -74,9 +90,32 @@ log_info()  { echo "[$(date -u +%FT%TZ)] [INFO]  $*"; }
 log_warn()  { echo "[$(date -u +%FT%TZ)] [WARN]  $*"; }
 log_error() { echo "[$(date -u +%FT%TZ)] [ERROR] $*" >&2; }
 
+# ---- 0. per-host lineage guard (TKT-041) ----
+if [[ -z "${SITE_FQDN:-}" && -r /etc/default/site-cert-watch ]]; then
+    # shellcheck disable=SC1091
+    . /etc/default/site-cert-watch
+fi
+SITE_FQDN="${SITE_FQDN:-}"
+if [[ -z "${SITE_FQDN}" ]]; then
+    log_error "no SITE_FQDN configured - set it in /etc/default/site-cert-watch (or export it)"
+    log_error "refusing to install any certificate without knowing this host's own lineage"
+    exit 1
+fi
+# Compare the LINEAGE NAME, not the full path: certbot passes an absolute
+# path in RENEWED_LINEAGE and that path need not be the same one this host
+# would construct itself.
+# The lineage dir is named after the FQDN by convention; SITE_LINEAGE overrides it.
+EXPECTED_LINEAGE_NAME="${EXPECTED_LINEAGE_NAME:-${SITE_LINEAGE:-${SITE_FQDN}}}"
+RENEWED_LINEAGE_NAME="$(basename "${LE_LIVE}")"
+if [[ "${RENEWED_LINEAGE_NAME}" != "${EXPECTED_LINEAGE_NAME}" ]]; then
+    log_info "skipping: renewed lineage '${RENEWED_LINEAGE_NAME}' is not this host's IKEv2 lineage '${EXPECTED_LINEAGE_NAME}'"
+    exit 0
+fi
+
 log_info "=== strongswan LE deploy-hook start ==="
 log_info "RENEWED_DOMAINS=${RENEWED_DOMAINS:-<unset>}"
 log_info "RENEWED_LINEAGE=${LE_LIVE}"
+log_info "SITE_FQDN=${SITE_FQDN}"
 
 # ---- 1. preflight ----
 for f in "$LE_FULLCHAIN" "$LE_CERT" "$LE_KEY" "$X509_DIR" "$X509CA_DIR" "$PRIVATE_DIR"; do
@@ -177,8 +216,8 @@ loaded=$(docker exec "$CONTAINER_NAME" swanctl --uri="$SWANCTL_URI" --list-certs
 # nothing. head shows the full picture.
 echo "$loaded" | head -60 || true
 
-if ! echo "$loaded" | grep -q "myvpn.databyte.co.za"; then
-    log_error "new LE cert NOT loaded — list-certs does not contain myvpn.databyte.co.za"
+if ! echo "$loaded" | grep -q "${SITE_FQDN}"; then
+    log_error "new LE cert NOT loaded — list-certs does not contain ${SITE_FQDN}"
     log_error "full dump:"
     echo "$loaded" >&2
     exit 1

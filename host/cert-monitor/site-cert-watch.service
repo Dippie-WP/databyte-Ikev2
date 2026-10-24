@@ -1,0 +1,17 @@
+[Unit]
+Description=Per-site TLS certificate watch + auto-renewal activation (Databyte VPN site)
+Documentation=man:openssl
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Per-site value. Create /etc/default/site-cert-watch on the host:
+#   SITE_FQDN=za-cpt-01-vpn.databyte.co.za
+# The leading "-" makes the file optional, so the unit still starts (and
+# exits 2 with a clear message) on a host where it has not been set yet.
+EnvironmentFile=-/etc/default/site-cert-watch
+ExecStart=/usr/local/bin/site-cert-watch.sh
+# Exit code 2 = CRITICAL; surface via systemd + journal alerting
+SuccessExitStatus=0 1
+# Don't auto-restart (it's a check, not a service)
