@@ -226,6 +226,44 @@ def main():
                                 f"DELETE FROM users WHERE name IN ({ph2})",
                                 eap_ids,
                             )
+                        # 2026-10-25 fix (orphan-user leak): eap_ids only covers
+                        # device-derived identities. Also sweep users rows with NO
+                        # device whose name matches the customer identity pattern
+                        # -- otherwise every delete leaves one orphan users row.
+                        cur.execute(
+                            "SELECT id, name FROM users u WHERE NOT EXISTS ("
+                            "SELECT 1 FROM devices d WHERE d.strongswan_user_id = u.id) "
+                            "AND (u.name = %s OR u.name LIKE %s)",
+                            (r[1], r[1] + "-%"),
+                        )
+                        orphan_users = cur.fetchall()
+                        if orphan_users:
+                            ph3 = ",".join(["%s"] * len(orphan_users))
+                            onames = [o[1] for o in orphan_users]
+                            cur.execute(
+                                f"DELETE FROM radcheck WHERE UserName IN ({ph3})",
+                                onames,
+                            )
+                            cur.execute(
+                                f"DELETE FROM radusergroup WHERE UserName IN ({ph3})",
+                                onames,
+                            )
+                            cur.execute(
+                                f"DELETE FROM radreply WHERE UserName IN ({ph3})",
+                                onames,
+                            )
+                            cur.execute(
+                                f"DELETE FROM radpostauth WHERE UserName IN ({ph3})",
+                                onames,
+                            )
+                            cur.execute(
+                                f"DELETE FROM radacct WHERE UserName IN ({ph3})",
+                                onames,
+                            )
+                            cur.execute(
+                                f"DELETE FROM users WHERE id IN ({ph3})",
+                                [o[0] for o in orphan_users],
+                            )
                         # Cascade-delete the customer-scoped rows
                         cur.execute(
                             "DELETE FROM devices WHERE customer_id=%s", (cid,)
