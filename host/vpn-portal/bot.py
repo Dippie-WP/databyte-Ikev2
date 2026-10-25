@@ -549,7 +549,7 @@ async def cmd_bake(update, context):
     else:
         rows = app.db_query("SELECT * FROM customers WHERE name = ?", (arg,))
     if not rows:
-        await update.message.reply_text(f"No customer `Zidaan`.")
+        await update.message.reply_text(f"No customer `{arg}`.")
         return
     cust = rows[0]
     cust_id = cust["id"]
@@ -1898,7 +1898,21 @@ async def cmd_deleteuser(update, context):
     else:
         rows = app.db_query("SELECT * FROM customers WHERE name = ?", (arg,))
     if not rows:
-        await update.message.reply_text(f"No customer `{arg}`.")
+        # 2026-10-25 fix (triage): the argument may be a users.id or an EAP
+        # identity rather than a customer. A flat "No customer" reads like the
+        # customer is missing, which sent the operator hunting the wrong
+        # entity. Name the entity that actually matched.
+        hint = "\nNo customer and no user match that argument."
+        if arg.isdigit():
+            urow = app.db_query(
+                "SELECT id, name FROM users WHERE id = ?", (int(arg),))
+        else:
+            urow = app.db_query(
+                "SELECT id, name FROM users WHERE name = ?", (arg,))
+        if urow:
+            hint = (f"\nThat is a USER (users.id={urow[0]['id']}), not a customer. "
+                    f"Use `/cleanup_orphans {urow[0]['id']}` to retire it.")
+        await update.message.reply_text(f"No customer `{arg}`.{hint}")
         return
     c = rows[0]
     bare_name = c['name']
@@ -2109,15 +2123,42 @@ async def cmd_cleanup_orphans(update, context):
             ph_n = ",".join(["?"] * len(names))
             r1 = wrapped.execute(f"DELETE FROM radcheck WHERE username IN ({ph_n})", names)
             r2 = wrapped.execute(f"DELETE FROM users WHERE id IN ({ph})", ids)
+            # 2026-10-25 fix (orphan-user leak): /cleanup_orphans only wiped
+            # radcheck + users. The RADIUS group membership rows and the dead
+            # eap-<id> blocks were left behind, so every orphan cleanup still
+            # left litter in radusergroup and in rw-eap.conf.
+            r3 = wrapped.execute(f"DELETE FROM radusergroup WHERE username IN ({ph_n})", names)
+            r4 = wrapped.execute(f"DELETE FROM radreply WHERE username IN ({ph_n})", names)
         audit(
             "cleanup_orphans_done",
             ids=ids, names=names,
             radcheck_deleted=r1.rowcount, users_deleted=r2.rowcount,
         )
+        # 2026-10-25: remove the dead eap-<id> blocks too -- a retired
+        # identity must leave no trace in the strongSwan config.
+        eap_removed = 0
+        try:
+            for n in names:
+                if app._remove_eap_block(n):
+                    eap_removed += 1
+            if eap_removed:
+                app.reload_charon_creds()
+        except Exception as e:
+            logger.warning("EAP block cleanup failed for orphans %s: %s", names, e)
+        audit(
+            "cleanup_orphans_eap",
+            names=list(names),
+            eap_blocks_removed=eap_removed,
+            radusergroup_deleted=r3.rowcount,
+            radreply_deleted=r4.rowcount,
+        )
         await update.message.reply_text(
             f"\u2705 Cleaned {len(names)} orphan user(s):\n"
             f"- radcheck rows deleted: {r1.rowcount}\n"
             f"- users rows deleted: {r2.rowcount}\n"
+            f"- radusergroup rows deleted: {r3.rowcount}\n"
+            f"- radreply rows deleted: {r4.rowcount}\n"
+            f"- EAP blocks removed: {eap_removed}\n"
             f"- names: {', '.join(f'`{n}`' for n in names)}",
             parse_mode=ParseMode.MARKDOWN,
         )
