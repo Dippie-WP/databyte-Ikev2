@@ -409,6 +409,95 @@ def kill_customer_credentials(db, customer_id: int, username: str) -> bool:
     return True
 
 
+def remove_customer_eap_blocks(db, customer_id: int, usernames) -> int:
+    """Remove the eap-<id> blocks of expired identities from rw-eap.conf.
+
+    2026-10-25: an expiry is a HARD delete -- the customer row and its devices
+    are removed, so its EAP-PSK block must go away entirely. The old path only
+    replaced the secret with a KILLED-<hex> marker (kill_customer_credentials)
+    and LEFT THE BLOCK BEHIND, so every expiry left one dead eap-<id> block
+    in the file forever (5 were present on 2026-10-25, all for identities
+    with no customer, no device and no radcheck row).
+
+    The KILLED- marker + DISABLED- radcheck placeholder belong to the
+    OVER-QUOTA cut path (that customer still exists and may be restored) --
+    they are NOT used here.
+
+    Brace-balanced removal (a block may share a line with the previous
+    block's closing brace, so a line-anchored regex is not safe), atomic
+    write via the shared helper, charon reload, rollback on reload failure.
+    """
+    if not usernames or not CONF_PATH.exists():
+        return 0
+
+    original = CONF_PATH.read_text()
+    new_text = original
+    removed = 0
+    for ident in usernames:
+        needle = f"eap-{ident}"
+        idx = new_text.find(needle)
+        while idx != -1:
+            brace_open = new_text.find("{", idx)
+            if brace_open == -1:
+                break
+            depth = 1
+            i = brace_open + 1
+            while i < len(new_text) and depth > 0:
+                if new_text[i] == "{":
+                    depth += 1
+                elif new_text[i] == "}":
+                    depth -= 1
+                i += 1
+            end = i
+            if end < len(new_text) and new_text[end] == "\n":
+                end += 1
+            new_text = new_text[:idx] + new_text[end:]
+            removed += 1
+            idx = new_text.find(needle)
+
+    if removed == 0:
+        return 0
+    if "connections {" not in new_text or "secrets {" not in new_text:
+        log.error("refusing to write %s -- connections/secrets block missing", CONF_PATH)
+        return 0
+
+    import sys
+    from pathlib import Path as _Path
+    _helper_dir = "/opt/strongswan-vpn-gateway/host"
+    if _helper_dir not in sys.path:
+        sys.path.insert(0, _helper_dir)
+    from safe_write_rw_eap import atomic_write_conf_local, SafeWriteError
+
+    CONF_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        atomic_write_conf_local(
+            new_text, str(CONF_PATH), str(CONF_BACKUP_DIR), caller_label="quotamon-expire"
+        )
+    except SafeWriteError as e:
+        log.error("atomic write FAILED for %s, live conf untouched: %s", usernames, e)
+        return 0
+    log.info("removed %d eap block(s) from %s for expired customer %s",
+             removed, CONF_PATH, customer_id)
+
+    try:
+        subprocess.run(SWANCTL_PREFIX + ["--load-creds"], check=True,
+                       capture_output=True, text=True)
+        log.info("charon creds reloaded")
+    except subprocess.CalledProcessError as e:
+        log.error("charon --load-creds FAILED: rc=%s stderr=%s stdout=%s",
+                  e.returncode, e.stderr, e.stdout)
+        try:
+            atomic_write_conf_local(
+                original, str(CONF_PATH), str(CONF_BACKUP_DIR),
+                caller_label="quotamon-rollback",
+            )
+            log.warning("Rolled back conf change via atomic helper")
+        except SafeWriteError as e2:
+            log.error("ROLLBACK write FAILED: %s. Manual restore required.", e2)
+        return 0
+    return removed
+
+
 def disable_customer_radcheck(username: str) -> bool:
     """Replace radcheck Cleartext-Password with DISABLED-<random> marker."""
     pw = _read_radius_db_password()
@@ -726,16 +815,50 @@ class QuotaMonitor:
                             cust_name, customer_id)
             log.warning("customer %s (id=%d, device=%s) EXPIRED — killing",
                         cust_name, customer_id, auth_id)
-            radcheck_killed = disable_customer_radcheck(auth_id)
-            rw_eap_killed    = kill_customer_credentials(db, customer_id, auth_id)
-            dae_result       = send_dae_disconnect(auth_id)
-            n_terminated     = terminate_customer_sas(auth_id)
+            # 2026-10-25 fix (orphan litter): an expiry is a HARD delete. The
+            # KILLED- secret marker and the DISABLED- radcheck placeholder belong
+            # to the OVER-QUOTA cut path (that customer still exists and may be
+            # restored). On expiry they were left behind forever -- one dead
+            # eap-<id> block + one dead radcheck row per expired customer.
+            # Collect EVERY identity of the customer (a customer may have
+            # several devices, each with its own users row + EAP identity),
+            # then revoke them all and purge the rows and the blocks.
+            cursor.execute(
+                "SELECT d.strongswan_user_id AS uid, u.name AS uname "
+                "FROM devices d LEFT JOIN users u ON u.id = d.strongswan_user_id "
+                "WHERE d.customer_id = %s",
+                (customer_id,),
+            )
+            identities = []
+            for drow in cursor.fetchall():
+                if drow['uname'] and drow['uname'] not in identities:
+                    identities.append(drow['uname'])
+            if auth_id and auth_id not in identities:
+                identities.append(auth_id)
+
+            dae_result = ""
+            n_terminated = 0
+            for ident in identities:
+                dae_result = send_dae_disconnect(ident)
+                n_terminated += terminate_customer_sas(ident)
+
+            eap_removed = remove_customer_eap_blocks(db, customer_id, identities)
+
+            # Purge the RADIUS rows outright -- no DISABLED- placeholder left.
+            radcheck_killed = True
+            for ident in identities:
+                cursor.execute("DELETE FROM radcheck WHERE username = %s", (ident,))
+                cursor.execute("DELETE FROM radusergroup WHERE username = %s", (ident,))
+                cursor.execute("DELETE FROM radreply WHERE username = %s", (ident,))
+            rw_eap_killed = eap_removed > 0
             cursor.execute("DELETE FROM devices WHERE customer_id = %s", (customer_id,))
             cursor.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
             log_audit(db, "quota-monitor", "expired_delete", "customer", customer_id,
                       f'{{"name": "{cust_name}", "auth_id": "{auth_id}", '
                       f'"radcheck_killed": {radcheck_killed}, '
-                      f'"rw_eap_killed": {rw_eap_killed}, "sas_terminated": {n_terminated}, '
+                      f'"rw_eap_killed": {rw_eap_killed}, '
+                      f'"eap_blocks_removed": {eap_removed}, '
+                      f'"identities": {identities}, "sas_terminated": {n_terminated}, '
                       f'"dae_result": "{dae_result}"}}')
             log.warning("customer %s (id=%d, device=%s) EXPIRED — killed and deleted",
                         cust_name, customer_id, auth_id)
