@@ -1,0 +1,13 @@
+[Unit]
+Description=Backup prod VPN MariaDB radius schema to RustFS (OC-side relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/backup-mariadb-dump.sh
+Nice=10
+# Logs to /var/log/mariadb-dump-backup.log via script's tee; journald gets
+# the same lines via the script's `tee >(logger ...)` (or here, via the
+# script's `tee -a "$LOG"` which also pipes to logger in the prod-side
+# original; this script writes only to LOG, journald sees the unit output).
