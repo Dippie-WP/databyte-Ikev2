@@ -570,7 +570,7 @@ This runbook v1.1.0 was written from live evidence on 2026-10-15 06:50 UTC (08:5
 - `docker ps --filter name=strongswan` → `Up 6 days (healthy)` (image `zun/strongswan:6.0.7-mschapv2-attrsql`)
 - `systemctl list-units --type=service --state=running` on vpn-prod-01 → confirms 24 services (incl. 7 new since v1.0.7)
 - `ss -tlnp / ss -ulnp` on vpn-prod-01 → confirms 6 new ports since v1.0.7
-- `cd /root/.openclaw/workspace/databyte-Ikev2 && git rev-parse HEAD` → `b3cf38b9d22f87aa4f127d84b06f81e118c90bbc` (no remote tags; bot tags live in `vpn-admin-bot` repo: latest `v2.5.0`)
+- `cd /root/.openclaw/workspace/projects/databyte-ikev2 && git rev-parse HEAD` → `b3cf38b9d22f87aa4f127d84b06f81e118c90bbc` (no remote tags; bot tags live in `vpn-admin-bot` repo: latest `v2.5.0`) — *path updated 2026-10-26: the duplicate root-level `databyte-Ikev2/` clone was removed; the live clone is now `projects/databyte-ikev2`*
 - `cd /root/.openclaw/workspace/projects/vpn-admin-bot && git tag --sort=-v:refname | head -1` → `v2.5.0`
 - `kopia snapshot list --all` from vpn-prod-01 debian user → **502 Bad Gateway from `kop.databyte.co.za:443`** (parked; Zun msg #43961); last successful `.update-info.json` mtime was 2026-10-10 00:00
 - 0 remaining `vps-01` references in this runbook (41 converted to `vpn-prod-01` via sed)
