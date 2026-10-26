@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily MariaDB radius dump to RustFS (OC-side relay)
+
+[Timer]
+OnCalendar=*-*-* 04:30:00 UTC
+Persistent=true
+AccuracySec=5min
+Unit=backup-mariadb-dump.service
+
+[Install]
+WantedBy=timers.target

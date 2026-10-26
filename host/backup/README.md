@@ -135,6 +135,35 @@ diff -r /tmp/restore/MEMORY.md ~/.openclaw/workspace/MEMORY.md
 #      rclone sync /tmp/restore/ ~/.openclaw/workspace/
 ```
 
+## Also in this directory: OC-side MariaDB `radius` dump
+
+`backup-mariadb-dump.sh` is a **separate job** from the workspace backup above.
+It runs on OC, SSHes to `vpn-prod-01`, dumps the prod MariaDB `radius`
+schema, and pushes it to RustFS plus a best-effort copy to the Pi USB.
+
+| | |
+|---|---|
+| Schedule | `backup-mariadb-dump.timer` - 04:30 UTC daily |
+| Destination | `rustfs:open-claw-push/mariadb-dump/{daily,weekly}/` |
+| Retention | 14 daily + 8 weekly |
+| Prod access | SSH `root@vpn-prod-01` via `/root/.ssh/id_ed25519_xneelo`; `mariadb-dump --socket=/var/run/mysqld/mysqld.sock` (unix_socket auth, no password) |
+| Log | `/var/log/mariadb-dump-backup.log` |
+| Dry run | `backup-mariadb-dump.sh --dry-run` - rclone calls become no-ops, the dump is still produced locally so the script can be verified end-to-end without pushing data anywhere |
+
+Prod cannot reach the LAN RustFS endpoint (192.168.10.89:30293): the WireGuard
+tunnel only carries 10.50.0.0/24, so rclone from prod hangs until its 90 s
+timeout kills it. Hence the OC-side relay.
+
+Install:
+
+```bash
+sudo install -m 0755 backup-mariadb-dump.sh /usr/local/bin/
+sudo install -m 0644 backup-mariadb-dump.service /etc/systemd/system/
+sudo install -m 0644 backup-mariadb-dump.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now backup-mariadb-dump.timer
+```
+
 ## Lessons (historical)
 
 ### #83 — Pre-backup audit caught 4 leaks
