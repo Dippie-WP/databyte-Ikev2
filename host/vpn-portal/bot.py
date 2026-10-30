@@ -2338,6 +2338,216 @@ async def cmd_renew_orphan(update, context):
         )
 
 
+
+
+async def cmd_expiry(update, context):
+    """List customers by time-based expiry, with created/expiry/duration.
+
+    Cut-off on this platform is TIME-based (customers.expires_at), NOT a data
+    cap -- see quota-monitor._kill_expired_customers (TKT-011 v2.0). Optional
+    arg: /expiry <days> to show only customers expiring within N days.
+    """
+    audit("expiry")
+    import app
+    from datetime import datetime, timezone, timedelta
+    SAST = timezone(timedelta(hours=2))
+
+    args = context.args or []
+    within_days = None
+    if args:
+        try:
+            within_days = int(args[0])
+        except (TypeError, ValueError):
+            await update.message.reply_text("Usage: `/expiry [days]`", parse_mode=ParseMode.MARKDOWN)
+            return
+
+    rows = app.db_query(
+        "SELECT c.id, c.name, c.display_name, c.expires_at, c.created_at, t.duration_days "
+        "FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
+        "WHERE c.expires_at IS NOT NULL AND COALESCE(c.is_operator, 0) = 0 "
+        "ORDER BY c.expires_at"
+    )
+    if not rows:
+        await update.message.reply_text("No customers with an expiry set.")
+        return
+
+    now = datetime.now(timezone.utc)
+    lines = ["*Expiry Watch* -- cut-off is by date/time (`expires_at`), not data", ""]
+    shown = 0
+    for r in rows:
+        exp = r["expires_at"]
+        if isinstance(exp, str):
+            exp_dt = datetime.strptime(exp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        else:
+            exp_dt = exp.replace(tzinfo=timezone.utc) if exp.tzinfo is None else exp
+        secs = (exp_dt - now).total_seconds()
+        if within_days is not None and secs > within_days * 86400:
+            continue
+        if secs < 0:
+            flag, rel = "🔴", f"left EXPIRED {-secs / 3600:.0f}h ago"
+        elif secs < 86400:
+            flag, rel = "🟠", f"left {secs / 3600:.1f}h"
+        elif secs < 3 * 86400:
+            flag, rel = "🟡", f"left {secs / 86400:.1f}d"
+        else:
+            flag, rel = "🟢", f"left {secs / 86400:.1f}d"
+
+        created_at = r.get("created_at")
+        if created_at:
+            created_dt = datetime.fromtimestamp(int(created_at), tz=timezone.utc)
+            created_str = created_dt.astimezone(SAST).strftime("%Y-%m-%d")
+        else:
+            created_str = "?"
+        dur = r.get("duration_days")
+        if dur:
+            got = f"{int(dur)}d"
+        elif created_at:
+            got = f"{(exp_dt - created_dt).total_seconds() / 86400:.1f}d"
+        else:
+            got = "?"
+        exp_sast = exp_dt.astimezone(SAST)
+        extra = ""
+        if r.get("display_name") and r["display_name"] != r["name"]:
+            extra = f" ({_md(r['display_name'])})"
+        lines.append(f"{flag} `{r['id']}` `{r['name']}` -- got {got}{extra}")
+        lines.append(
+            f"   created {created_str} · expires {exp_sast.strftime('%Y-%m-%d %H:%M')} SAST · {rel}"
+        )
+        shown += 1
+    if not shown:
+        await update.message.reply_text(f"No customers expiring within {within_days} day(s).", parse_mode=ParseMode.MARKDOWN)
+        return
+    lines.append("")
+    lines.append(f"Showing {shown} of {len(rows)}")
+    await safe_md_send(update.message, "\n".join(lines))
+
+
+async def cmd_health(update, context):
+    """One-shot infra health: portal/poller/quota services, strongswan container,
+    disk, TLS cert days-left, charon + DB."""
+    audit("health")
+    import app, shutil
+    from datetime import datetime, timezone
+
+    def _run(args):
+        try:
+            r = subprocess.run(args, capture_output=True, text=True, timeout=6)
+            return (r.stdout or "").strip()
+        except Exception:
+            return ""
+
+    health = app.health()
+    du = shutil.disk_usage("/")
+    pct = du.used / du.total * 100.0
+
+    cert_days = None
+    try:
+        out = _run(["openssl", "x509", "-enddate", "-noout", "-in",
+                    "/etc/letsencrypt/live/myvpn.databyte.co.za/fullchain.pem"])
+        ds = out.split("=", 1)[1]
+        cert_exp = datetime.strptime(ds, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+        cert_days = (cert_exp - datetime.now(timezone.utc)).days
+    except Exception:
+        cert_days = None
+    if cert_days is None:
+        cert_str, cert_ok = "?", False
+    else:
+        cert_str, cert_ok = f"{cert_days}d", cert_days > 7
+
+    sw = _run(["docker", "inspect", "-f",
+               "{{.State.Status}}{{if .State.Health}}/{{.State.Health.Status}}{{end}}",
+               "strongswan"]) or "?"
+
+    services = ["vpn-portal", "bot-polling", "quota-monitor", "bandwidth-monitor",
+                "strongswan-watchdog", "strongswan_exporter"]
+
+    def mark(ok):
+        return "🟢" if ok else "🔴"
+
+    lines = ["*Health*", ""]
+    lines.append(f"{mark(bool(health.get('charon_ok')))} charon `{health.get('charon_ok')}` · "
+                 f"{mark(bool(health.get('db_ok')))} db `{health.get('db_ok')}` · "
+                 f"customers `{health.get('db_customers')}`")
+    lines.append(f"{mark(sw.startswith('running'))} strongswan container: `{sw}`")
+    for s in services:
+        st = _run(["systemctl", "is-active", s]) or "unknown"
+        lines.append(f"{mark(st == 'active')} `{s}`: {st}")
+    lines.append(f"{mark(pct < 85)} disk /: `{pct:.0f}%` ({du.used / 1e9:.1f}/{du.total / 1e9:.1f} GB)")
+    lines.append(f"{mark(cert_ok)} TLS myvpn: `{cert_str}` left")
+    await safe_md_send(update.message, "\n".join(lines))
+
+
+async def cmd_usage(update, context):
+    """View-only data usage. No data cap on this platform (cut-off is
+    time-based via expires_at) -- these figures are informational only."""
+    audit("usage")
+    import app
+
+    def fmt(b):
+        b = int(b or 0)
+        for u in ("B", "KB", "MB", "GB", "TB"):
+            if b < 1024:
+                return f"{b:.1f} {u}"
+            b /= 1024
+        return f"{b:.1f} PB"
+
+    if context.args:
+        arg = context.args[0].strip()
+        cid = int(arg) if arg.isdigit() else -1
+        rows = app.db_query(
+            "SELECT id, name, display_name, data_used_bytes "
+            "FROM customers WHERE (name = ? OR id = ?) AND COALESCE(is_operator, 0) = 0",
+            (arg, cid),
+        )
+        if not rows:
+            await update.message.reply_text(f"No customer `{_md(arg)}`.", parse_mode=ParseMode.MARKDOWN)
+            return
+        r = rows[0]
+        text = (f"*Usage* -- `{r['name']}` (id `{r['id']}`)\n"
+                f"used: `{fmt(r['data_used_bytes'])}`\n\n"
+                f"_view-only; cut-off is by expiry date/time, not a data cap_")
+        await safe_md_send(update.message, text)
+        return
+
+    rows = app.db_query(
+        "SELECT name, data_used_bytes FROM customers "
+        "WHERE COALESCE(is_operator, 0) = 0 ORDER BY data_used_bytes DESC LIMIT 12"
+    )
+    lines = ["*Usage* (top by all-time bytes)", ""]
+    for i, r in enumerate(rows, 1):
+        lines.append(f"{i}. `{r['name']}` -- {fmt(r['data_used_bytes'])}")
+    lines.append("")
+    lines.append("_view-only; no data cap (cut-off is by expiry date/time)_")
+    await safe_md_send(update.message, "\n".join(lines))
+
+
+async def cmd_audit(update, context):
+    """Tail the portal audit_log."""
+    audit("audit")
+    import app
+    from datetime import datetime, timezone, timedelta
+    SAST = timezone(timedelta(hours=2))
+    n = 15
+    if context.args:
+        try:
+            n = max(1, min(50, int(context.args[0])))
+        except (TypeError, ValueError):
+            pass
+    rows = app.db_query(
+        "SELECT actor, action, target_type, target_id, created_at "
+        "FROM audit_log ORDER BY id DESC LIMIT ?", (n,)
+    )
+    if not rows:
+        await update.message.reply_text("audit_log empty.")
+        return
+    lines = [f"*Audit* (last {len(rows)})", ""]
+    for r in rows:
+        ts = datetime.fromtimestamp(int(r["created_at"]), tz=timezone.utc).astimezone(SAST).strftime("%d %b %H:%M")
+        tgt = f" -> {r['target_type']}:{r.get('target_id')}" if r.get("target_type") else ""
+        lines.append(f"`{ts}` {_md(r['actor'])} · {_md(r['action'])}{tgt}")
+    await safe_md_send(update.message, "\n".join(lines))
+
+
 # ---------- Bot Commands (single source of truth) ----------
 #
 # One list drives BOTH the CommandHandler registration (in build_application)
@@ -2363,6 +2573,10 @@ BOT_COMMANDS = [
     ("renew",   cmd_renew,   "Renew a customer's tier (keeps same EAP identity)"),
     ("cleanup_orphans", cmd_cleanup_orphans, "Retire orphan users (no device) by user ID or 'all'"),
     ("renew_orphan",   cmd_renew_orphan,   "Restore an orphan user to a working customer (new password)"),
+    ("health",     cmd_health,     "Infra health: services, container, disk, TLS cert"),
+    ("usage",      cmd_usage,      "View-only data usage (no cap)"),
+    ("audit",      cmd_audit,      "Tail portal audit log"),
+    ("expiry",     cmd_expiry,     "Customers by expiry date (time-based cut-off)"),
 ]
 
 
