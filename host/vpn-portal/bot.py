@@ -680,11 +680,10 @@ async def cmd_start(update, context):
 
 async def cmd_help(update, context):
     audit("help")
-    parts = []
-    for i, (name, _h, desc) in enumerate(BOT_COMMANDS):
-        sep = "\n" if i and i % 3 == 0 else "  "
-        parts.append(f"{sep}/{name} -- {desc}")
-    await update.message.reply_text("".join(parts))
+    lines = ["*Commands*", ""]
+    for name, _h, desc in BOT_COMMANDS:
+        lines.append(f"/{name} - {desc}")
+    await safe_md_send(update.message, "\n".join(lines))
 
 
 async def cmd_status(update, context):
@@ -1459,7 +1458,9 @@ async def cmd_renew(update, context):
     eap_identity = f"{name}-{device_type}"
 
     import datetime as _dt
-    now_ts = int(_dt.datetime.utcnow().timestamp())
+    # 2026-10-30: true UTC epoch. Was datetime.utcnow().timestamp(), which on
+    # this SAST (+2) box read naive-UTC as local -> created_at landed 2h early.
+    now_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
     days = new_tier_row["duration_days"] or 30
     expires_at = (_dt.datetime.utcnow() + _dt.timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
     app.db_exec(
@@ -1641,7 +1642,7 @@ def disconnect_via_coa(eap_identity: str, block_seconds: int = 0) -> tuple[bool,
         import app
         rows = app.db_query(
             "SELECT acctsessionid, framedipaddress, callingstationid FROM radacct "
-            "WHERE username = %s AND acctstoptime IS NULL "
+            "WHERE username = ? AND acctstoptime IS NULL "
             "ORDER BY acctstarttime DESC LIMIT 1",
             (eap_identity,),
         )
@@ -1746,9 +1747,13 @@ async def cb_disconnect(update, context):
 
 
 async def cmd_logs(update, context):
+    n = 30
     if context.args:
-        await update.message.reply_text("Usage: /logs")
-        return
+        try:
+            n = max(1, min(200, int(context.args[0])))
+        except (TypeError, ValueError):
+            await update.message.reply_text("Usage: /logs [count]")
+            return
     audit("logs")
     import app
     from datetime import datetime, timezone, timedelta
@@ -1759,8 +1764,8 @@ async def cmd_logs(update, context):
         "SELECT authdate, username, reply "
         "FROM radpostauth "
         "WHERE authdate >= ? "
-        "ORDER BY authdate DESC LIMIT 30",
-        (cutoff,),
+        "ORDER BY authdate DESC LIMIT ?",
+        (cutoff, n),
     )
     if not auths:
         await update.message.reply_text("No auth events in the last 7 days.")
@@ -1875,6 +1880,7 @@ async def cmd_deleteuser(update, context):
     Sweeps (per 'sweep everything on a client delete'):
       - radcheck: bare-name DISABLED- sentinel + every <customer>-<device> row
       - users: every device-suffixed name linked via devices.strongswan_user_id
+      - radusergroup + radreply: same identity set as radcheck
       - devices: every device where customer_id = X
       - EAP blocks: bare-name (if present) + every device-suffixed name
       - customers: the customer row itself
@@ -1978,6 +1984,11 @@ async def cmd_deleteuser(update, context):
             wrapped = app.portal_auth._Conn(conn)
             for un in usernames:
                 wrapped.execute("DELETE FROM radcheck WHERE UserName = ?", (un,))
+                # 2026-10-30: a full delete must also sweep the RADIUS group +
+                # reply rows (matches remove_customer_radcheck_and_usergroup and
+                # /cleanup_orphans) -- otherwise every delete leaves orphan rows.
+                wrapped.execute("DELETE FROM radusergroup WHERE username = ?", (un,))
+                wrapped.execute("DELETE FROM radreply WHERE username = ?", (un,))
             for u in user_rows:
                 wrapped.execute("DELETE FROM users WHERE id = ?", (u['id'],))
             for d in device_rows:
@@ -2005,6 +2016,7 @@ async def cmd_deleteuser(update, context):
         f"*Customer `{c['name']}` deleted (full sweep).*",
         f"- id: {c['id']}",
         f"- radcheck rows removed: {len(usernames)} ({', '.join(f'`{n}`' for n in sorted_names)})",
+        "- radusergroup + radreply rows removed for the same identities",
         f"- users rows removed: {len(user_rows)}",
         f"- devices rows removed: {len(device_rows)}",
         f"- EAP blocks removed: up to {len(usernames)} (only present ones actually deleted)",
@@ -2566,7 +2578,7 @@ BOT_COMMANDS = [
     ("disable",    cmd_disable,    "Disable a customer or device"),
     ("enable",     cmd_enable,     "Re-enable a customer or device"),
     ("disconnect", cmd_disconnect, "Force-disconnect a live session"),
-    ("logs",       cmd_logs,       "Tail charon.log"),
+    ("logs",       cmd_logs,       "Recent RADIUS auth events (last 30, 7d)"),
     ("bake",       cmd_bake,       "Generate a baked Windows .ps1 installer for a customer"),
     ("orphans",    cmd_orphans,    "List orphaned EAP identities (no portal device)"),
     ("deleteuser", cmd_deleteuser, "Delete a customer (with confirmation)"),
