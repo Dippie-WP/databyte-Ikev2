@@ -45,6 +45,8 @@ FILES=(
   # New: portal app (5) — bot.py added 2026-10-09 per TKT-029 + 3 amendments
   "host/vpn-portal/app.py"
   "host/vpn-portal/bot.py"
+  "host/vpn-portal/bot_polling.py"
+  "host/vpn-portal/safe_write_rw_eap.py"
   "host/vpn-portal/portal_auth.py"
   "host/vpn-portal/requirements.txt"
   "host/vpn-portal/scripts/bulk_action.py"
