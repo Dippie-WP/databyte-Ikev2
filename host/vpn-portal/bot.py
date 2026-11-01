@@ -2178,92 +2178,170 @@ async def cmd_cleanup_orphans(update, context):
         await update.message.reply_text(f"\u274c Cleanup failed (rolled back): {e}", parse_mode=ParseMode.MARKDOWN)
 
 
-async def cmd_renew_orphan(update, context):
-    """Restore an orphan user to a working customer.
+# ---------- /renew_orphan wizard (added 2026-11-01) ----------
+# Zun msg #49731-#49733: bare /renew_orphan -> tappable orphan list ->
+# duration -> cap -> speed -> confirm. The picker UI mirrors /create
+# (same labels/layouts); only the callback_data prefixes differ (ro*), so the
+# two ConversationHandlers can never claim each other's callbacks.
+# One-shot fast path kept: /renew_orphan <id|eap_identity> <tier_name>
 
-    The orphan's users.password BLOB (NTLM hash) is preserved; a fresh
-    Cleartext-Password is generated (one-way hash, the original CT is not
-    recoverable). The new password is shown once in the rendered output
-    (same format as /create), self-destructs in 60s.
+# State IDs deliberately offset from the /create 0..6 range.
+RO_SELECT, RO_DURATION, RO_CAP, RO_SPEED, RO_CONFIRM = range(10, 15)
 
-    Refuses:
-      - HOT-244 operators (zun-*, zunaid-*)
-      - Non-orphan users (already have a device) -- use /renew
-      - Missing or archived tier
-      - Customer name collision (cannot renew into a taken name)
-      - EAP identity without `-` (cannot parse customer/device names)
+RO_DURATIONS = [
+    ("3d_demo", "3d demo"),
+    ("7d",      "7d"),
+    ("10d",     "10d"),
+    ("14d",     "14d"),
+    ("21d",     "21d"),
+    ("30d",     "30d"),
+    ("40d",     "40d"),
+]
+RO_DAYS = {"3d_demo": 3, "7d": 7, "10d": 10, "14d": 14, "21d": 21, "30d": 30, "40d": 40}
 
-    Usage:
-      /renew_orphan <eap_identity> <tier_name>
-    """
-    if len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: `/renew_orphan <eap_identity> <tier_name>`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    audit("renew_orphan", args=list(context.args))
+
+class RenewOrphanError(Exception):
+    """Refusal from renew_orphan_core; .args[0] is the operator-facing message."""
+
+
+def _ro_orphans():
+    """Orphan users (no device row), operator identities excluded (HOT-244)."""
     import app
+    rows = app.db_query(
+        "SELECT u.id, u.name FROM users u "
+        "LEFT JOIN devices d ON d.strongswan_user_id = u.id "
+        "WHERE d.id IS NULL ORDER BY u.id"
+    )
+    return [r for r in rows
+            if not (r["name"] or "").lower().startswith(("zun", "zunaid"))]
+
+
+def _ro_pick_text(orphans):
+    names = ", ".join(f"`{r['name']}`" for r in orphans)
+    return (f"*Renew an orphan*\n"
+            f"{len(orphans)} orphan(s) with no device:\n{names}\n\nTap one:")
+
+
+def _ro_orphan_kb(orphans):
+    rows = [[InlineKeyboardButton(f"{r['name']}  \u00b7  id={r['id']}",
+                                  callback_data=f"ro:{r['id']}")] for r in orphans]
+    rows.append([InlineKeyboardButton("Cancel", callback_data="rox")])
+    return _kb(rows)
+
+
+def _ro_duration_kb():
+    row1 = [InlineKeyboardButton(l, callback_data=f"rod:{k}") for k, l in RO_DURATIONS[:4]]
+    row2 = [InlineKeyboardButton(l, callback_data=f"rod:{k}") for k, l in RO_DURATIONS[4:]]
+    return _kb([row1, row2, [InlineKeyboardButton("Cancel", callback_data="rox")]])
+
+
+def _ro_cap_kb():
+    row = [InlineKeyboardButton(l, callback_data=f"roc:{k}") for k, l in CAPS]
+    return _kb([row, [InlineKeyboardButton("\u2039 Back", callback_data="rob"),
+                      InlineKeyboardButton("Cancel", callback_data="rox")]])
+
+
+def _ro_speed_kb():
+    row = [InlineKeyboardButton(SPEED_PLAN_LABELS[k], callback_data=f"ros:{k}")
+           for k in SPEED_PLAN_KEYS]
+    return _kb([row, [InlineKeyboardButton("\u2039 Back", callback_data="rob"),
+                      InlineKeyboardButton("Cancel", callback_data="rox")]])
+
+
+def _ro_confirm_kb():
+    return _kb([[InlineKeyboardButton("Confirm", callback_data="rok"),
+                 InlineKeyboardButton("\u2039 Back", callback_data="rob"),
+                 InlineKeyboardButton("Cancel", callback_data="rox")]])
+
+
+def _ro_reset(context):
+    for k in [k for k in context.user_data if k.startswith("ro_")]:
+        context.user_data.pop(k, None)
+
+
+def _ro_summary_text(context):
+    import datetime as _dt
+    ident = context.user_data.get("ro_identity", "?")
+    cap = context.user_data.get("ro_cap", "uncap")
+    speed = context.user_data.get("ro_speed", "standard")
+    days = context.user_data.get("ro_days", 10)
+    tier_name = context.user_data.get("ro_tier") or f"{days}day_{cap}"
+    expires_at = (_dt.datetime.utcnow() + _dt.timedelta(days=int(days))).strftime("%Y-%m-%d")
+    cust_name, _, device_name = ident.partition("-")
+    return (f"*[4/4] Confirm?*\n\n"
+            f"Orphan: `{ident}`\n"
+            f"Customer: `{cust_name}`\n"
+            f"Device: `{device_name}`\n"
+            f"Tier: `{tier_name}` ({cap_label(cap)})\n"
+            f"Speed: `{SPEED_PLAN_LABELS.get(speed, speed)}`\n"
+            f"Expires: `{expires_at}`")
+
+
+def _ro_creds_text(res):
+    return (f"OK Orphan `{res['eap_identity']}` renewed (customer.id=`{res['cust_id']}`)\n"
+            f"Tier: `{res['tier_name']}`\n"
+            f"Device: `{res['device_name']}`\n"
+            f"Expires: `{res['expires_at'] or '?'}`\n\n"
+            f"! *Self-destructs in 60s*\n\n"
+            f"Server: `myvpn.databyte.co.za`\n"
+            f"EAP identity: `{res['eap_identity']}`\n"
+            f"Password: `{res['password']}`\n"
+            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem")
+
+
+def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "standard") -> dict:
+    """Validate + execute an orphan renewal (shared by the command and the wizard).
+
+    Raises RenewOrphanError with the operator-facing message on any refusal.
+    Same DB/EAP work as the original cmd_renew_orphan body; bandwidth now comes
+    from the speed plan instead of a hard-coded 20/20.
+    """
+    import app
+    import re as _re
     from datetime import datetime, timedelta
 
-    eap_identity = context.args[0]
-    tier_name = context.args[1]
-
-    # HOT-244 prefix check
-    if eap_identity.lower().startswith(("zun", "zunaid")):
-        await update.message.reply_text(
-            f"\u274c REFUSED: `{eap_identity}` matches an operator prefix (HOT-244).",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    # Pre-check: orphan must exist in users table (no device)
-    user = app.db_query("SELECT id, name, password FROM users WHERE name = ?", (eap_identity,))
-    if not user:
-        await update.message.reply_text(
-            f"\u274c No users row for `{eap_identity}`. Run `/orphans` to see the audit.\n"
-            f"(If already nuked, restore from `/var/backups/orphan-nuke-*.sql` first.)",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-    user_row = user[0]
-    dev = app.db_query("SELECT id FROM devices WHERE strongswan_user_id = ?", (user_row['id'],))
-    if dev:
-        await update.message.reply_text(
-            f"\u274c `{eap_identity}` already has a device (not an orphan). Use `/renew` to renew the customer.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    # Parse customer + device name
     if "-" not in eap_identity:
-        await update.message.reply_text(
-            f"\u274c EAP identity `{eap_identity}` has no `-`. Cannot parse customer/device names.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
+        raise RenewOrphanError(
+            f"EAP identity `{eap_identity}` has no `-`. Cannot parse customer/device names.")
     cust_name, device_name = eap_identity.split("-", 1)
 
-    # Verify tier
+    if eap_identity.lower().startswith(("zun", "zunaid")):
+        raise RenewOrphanError(
+            f"REFUSED: `{eap_identity}` matches an operator prefix (HOT-244).")
+
+    user = app.db_query("SELECT id, name, password FROM users WHERE name = ?", (eap_identity,))
+    if not user:
+        raise RenewOrphanError(
+            f"No users row for `{eap_identity}`. Run `/orphans` to see the audit.\n"
+            f"(If already nuked, restore from `/var/backups/orphan-nuke-*.sql` first.)")
+    user_row = user[0]
+
+    dev = app.db_query("SELECT id FROM devices WHERE strongswan_user_id = ?", (user_row["id"],))
+    if dev:
+        raise RenewOrphanError(
+            f"`{eap_identity}` already has a device (not an orphan). Use `/renew` to renew the customer.")
+
     tier = app.db_query("SELECT id, duration_days, is_active FROM tiers WHERE name = ?", (tier_name,))
     if not tier:
-        await update.message.reply_text(f"\u274c Tier `{tier_name}` does not exist.", parse_mode=ParseMode.MARKDOWN)
-        return
+        valid = app.db_query(
+            "SELECT name FROM tiers WHERE is_active = 1 ORDER BY duration_days, name")
+        tlist = ", ".join(f"`{r['name']}`" for r in valid) if valid else "(none)"
+        raise RenewOrphanError(f"Tier `{tier_name}` does not exist.\nValid tiers: {tlist}")
     if not tier[0].get("is_active"):
-        await update.message.reply_text(f"\u274c Tier `{tier_name}` is archived.", parse_mode=ParseMode.MARKDOWN)
-        return
+        raise RenewOrphanError(f"Tier `{tier_name}` is archived.")
     tier_id = tier[0]["id"]
     duration_days = tier[0].get("duration_days")
 
-    # Customer name collision check
     if app.db_query("SELECT id FROM customers WHERE name = ?", (cust_name,)):
-        await update.message.reply_text(
-            f"\u274c Customer `{cust_name}` already exists. Cannot renew an orphan into a taken name.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
+        raise RenewOrphanError(
+            f"Customer `{cust_name}` already exists. Cannot renew an orphan into a taken name.")
 
-    # Generate fresh password
+    try:
+        from app import resolve_bandwidth
+        down_mbps, up_mbps = resolve_bandwidth(speed_key, None, None)
+    except Exception:
+        down_mbps, up_mbps = 20, 20
+
     password = app.secrets.token_urlsafe(16)
     ntlm = app.ntlm_hash_bytes(password)
     now = int(app.time.time())
@@ -2271,84 +2349,261 @@ async def cmd_renew_orphan(update, context):
     if duration_days is not None:
         expires_at = (datetime.utcnow() + timedelta(days=int(duration_days))).strftime("%Y-%m-%d %H:%M:%S")
 
-    # Execute recreation in transaction
-    try:
-        with app.portal_auth._engine().begin() as conn:
-            wrapped = app.portal_auth._Conn(conn)
-            wrapped.execute(
-                "INSERT INTO customers (name, display_name, is_operator, is_active, "
-                "data_used_bytes, expires_at, tier_id, status, max_devices, "
-                "bandwidth_down_mbps, bandwidth_up_mbps, created_at, updated_at, notes, email) "
-                "VALUES (?, ?, 0, 1, 0, ?, ?, 'active', 1, 20, 20, ?, ?, '', '')",
-                (cust_name, cust_name, expires_at, tier_id, now, now),
-            )
-            cust_id = wrapped.execute("SELECT id FROM customers WHERE name = ?", (cust_name,)).fetchone()["id"]
-            wrapped.execute("DELETE FROM users WHERE id = ?", (user_row['id'],))
-            wrapped.execute(
-                "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
-                (eap_identity, ntlm.hex().upper()),
-            )
-            user_id = wrapped.execute("SELECT id FROM users WHERE name = ?", (eap_identity,)).fetchone()["id"]
-            wrapped.execute(
-                "INSERT INTO devices (customer_id, strongswan_user_id, device_name, is_active, "
-                "created_at, updated_at, device_type) "
-                "VALUES (?, ?, ?, 1, ?, ?, 'OTHER')",
-                (int(cust_id), int(user_id), device_name, now, now),
-            )
-            wrapped.execute("UPDATE customers SET user_id = ? WHERE id = ?", (int(user_id), int(cust_id)))
-            wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
-            wrapped.execute(
-                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
-                "(?, 'Cleartext-Password', ':=', ?)",
-                (eap_identity, password),
-            )
-            wrapped.execute(
-                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
-                "(?, 'NT-Password', ':=', ?)",
-                (eap_identity, ntlm.hex().upper()),
-            )
-            wrapped.execute(
-                "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, 'default', 1)",
-                (eap_identity,),
-            )
-
-        # EAP block pre-clean + write + charon reload (side effects, post-tx)
-        try:
-            import re as _re
-            conf = app.read_rw_eap_conf()
-            block_pat = _re.compile(
-                rf"\n?\s*eap-{_re.escape(eap_identity)}\s*\{{[^{{}}]*?\}}\n?",
-                _re.DOTALL,
-            )
-            conf = block_pat.sub("", conf, count=1)
-            app.write_rw_eap_conf(conf)
-        except Exception as ex:
-            logger.warning(f"renew_orphan: pre-clean eap block failed for {eap_identity}: {ex}")
-        app.append_eap_block(eap_identity, password)
-        app.reload_charon_creds()
-
-        audit("renew_orphan_done", eap_identity=eap_identity, cust_id=cust_id, tier_name=tier_name)
-
-        text = (
-            f"OK Orphan `{eap_identity}` renewed (customer.id=`{cust_id}`)\n"
-            f"Tier: `{tier_name}`\n"
-            f"Device: `{device_name}`\n"
-            f"Expires: `{expires_at or '?'}`\n\n"
-            f"! *Self-destructs in 60s*\n\n"
-            f"Server: `myvpn.databyte.co.za`\n"
-            f"EAP identity: `{eap_identity}`\n"
-            f"Password: `{password}`\n"
-            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
+    with app.portal_auth._engine().begin() as conn:
+        wrapped = app.portal_auth._Conn(conn)
+        wrapped.execute(
+            "INSERT INTO customers (name, display_name, is_operator, is_active, "
+            "data_used_bytes, expires_at, tier_id, status, max_devices, "
+            "bandwidth_down_mbps, bandwidth_up_mbps, created_at, updated_at, notes, email) "
+            "VALUES (?, ?, 0, 1, 0, ?, ?, 'active', 1, ?, ?, ?, ?, '', '')",
+            (cust_name, cust_name, expires_at, tier_id, int(down_mbps), int(up_mbps), now, now),
         )
-        msg = await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        cust_id = wrapped.execute("SELECT id FROM customers WHERE name = ?", (cust_name,)).fetchone()["id"]
+        wrapped.execute("DELETE FROM users WHERE id = ?", (user_row["id"],))
+        wrapped.execute(
+            "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
+            (eap_identity, ntlm.hex().upper()),
+        )
+        user_id = wrapped.execute("SELECT id FROM users WHERE name = ?", (eap_identity,)).fetchone()["id"]
+        wrapped.execute(
+            "INSERT INTO devices (customer_id, strongswan_user_id, device_name, is_active, "
+            "created_at, updated_at, device_type) "
+            "VALUES (?, ?, ?, 1, ?, ?, 'OTHER')",
+            (int(cust_id), int(user_id), device_name, now, now),
+        )
+        wrapped.execute("UPDATE customers SET user_id = ? WHERE id = ?", (int(user_id), int(cust_id)))
+        wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
+        wrapped.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+            "(?, 'Cleartext-Password', ':=', ?)",
+            (eap_identity, password),
+        )
+        wrapped.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+            "(?, 'NT-Password', ':=', ?)",
+            (eap_identity, ntlm.hex().upper()),
+        )
+        wrapped.execute(
+            "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, 'default', 1)",
+            (eap_identity,),
+        )
+
+    try:
+        conf = app.read_rw_eap_conf()
+        block_pat = _re.compile(
+            rf"\n?\s*eap-{_re.escape(eap_identity)}\s*\{{[^{{}}]*?\}}\n?",
+            _re.DOTALL,
+        )
+        conf = block_pat.sub("", conf, count=1)
+        app.write_rw_eap_conf(conf)
+    except Exception as ex:
+        logger.warning(f"renew_orphan: pre-clean eap block failed for {eap_identity}: {ex}")
+    app.append_eap_block(eap_identity, password)
+    app.reload_charon_creds()
+
+    return {
+        "cust_id": cust_id,
+        "eap_identity": eap_identity,
+        "device_name": device_name,
+        "password": password,
+        "expires_at": expires_at,
+        "tier_name": tier_name,
+        "down_mbps": int(down_mbps),
+        "up_mbps": int(up_mbps),
+    }
+
+
+async def cmd_renew_orphan(update, context):
+    """/renew_orphan -- tappable orphan wizard, or one-shot <id|eap_identity> <tier_name>.
+
+    Bare -> tap an orphan -> duration -> cap -> speed -> confirm.
+    Args -> fast path: /renew_orphan 280 7day_10  (users.id OR the EAP identity).
+    """
+    args = context.args or []
+
+    # ---- one-shot fast path ----
+    if args:
+        if len(args) < 2:
+            await update.message.reply_text(
+                "Usage: `/renew_orphan <id|eap_identity> <tier_name>`\n"
+                "Or bare `/renew_orphan` for the tappable wizard.",
+                parse_mode=ParseMode.MARKDOWN)
+            return ConversationHandler.END
+        ident, tier_name = args[0], args[1]
+        audit("renew_orphan", args=list(args))
+        import app
+        if ident.isdigit():
+            rows = app.db_query("SELECT id, name FROM users WHERE id = ?", (int(ident),))
+            if not rows:
+                await update.message.reply_text(
+                    f"\u274c No users row with id `{ident}`. Run `/orphans` to see the audit.",
+                    parse_mode=ParseMode.MARKDOWN)
+                return ConversationHandler.END
+            ident = rows[0]["name"]
+        try:
+            res = renew_orphan_core(ident, tier_name)
+        except RenewOrphanError as e:
+            await update.message.reply_text(f"\u274c {e}", parse_mode=ParseMode.MARKDOWN)
+            return ConversationHandler.END
+        except Exception as e:
+            logger.exception("renew_orphan one-shot failed: %s", e)
+            await update.message.reply_text(
+                f"\u274c Renew orphan failed: {_md(e)}", parse_mode=ParseMode.MARKDOWN)
+            return ConversationHandler.END
+        msg = await update.message.reply_text(_ro_creds_text(res), parse_mode=ParseMode.MARKDOWN)
         if msg is not None:
             schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+        return ConversationHandler.END
 
+    # ---- wizard entry ----
+    _ro_reset(context)
+    audit("renew_orphan_wizard")
+    orphans = _ro_orphans()
+    if not orphans:
+        await update.message.reply_text("\u2705 No orphans to renew.")
+        return ConversationHandler.END
+    await update.message.reply_text(_ro_pick_text(orphans), reply_markup=_ro_orphan_kb(orphans))
+    return RO_SELECT
+
+
+async def ro_orphan_selected(update, context):
+    """[1] orphan tapped -> duration picker."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    import app
+    oid = int(q.data.split(":", 1)[1])
+    rows = app.db_query("SELECT id, name FROM users WHERE id = ?", (oid,))
+    if not rows:
+        await _safe_edit_text(q, "\u274c That orphan is gone. Re-run `/renew_orphan`.")
+        return ConversationHandler.END
+    ident = rows[0]["name"]
+    if "-" not in ident:
+        await _safe_edit_text(
+            q, f"\u274c EAP identity `{ident}` has no `-`. Cannot parse customer/device names.")
+        return ConversationHandler.END
+    context.user_data["ro_identity"] = ident
+    context.user_data["ro_orphan_id"] = oid
+    await _safe_edit_text(
+        q, f"[1/4] *How long until expiry?*\nOrphan: `{ident}`",
+        reply_markup=_ro_duration_kb())
+    return RO_DURATION
+
+
+async def ro_duration_chosen(update, context):
+    """[2] duration chosen -> cap picker."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    if q.data == "rob":
+        orphans = _ro_orphans()
+        await _safe_edit_text(q, _ro_pick_text(orphans), reply_markup=_ro_orphan_kb(orphans))
+        return RO_SELECT
+    key = q.data.split(":", 1)[1]
+    context.user_data["ro_duration"] = key
+    context.user_data["ro_days"] = RO_DAYS.get(key, 10)
+    await _safe_edit_text(
+        q, f"[2/4] *Data cap?*\nDuration: `{key}`", reply_markup=_ro_cap_kb())
+    return RO_CAP
+
+
+async def ro_cap_chosen(update, context):
+    """[3] cap chosen -> speed picker."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    if q.data == "rob":
+        await _safe_edit_text(
+            q, f"[1/4] *How long until expiry?*\nOrphan: `{context.user_data.get('ro_identity','')}`",
+            reply_markup=_ro_duration_kb())
+        return RO_DURATION
+    cap = q.data.split(":", 1)[1]
+    context.user_data["ro_cap"] = cap
+    await _safe_edit_text(
+        q,
+        f"[3/4] *Speed plan?*\nDuration: `{context.user_data.get('ro_duration','')}` - "
+        f"Cap: `{cap_label(cap)}`",
+        reply_markup=_ro_speed_kb())
+    return RO_SPEED
+
+
+async def ro_speed_chosen(update, context):
+    """[4] speed chosen -> confirm summary."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    if q.data == "rob":
+        await _safe_edit_text(
+            q,
+            f"[2/4] *Data cap?*\nDuration: `{context.user_data.get('ro_duration','')}`",
+            reply_markup=_ro_cap_kb())
+        return RO_CAP
+    key = q.data.split(":", 1)[1]
+    context.user_data["ro_speed"] = key
+    days = context.user_data.get("ro_days", 10)
+    cap = context.user_data.get("ro_cap", "uncap")
+    context.user_data["ro_tier"] = f"{days}day_{cap}"
+    await _safe_edit_text(q, _ro_summary_text(context),
+                          reply_markup=_ro_confirm_kb(), parse_mode=ParseMode.MARKDOWN)
+    return RO_CONFIRM
+
+
+async def ro_confirm(update, context):
+    """[5] Confirm -> run the renewal, send the self-destructing creds card."""
+    q = update.callback_query
+    try:
+        await q.answer()
+    except Exception:
+        pass
+    if q.data == "rob":
+        await _safe_edit_text(
+            q,
+            f"[3/4] *Speed plan?*\nDuration: `{context.user_data.get('ro_duration','')}` - "
+            f"Cap: `{cap_label(context.user_data.get('ro_cap','uncap'))}`",
+            reply_markup=_ro_speed_kb())
+        return RO_SPEED
+    ident = context.user_data.get("ro_identity")
+    tier = context.user_data.get("ro_tier")
+    speed = context.user_data.get("ro_speed", "standard")
+    try:
+        res = renew_orphan_core(ident, tier, speed)
+    except RenewOrphanError as e:
+        _ro_reset(context)
+        await _safe_edit_text(q, f"\u274c {e}")
+        return ConversationHandler.END
     except Exception as e:
-        await update.message.reply_text(
-            f"\u274c Renew orphan failed: {_md(e)}", parse_mode=ParseMode.MARKDOWN,
-        )
+        logger.exception("renew_orphan wizard failed: %s", e)
+        _ro_reset(context)
+        await _safe_edit_text(q, f"\u274c Renew orphan failed: {_md(e)}")
+        return ConversationHandler.END
+    msg = await _safe_edit_text(q, _ro_creds_text(res), parse_mode=ParseMode.MARKDOWN)
+    if msg is not None:
+        schedule_delete(context, update.effective_chat.id, msg.message_id, 60)
+    _ro_reset(context)
+    return ConversationHandler.END
 
+
+async def ro_cancel(update, context):
+    """/cancel or Cancel at any wizard state."""
+    _ro_reset(context)
+    if getattr(update, "callback_query", None) is not None:
+        q = update.callback_query
+        try:
+            await q.answer()
+        except Exception:
+            pass
+        await _safe_edit_text(q, "Cancelled.")
+    elif update.message is not None:
+        await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
 
 
 
@@ -2693,6 +2948,46 @@ def build_application() -> Application:
     # in PTB 22 BaseHandler).
     create_conv.persistence_ref = persistence
     application.add_handler(create_conv)
+
+    # /renew_orphan is a ConversationHandler too (tappable orphan wizard, 2026-11-01).
+    # Same MultiWorker subclass; distinct callback prefixes (ro*) so the two
+    # conversations can never claim each other's callbacks.
+    renew_conv = MultiWorkerConversationHandler(
+        entry_points=[
+            CommandHandler("renew_orphan", cmd_renew_orphan, filters=whitelist),
+        ],
+        states={
+            RO_SELECT: [
+                CallbackQueryHandler(ro_orphan_selected, pattern=r"^ro:"),
+                CallbackQueryHandler(ro_cancel, pattern=r"^rox$"),
+            ],
+            RO_DURATION: [
+                CallbackQueryHandler(ro_duration_chosen, pattern=r"^rod:"),
+                CallbackQueryHandler(ro_duration_chosen, pattern=r"^rob$"),
+                CallbackQueryHandler(ro_cancel, pattern=r"^rox$"),
+            ],
+            RO_CAP: [
+                CallbackQueryHandler(ro_cap_chosen, pattern=r"^roc:"),
+                CallbackQueryHandler(ro_cap_chosen, pattern=r"^rob$"),
+                CallbackQueryHandler(ro_cancel, pattern=r"^rox$"),
+            ],
+            RO_SPEED: [
+                CallbackQueryHandler(ro_speed_chosen, pattern=r"^ros:"),
+                CallbackQueryHandler(ro_speed_chosen, pattern=r"^rob$"),
+                CallbackQueryHandler(ro_cancel, pattern=r"^rox$"),
+            ],
+            RO_CONFIRM: [
+                CallbackQueryHandler(ro_confirm, pattern=r"^rok$"),
+                CallbackQueryHandler(ro_confirm, pattern=r"^rob$"),
+                CallbackQueryHandler(ro_cancel, pattern=r"^rox$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", ro_cancel)],
+        persistent=True,
+        name="renew_orphan_conv",
+    )
+    renew_conv.persistence_ref = persistence
+    application.add_handler(renew_conv)
 
     for name, handler, _desc in BOT_COMMANDS:
         application.add_handler(CommandHandler(name, handler, filters=whitelist))
