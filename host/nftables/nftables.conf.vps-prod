@@ -313,6 +313,8 @@ table ip mangle {
         # VoIP DSCP EF (DAT-VPN-QOS 2026-11) - matches tc u32 tos 0xb8 -> class 1:90
         ip daddr 129.232.214.59 ip dscp set ef comment "voip-ef-dl"
         ip saddr 129.232.214.59 ip dscp set ef comment "voip-ef-ul"
+        ip daddr { 41.1.163.134, 41.1.244.134, 41.50.128.53 } ip dscp set ef comment "vowifi-ef-dl"
+        ip saddr { 41.1.163.134, 41.1.244.134, 41.50.128.53 } ip dscp set ef comment "vowifi-ef-ul"
         # Per-VIP MARK rules added here by bandwidth-monitor.py (FORWARD -d VIP, FORWARD -s VIP)
         comment "Per-VIP MARK rules added by bandwidth-monitor.py"
     }

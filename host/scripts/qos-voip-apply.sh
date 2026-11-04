@@ -23,6 +23,17 @@ else
   log "nft voip EF marks added"
 fi
 
+# --- nft: DSCP EF marking for VoWiFi (WiFi Calling) ePDG peers ---
+# Vodacom (MNC 001) + Cell C (MNC 007) ePDG. IPs are DNS-based and DRIFT — refresh when they change.
+VOWIFI_PEERS="{ 41.1.163.134, 41.1.244.134, 41.50.128.53 }"
+if $NFT list chain ip mangle forward 2>/dev/null | grep -q "vowifi-ef-dl"; then
+  log "nft vowifi EF marks already present, skipping"
+else
+  $NFT add rule ip mangle forward ip daddr $VOWIFI_PEERS ip dscp set ef comment "vowifi-ef-dl" || true
+  $NFT add rule ip mangle forward ip saddr $VOWIFI_PEERS ip dscp set ef comment "vowifi-ef-ul" || true
+  log "nft vowifi EF marks added"
+fi
+
 # --- 1:90 class ---
 if $TC class show dev $IFACE 2>/dev/null | grep -qE "^class htb 1:90 "; then
   log "class 1:90 already present, skipping"
