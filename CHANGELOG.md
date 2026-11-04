@@ -6,6 +6,23 @@ this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### v2.7.0 — 2026-11-04
+
+**Latency QOS on the prod VPN: per-customer AQM + restored VoIP priority.** Goal was latency, not throughput.
+
+#### Added
+- `host/scripts/qos-fq-codel-apply.sh` + `host/systemd/qos-fq-codel.{service,timer}` — per-customer `fq_codel` AQM leaf on every HTB class on `ens3` (10 Mbit -> `limit 600`, 20 Mbit -> `limit 1000`, `quantum 300`, `target 5ms`, `interval 100ms`, `ecn`). Idempotent; re-asserted every 5 min so new customers get AQM without a restart. RFC 8290 / RFC 8289.
+- `host/scripts/qos-voip-apply.sh` — VoIP `1:90` class + filters, and the nft DSCP-EF marking (`voip-ef-dl`/`voip-ef-ul` for peer 129.232.214.59).
+- `host/nftables/nftables.conf.vps-prod` — the DSCP-EF rules.
+
+#### Fixed
+- VoIP priority had been **lost in the nftables migration** (iptables DSCP half superseded; `qos-voip.service` left disabled, tc class `1:90` gone). Restored in nft; unit re-enabled.
+
+#### Notes
+- The old plain-FIFO leaves (`pfifo`) were the bufferbloat source; `fq_codel` replaces exactly those.
+- MSS clamp left at 1260 (already conservative; raising it is a throughput play with PMTU risk).
+- `ifb0` ingress is vestigial: the customer classes on `ens3` already carry both directions (verified by class counters).
+
 ### v1.4.0 — 2026-06-26
 
 **Phase 5/6 quota metering on nftables + repo alignment with deployed state.**
