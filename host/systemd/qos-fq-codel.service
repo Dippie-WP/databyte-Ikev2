@@ -1,0 +1,16 @@
+# /etc/systemd/system/qos-fq-codel.service
+# Ensure each customer HTB class has an fq_codel leaf (AQM / latency). DAT-VPN-QOS 2026-11.
+# Additive + idempotent: it does not modify the bandwidth-monitor logic, only adds a leaf qdisc.
+[Unit]
+Description=Ensure fq_codel AQM leaves on VPN egress classes
+After=bandwidth-monitor.service ifb-setup.service
+Wants=bandwidth-monitor.service
+Documentation=https://www.rfc-editor.org/rfc/rfc8290
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qos-fq-codel-apply.sh
+
+[Install]
+WantedBy=multi-user.target

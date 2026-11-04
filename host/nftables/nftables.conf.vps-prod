@@ -150,8 +150,15 @@ table ip filter {
 
         # Public services — open ports
         tcp dport 22 accept comment "SSH"
+        tcp dport 2384 ip saddr 100.64.0.0/10 accept comment "Dockhand socat bridge (Tailscale-only)"
         tcp dport { 80, 443 } accept comment "HTTP/HTTPS (nginx → vpn-portal)"
+		tcp dport 2053 counter accept comment "mtproxy-tls (Fake-TLS)"
+        tcp dport 5201 accept comment "iperf3 (speed-test diagnostic)"
+	tcp dport 1194 accept comment "OpenVPN hostile-network (TCP tunnel)"
+        tcp dport 8443 accept comment "OpenVPN hostile-network (TCP tunnel)"
         udp dport { 500, 4500 } accept comment "IKEv2 / IPsec NAT-T"
+        udp dport 53 accept comment "AmneziaWG (AWG) — DPI-resistant obfuscated WG"
+        udp dport 51820 accept comment "WireGuard-pilot (legacy iPhone config)"
         ip protocol esp accept comment "IPsec ESP"
 
         # Rate-limited log + final drop
@@ -183,9 +190,6 @@ table ip filter {
     chain forward {
         type filter hook forward priority filter; policy drop;
 
-        # Established / related (stateful accept first — covers most packet volume)
-        ct state { established, related } accept comment "Accept established/related"
-
         # Docker bridge — docker0 = 172.17.0.0/16, host is 172.17.0.1
         # Accept all packets to/from docker0 (containers)
         iifname "docker0" accept comment "Docker bridge: from docker0"
@@ -204,10 +208,22 @@ table ip filter {
         #   nft list meter ip filter client_src
         #   nft list meter ip filter client_dst
         # Meter rule verdict is `accept` — so VIP traffic is allowed AND counted.
+        #
+        # v1.9.1 (2026-06-27): meters MOVED BEFORE established/related accept.
+        # Previously the established accept was FIRST in the chain, so all
+        # steady-state traffic matched it and bypassed the meters. Only the
+        # initial SYN packets (upload direction) ever incremented client_src;
+        # client_dst (download direction) was always empty. Result: portal
+        # showed 12 MB used while SA actually carried 222 MB. Moving established
+        # AFTER the meters means every packet that touches a VIP first hits
+        # the meter (counter increments), THEN the established accept.
         ip saddr 10.99.0.0/24 meter client_src { ip saddr counter } accept \
             comment "Quota: per-VIP src counter (replaces 254 quota:VIP rules)"
         ip daddr 10.99.0.0/24 meter client_dst { ip daddr counter } accept \
             comment "Quota: per-VIP dst counter (replaces 254 quota:VIP rules)"
+
+        # Established / related (stateful accept AFTER meters so all packets are counted)
+        ct state { established, related } accept comment "Accept established/related"
 
         # TCPMSS clamp — prevents PMTU blackhole on VPN path
         # Original iptables: -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1260
@@ -215,6 +231,10 @@ table ip filter {
             comment "TCPMSS clamp for VPN path"
 
         # Counter + final drop (for diagnostics)
+
+        # AWG client (10.5.0.0/24) — bypass quota meters for personal VPN (not customer-facing)
+        ip saddr 10.5.0.0/24 accept comment "AWG forward: client to internet"
+        ip daddr 10.5.0.0/24 accept comment "AWG forward: reply path"
         counter drop comment "Drop other forward"
     }
 
@@ -259,6 +279,10 @@ table ip nat {
         # VPN MASQUERADE — charon source-NATs client traffic leaving VPS
         # Original: -A POSTROUTING -s 10.99.0.0/24 ! -d 10.99.0.0/24 -j MASQUERADE
         ip saddr 10.99.0.0/24 ip daddr != 10.99.0.0/24 masquerade \
+
+        # AWG MASQUERADE — personal AWG client traffic to internet
+        ip saddr 10.5.0.0/24 ip daddr != 10.5.0.0/24 masquerade comment "AWG MASQ — AWG client to internet"
+        ip saddr 10.66.0.0/24 ip daddr != 10.66.0.0/24 masquerade comment "OpenVPN MASQ — client to internet"
             comment "VPN MASQ — charon client traffic"
     }
 }
@@ -286,6 +310,9 @@ table ip mangle {
         ip protocol tcp tcp flags syn,rst tcp option maxseg size set 1260 \
             comment "TCPMSS clamp (mangle)"
 
+        # VoIP DSCP EF (DAT-VPN-QOS 2026-11) - matches tc u32 tos 0xb8 -> class 1:90
+        ip daddr 129.232.214.59 ip dscp set ef comment "voip-ef-dl"
+        ip saddr 129.232.214.59 ip dscp set ef comment "voip-ef-ul"
         # Per-VIP MARK rules added here by bandwidth-monitor.py (FORWARD -d VIP, FORWARD -s VIP)
         comment "Per-VIP MARK rules added by bandwidth-monitor.py"
     }

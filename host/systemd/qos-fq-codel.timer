@@ -1,0 +1,14 @@
+# /etc/systemd/system/qos-fq-codel.timer
+# Re-assert fq_codel leaves so newly-added customers get AQM within 5 min.
+# Idempotent: the applier skips classes that already have an fq_codel leaf.
+[Unit]
+Description=Re-assert fq_codel AQM leaves on VPN egress classes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=qos-fq-codel.service
+
+[Install]
+WantedBy=timers.target
