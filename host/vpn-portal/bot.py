@@ -782,7 +782,8 @@ async def cmd_sessions(update, context):
                 return "?"
             if isinstance(ts, str):
                 ts = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-            ts_utc = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+            # AcctStartTime/AcctStopTime are host-local (SAST), not UTC (audit 2026-11-05).
+            ts_utc = ts.replace(tzinfo=SAST) if ts.tzinfo is None else ts
             return ts_utc.astimezone(SAST).strftime("%Y-%m-%d %H:%M")
         def fmt_dur(seconds):
             seconds = int(seconds or 0)
@@ -848,7 +849,8 @@ async def cmd_customers(update, context):
             return "never"
         if isinstance(ts, str):
             ts = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
-        ts_utc = ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts
+        # last_session_at copies AcctStopTime = host-local (SAST), not UTC (audit 2026-11-05).
+        ts_utc = ts.replace(tzinfo=SAST) if ts.tzinfo is None else ts
         return ts_utc.astimezone(SAST).strftime("%Y-%m-%d %H:%M") + " SAST"
 
     lines = ["*Customers*", ""]
@@ -1758,7 +1760,8 @@ async def cmd_logs(update, context):
     import app
     from datetime import datetime, timezone, timedelta
     SAST = timezone(timedelta(hours=2))
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).replace(tzinfo=None)
+    # authdate is host-local (SAST), not UTC (audit 2026-11-05)
+    cutoff = (datetime.now(SAST) - timedelta(days=7)).replace(tzinfo=None)
 
     auths = app.db_query(
         "SELECT authdate, username, reply "
@@ -1776,7 +1779,8 @@ async def cmd_logs(update, context):
         if isinstance(ad, str):
             ad = datetime.strptime(ad, "%Y-%m-%d %H:%M:%S")
         if ad.tzinfo is None:
-            ad = ad.replace(tzinfo=timezone.utc)
+            # authdate is written in host-local time (SAST), not UTC (audit 2026-11-05).
+            ad = ad.replace(tzinfo=SAST)
         ad_sast = ad.astimezone(SAST).strftime("%Y-%m-%d %H:%M")
         reply = r.get("reply") or "?"
         icon = "\u2705" if "Accept" in reply else "\u274c"
