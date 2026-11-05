@@ -324,8 +324,10 @@ def recent_sessions(limit: int = 2, exclude_usernames=None, lookback_days: int =
     AcctStopTime, AcctSessionTime, AcctInputOctets, AcctOutputOctets.
     """
     from datetime import datetime, timezone, timedelta
+    SAST = timezone(timedelta(hours=2))
     exclude_usernames = exclude_usernames or []
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).replace(tzinfo=None)
+    # AcctStopTime is written in host-local time (SAST), not UTC (audit 2026-11-05).
+    cutoff = (datetime.now(SAST) - timedelta(days=lookback_days)).replace(tzinfo=None)
     base_select = (
         "SELECT r.UserName, r.FramedIPAddress, r.AcctStartTime, r.AcctStopTime, "
         "       r.AcctSessionTime, r.AcctInputOctets, r.AcctOutputOctets "
@@ -2560,7 +2562,7 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         sets.append(f"tier_id = {int(tier_id)}")
         # TKT-011 v2.0 — Q1=(a) Reset: expires_at = NOW() + duration_days (treat as new purchase)
         if duration_days is not None:
-            sets.append(f"expires_at = DATE_ADD(NOW(), INTERVAL {int(duration_days)} DAY)")
+            sets.append(f"expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL {int(duration_days)} DAY)")
 
     if not sets:
         # v1.7.0 — speed_plan='custom' sent standalone is a meaningful no-op
