@@ -924,6 +924,7 @@ SPEED_PLAN_LABELS = {
     "pro":      "Pro 40/20",
 }
 DURATIONS = [
+    ("1d_trial", "1d trial"),
     ("3d_demo", "3d demo"),
     ("10d",     "10d"),
     ("14d",     "14d"),
@@ -1053,9 +1054,10 @@ def _tier_kb():
 # === 8-step /create flow keyboard builders (added 2026-10-15) ===
 
 def _duration_kb():
-    """1 row of 6 duration buttons + Cancel."""
-    row = [InlineKeyboardButton(label, callback_data=f"cd:{key}") for key, label in DURATIONS]
-    return _kb([row, [InlineKeyboardButton("Cancel", callback_data="cx")]])
+    """2 rows of duration buttons (4+3) + Cancel."""
+    row1 = [InlineKeyboardButton(label, callback_data=f"cd:{key}") for key, label in DURATIONS[:4]]
+    row2 = [InlineKeyboardButton(label, callback_data=f"cd:{key}") for key, label in DURATIONS[4:]]
+    return _kb([row1, row2, [InlineKeyboardButton("Cancel", callback_data="cx")]])
 
 
 def _cap_kb():
@@ -1249,7 +1251,7 @@ async def ct_notes_entered(update, context):
             context.user_data["ct_notes"] = text_in
     # Compute expiry date
     import datetime as _dt
-    days_map = {"3d_demo": 3, "10d": 10, "14d": 14, "21d": 21, "30d": 30, "40d": 40}
+    days_map = {"1d_trial": 1, "3d_demo": 3, "10d": 10, "14d": 14, "21d": 21, "30d": 30, "40d": 40}
     dur_key = context.user_data.get("ct_duration", "10d")
     days = days_map.get(dur_key, 10)
     expires_at = (_dt.datetime.utcnow() + _dt.timedelta(days=days)).strftime("%Y-%m-%d")
@@ -2193,6 +2195,7 @@ async def cmd_cleanup_orphans(update, context):
 RO_SELECT, RO_DURATION, RO_CAP, RO_SPEED, RO_CONFIRM = range(10, 15)
 
 RO_DURATIONS = [
+    ("1d_trial", "1d trial"),
     ("3d_demo", "3d demo"),
     ("7d",      "7d"),
     ("10d",     "10d"),
@@ -2201,7 +2204,7 @@ RO_DURATIONS = [
     ("30d",     "30d"),
     ("40d",     "40d"),
 ]
-RO_DAYS = {"3d_demo": 3, "7d": 7, "10d": 10, "14d": 14, "21d": 21, "30d": 30, "40d": 40}
+RO_DAYS = {"1d_trial": 1, "3d_demo": 3, "7d": 7, "10d": 10, "14d": 14, "21d": 21, "30d": 30, "40d": 40}
 
 
 class RenewOrphanError(Exception):
