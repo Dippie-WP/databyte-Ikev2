@@ -745,6 +745,16 @@ async def cmd_sessions(update, context):
     import app
     from datetime import datetime, timezone, timedelta
 
+    def fmt_bytes(n):
+        n = int(n or 0)
+        if n < 1024:
+            return f"{n} B"
+        if n < 1024**2:
+            return f"{n/1024:.1f} KB"
+        if n < 1024**3:
+            return f"{n/1024**2:.1f} MB"
+        return f"{n/1024**3:.2f} GB"
+
     sessions = app.swanctl_parse_sas()
     lines = ["*Active Sessions*"]
     if not sessions:
@@ -758,7 +768,7 @@ async def cmd_sessions(update, context):
             bi = s.get("bytes_in", 0)
             bo = s.get("bytes_out", 0)
             lines.append(
-                f"- `{rid}` `{rip}` -> `{vip}` `{st}` (in:{bi:,} out:{bo:,})"
+                f"- `{rid}` `{rip}` -> `{vip}` `{st}` (in: {fmt_bytes(bi)} / out: {fmt_bytes(bo)})"
             )
     # Inline keyboard: one [Disconnect] button per session row.
     # callback_data fits 64-byte Telegram limit ("disc:" + EAP identity).
@@ -794,15 +804,6 @@ async def cmd_sessions(update, context):
                 return f"{m}m {s}s"
             h, m = divmod(m, 60)
             return f"{h}h {m:02d}m"
-        def fmt_bytes(n):
-            n = int(n or 0)
-            if n < 1024:
-                return f"{n} B"
-            if n < 1024**2:
-                return f"{n/1024:.1f} KB"
-            if n < 1024**3:
-                return f"{n/1024**2:.1f} MB"
-            return f"{n/1024**3:.2f} GB"
         for i, r in enumerate(recent, 1):
             rname = r.get("UserName") or "?"
             rip = r.get("FramedIPAddress") or "?"
@@ -2787,7 +2788,7 @@ async def cmd_usage(update, context):
         "SELECT name, data_used_bytes FROM customers "
         "WHERE COALESCE(is_operator, 0) = 0 ORDER BY data_used_bytes DESC LIMIT 12"
     )
-    lines = ["*Usage* (top by all-time bytes)", ""]
+    lines = ["*Usage* (top by data used since last reset)", ""]
     for i, r in enumerate(rows, 1):
         lines.append(f"{i}. `{r['name']}` -- {fmt(r['data_used_bytes'])}")
     lines.append("")
