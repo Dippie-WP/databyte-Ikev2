@@ -156,7 +156,7 @@ Zun asked for git versioning of all the work. Decisions:
 Work:
 1. Created GitHub repo `Dippie-WP/strongswan-vpn-gateway` (Zun clicked "new repo" on github.com)
 2. Generated PAT, tested scope (could not create-repo, fine-grained token; Zun created the repo manually)
-3. Created local repo at `/root/.openclaw/workspace/_projects/003_Databyte-Prod-VPN/vpn-portal/`
+3. Created local repo at `/root/projects/strongswan-vpn-gateway/`
 4. Migrated all source files from LXC 902 `/home/zunaid/strongswan/` (stripping live certs/keys, keeping structure)
 5. Wrote 5 docs: README, ROADMAP, ARCHITECTURE, DEPLOYMENT, ISSUES-LOG, SESSION-HISTORY (this)
 6. Wrote 5 scripts: gen-certs, seed-db, build-image, db-backup, rollback-v1.1
@@ -182,16 +182,3 @@ Zun's standing rule that helped today: **"we only work with facts and evidence n
 - 5C surface (waiting for 5B)
 - 5D commercial (shelved)
 - All the other LXC 902 services (Dockhand, Grafana, Prometheus, Paperless) — out of scope per Zun
-
----
-
-## Update note (2026-07-13, v2.2.0 doc-sync — added by Misha)
-
-This file is a **historical narrative** of 2026-06-18 (UTC). It describes v1.x-era development on LXC 903 and is preserved as-is. It does NOT describe current production, which has moved through several major shifts since this doc was written:
-
-- **v2.0.0 (2026-07-06)**: charon `eap-radius` cutover — customer identities now in MariaDB (FreeRADIUS), not in charon-local SQLite
-- **Phase 4E (2026-07-12)**: portal business data unified into MariaDB
-- **Phase 7.5 (2026-07-09)**: VPS quota counters swapped to nftables
-- **v2.2.0 (2026-07-13)**: FreeRADIUS operator overlay + radacct chain
-
-For current state, see `docs/VPS-XNEELO-DEPLOY.md` "What Gets Deployed" (2026-07-13 update) and `docs/ARCHITECTURE.md` "🟢 Verified-live 2026-07-13" table (this doc-sync commit).

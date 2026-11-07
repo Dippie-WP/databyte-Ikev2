@@ -78,48 +78,6 @@ fi
 info "Loading environment from: ${ENV_FILE}"
 set -a; source "$ENV_FILE"; set +a
 
-# ─── Auto-generate any missing credentials ───────────────────────────────────
-# If OPERATOR_PASSWORD is empty, generate a strong one and write it back to
-# the env file. Same for DEMO_CUSTOMER_PASSWORD and FRIEND_PSK. This means
-# the operator only needs to fill in SERVER_ID + PUBLIC_IPV4 + RUSTFS_* —
-# everything else is generated and persisted to .env.xneelo.
-gen_password() {
-    # 4× 8-char segments, no ambiguous chars (0/O/1/l/I), ~200 bits entropy
-    python3 -c "
-import secrets, string
-alphabet = ''.join(c for c in string.ascii_letters + string.digits if c not in '0O1lI')
-print('-'.join([''.join(secrets.choice(alphabet) for _ in range(8)) for _ in range(4)]))
-"
-}
-
-write_back_env() {
-    # Update or add KEY=VALUE in the env file (preserves quoting and comments)
-    local key="$1" value="$2"
-    if grep -q "^${key}=" "$ENV_FILE"; then
-        sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$ENV_FILE"
-    else
-        echo "${key}=\"${value}\"" >> "$ENV_FILE"
-    fi
-}
-
-if [[ -z "${OPERATOR_PASSWORD:-}" ]]; then
-    OPERATOR_PASSWORD="$(gen_password)"
-    write_back_env OPERATOR_PASSWORD "$OPERATOR_PASSWORD"
-    info "Auto-generated OPERATOR_PASSWORD (32 chars, written to .env.xneelo)"
-fi
-if [[ -z "${DEMO_CUSTOMER_PASSWORD:-}" ]]; then
-    DEMO_CUSTOMER_PASSWORD="$(gen_password)"
-    write_back_env DEMO_CUSTOMER_PASSWORD "$DEMO_CUSTOMER_PASSWORD"
-    info "Auto-generated DEMO_CUSTOMER_PASSWORD (32 chars, written to .env.xneelo)"
-fi
-if [[ -z "${FRIEND_PSK:-}" ]]; then
-    FRIEND_PSK="$(openssl rand -base64 32 | tr -d '/+=' | head -c 48)"
-    write_back_env FRIEND_PSK "$FRIEND_PSK"
-    info "Auto-generated FRIEND_PSK (48 chars base64, written to .env.xneelo)"
-fi
-# Re-source to pick up the newly-written values
-set -a; source "$ENV_FILE"; set +a
-
 # ─── Validation ────────────────────────────────────────────────────────────────
 REQUIRED=("PUBLIC_IPV4" "SERVER_ID" "OPERATOR_USER" "OPERATOR_PASSWORD" "DEMO_CUSTOMER_USER" "DEMO_CUSTOMER_VIP")
 for var in "${REQUIRED[@]}"; do
@@ -131,8 +89,8 @@ ok "All required variables are set."
 
 # ─── Pre-flight ──────────────────────────────────────────────────────────────
 info "=== Pre-flight checks ==="
-[[ "$(whoami)" == "root" ]] || die "Must run as root"
-uname -s | grep -q "Linux" || die "Not Linux?"
+whoami == root || die "Must run as root"
+uname -r | grep -qE "Linux" || die "Not Linux?"
 ok "Running as root on Linux"
 
 # Detect OS
@@ -159,7 +117,7 @@ if [[ -z "${INTERNAL_IFACE:-}" ]]; then
 fi
 
 # ─── Step 1: apt update + install packages ───────────────────────────────────
-info "=== Step 1/19: Updating apt and installing packages ==="
+info "=== Step 1/16: Updating apt and installing packages ==="
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq \
@@ -167,10 +125,8 @@ apt-get install -y -qq \
     curl \
     gnupg \
     lsb-release \
-    iptables \
-    arptables \
-    ebtables \
     docker.io \
+    docker-compose-plugin \
     rclone \
     sqlite3 \
     unattended-upgrades \
@@ -180,18 +136,12 @@ apt-get install -y -qq \
     openssl \
     sudo \
     git \
+    ufw \
     bc \
     dnsutils \
     net-tools \
     > /dev/null 2>&1
-
-# Switch to iptables-legacy (Debian 13 ships iptables-nft by default,
-# but our strongSwan container + bandwidth-monitor use iptables-legacy).
-update-alternatives --set iptables   /usr/sbin/iptables-legacy  >/dev/null 2>&1 || true
-update-alternatives --set ip6tables  /usr/sbin/ip6tables-legacy >/dev/null 2>&1 || true
-update-alternatives --set arptables  /usr/sbin/arptables-legacy  >/dev/null 2>&1 || true
-update-alternatives --set ebtables   /usr/sbin/ebtables-legacy   >/dev/null 2>&1 || true
-ok "Packages installed + iptables-legacy set as default."
+ok "Packages installed."
 
 # ─── Step 2: Disable root SSH login ─────────────────────────────────────────
 info "=== Step 2/16: Disabling root SSH login ==="
@@ -260,8 +210,8 @@ rkhunter --propupd 2>/dev/null
 ok "rkhunter configured."
 
 # ─── Step 7: Sysctl hardening ────────────────────────────────────────────────
-info "=== Step 7/19: Applying sysctl hardening ==="
-cat >> /etc/sysctl.d/99-strongswan.conf << EOF
+info "=== Step 7/16: Applying sysctl hardening ==="
+cat >> /etc/sysctl.d/99-strongswan.conf << 'EOF'
 
 # ── Xneelo VPS bootstrap ──────────────────────────────────────────────────
 # VPN gateway: forward traffic from VPN clients
@@ -313,20 +263,6 @@ COMMIT
 :FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
 
-# ── Loopback ───────────────────────────────────────────────────────────────
-# CRITICAL: charon VICI listens on 127.0.0.1:4502 (TCP). Without this rule,
-# INPUT policy DROP blocks the loopback SYN and the start-scripts (swanctl
-# --load-creds/--load-conns/--load-pools) all timeout. Symptom: charon
-# appears running, port 4502 shows LISTEN in `ss`, but every swanctl call
-# hangs forever. (Hit on Xneelo VPS 154.65.110.44 deploy 2026-06-22.)
-# Also: many services (systemd-resolved, docker bridge) rely on loopback.
--A INPUT -i lo -j ACCEPT
-
-# ── VICI socket (operator) ────────────────────────────────────────────────
-# Loopback-only by default. Accept TCP 4502 from anywhere on the public
-# interface too — in case we add a future remote operator port forward.
--A INPUT -p tcp --dport 4502 -j ACCEPT
-
 # ── VPN clients (10.99.0.0/24) ─────────────────────────────────────────────
 # Allow all traffic to/from VPN subnet
 -A INPUT  -s 10.99.0.0/24 -j ACCEPT
@@ -351,13 +287,6 @@ COMMIT
 # ── Established/related ─────────────────────────────────────────────────────
 -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-COMMIT
-
-*nat
-:PREROUTING ACCEPT [0:0]
-:INPUT ACCEPT [0:0]
-:OUTPUT ACCEPT [0:0]
-:POSTROUTING ACCEPT [0:0]
 # ── NAT for VPN clients ────────────────────────────────────────────────────
 # MASQUERADE VPN client traffic going out the public interface
 -A POSTROUTING -s 10.99.0.0/24 ! -d 10.99.0.0/24 -m comment --comment "VPN MASQ" -j MASQUERADE
@@ -400,19 +329,14 @@ cd /opt/strongswan-vpn-gateway/docker
 # rw-eap.conf — fill in the server ID and secrets block
 sed "s/vpn\.homelab\.local/${SERVER_ID}/" swanctl/conf.d/rw-eap.conf.template > swanctl/conf.d/rw-eap.conf
 
-# Add operator + demo customer EAP secrets to rw-eap.conf secrets block
-# (Note: strongSwan stores the plaintext for MSCHAPv2; NTLM hash alternative
-# requires xxd + openssl-legacy, not used here. Plaintext works fine.)
+# Add operator EAP secret to rw-eap.conf secrets block
+OPERATOR_NTLM=$(echo -n "${OPERATOR_PASSWORD}" | iconv -t utf-16le | openssl md4 -binary | xxd -p -c 256)
 cat >> swanctl/conf.d/rw-eap.conf << EOF
 
 secrets {
     eap-operator {
         id = ${OPERATOR_USER}
         secret = "${OPERATOR_PASSWORD}"
-    }
-    eap-demo-customer {
-        id = ${DEMO_CUSTOMER_USER}
-        secret = "${DEMO_CUSTOMER_PASSWORD}"
     }
 }
 EOF
@@ -515,56 +439,13 @@ ok "DB backup cron installed (daily at ${CRON_H}:${CRON_M} UTC)."
 info "=== Step 17/19: Installing bandwidth-monitor service ==="
 # On the Xneelo VPS, the ifb module can be loaded (full kernel access).
 # We enable it at boot so ingress shaping works.
-#
-# IMPORTANT: /etc/modules-load.d/ifb.conf only loads the module — it does NOT
-# create the ifb0 device. The `numifbs=1` parameter must be passed to modprobe
-# explicitly. We use a dedicated systemd service (ifb-setup.service) to:
-#   1. modprobe ifb numifbs=1   — preferred: create only ifb0, no ifb1
-#   2. ip link add ifb0 type ifb — fallback if step 1 silently no-ops because
-#                                  module was already loaded with numifbs=0.
-#                                  `ip link add` returns "File exists" if
-#                                  ifb0 is already there — non-fatal.
-#   3. ip link set ifb0 up      — bring it up
-# All three wrapped in `... || true` so a single failure doesn't break boot.
-# Hit on Xneelo VPS 2026-06-22: ifb module loaded at boot but ifb0 didn't
-# exist, daemon warned "ifb0 not available (likely LXC without host module
-# access)" — wrong diagnosis. Root cause: modules-load.d doesn't pass
-# parameters, so the default 2 ifb devices were created but later removed,
-# or never created.
-#
-# DO NOT add `rmmod ifb` here. On 2026-06-25 that pattern was tried, and
-# bandwidth-monitor's tc filter still referenced ifb0 — every packet flooded
-# the kernel log with "tc mirred to Houston: device ifb0 is down", wedging
-# the VPS for ~2 hours. Safer approach: use `ip link add` (this script), which
-# doesn't touch the kernel module.
-cat > /etc/systemd/system/ifb-setup.service << 'EOF'
-[Unit]
-Description=Create ifb0 device for ingress bandwidth shaping
-After=network-pre.target
-Before=network.target bandwidth-monitor.service
-DefaultDependencies=no
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/sh -c 'modprobe ifb numifbs=1 2>/dev/null || true'
-ExecStart=/bin/sh -c 'ip link show ifb0 >/dev/null 2>&1 || ip link add ifb0 type ifb 2>/dev/null || true'
-ExecStart=/sbin/ip link set ifb0 up
-
-[Install]
-WantedBy=multi-user.target
+cat > /etc/modules-load.d/ifb.conf << 'EOF'
+# Load ifb for ingress bandwidth shaping (per-user download limits)
+ifb
 EOF
-systemctl daemon-reload
-systemctl enable ifb-setup.service
-systemctl start ifb-setup.service
-sleep 1
 
-# Verify ifb0 exists and is up
-if ip link show ifb0 2>/dev/null | grep -q "UP"; then
-    ok "ifb0 device created and UP (ingress shaping available)"
-else
-    warn "ifb0 not UP; ingress shaping will be disabled (egress only)"
-fi
+# Verify the module loads now
+modprobe ifb numifbs=1 2>/dev/null && ok "ifb module loaded (ingress shaping available)" || warn "ifb module load failed; ingress shaping will be disabled (egress only)"
 
 # Copy the bandwidth-monitor.py + service file from the cloned repo
 cd /opt/strongswan-vpn-gateway
@@ -589,69 +470,6 @@ else
     warn "bandwidth-monitor service failed to start. Check: journalctl -u bandwidth-monitor"
 fi
 
-# ─── Step 18: Install quota-monitor + strongswan-iptables-watchdog ──
-# Hit on Xneelo VPS 2026-06-25: data_used_bytes stayed 0 forever because
-# quota-monitor.service was never deployed. Two missing pieces:
-#   1. Per-VIP iptables byte counters in FORWARD chain (508 rules) — quota/
-#      install_quota_rules.sh
-#   2. quota-monitor.py daemon that reads counters + updates customers.
-#      .data_used_bytes (60s poll, 80% warn, 100% hard-cut)
-# Plus the strongswan-iptables-watchdog so the per-VIP rules survive
-# strongswan container restarts (otherwise netfilter-persistent reload would
-# wipe them).
-info "=== Step 18/19: Installing quota-monitor + iptables-watchdog ==="
-cd /opt/strongswan-vpn-gateway
-
-# Symlink swanctl so quota-monitor can find rw-eap.conf for hard-cut
-# (it uses /home/zunaid/strongswan/swanctl/conf.d/rw-eap.conf per the
-# bandwidth-monitor deployment pattern).
-mkdir -p /home/zunaid/strongswan
-ln -sf /opt/strongswan-vpn-gateway/docker/swanctl /home/zunaid/strongswan/swanctl
-
-# Copy quota-monitor.py
-sudo cp quota/quota-monitor.py /home/zunaid/strongswan/quota/quota-monitor.py 2>/dev/null || \
-    { mkdir -p /home/zunaid/strongswan/quota
-      sudo cp quota/quota-monitor.py /home/zunaid/strongswan/quota/quota-monitor.py; }
-sudo chown root:root /home/zunaid/strongswan/quota/quota-monitor.py
-sudo chmod 755 /home/zunaid/strongswan/quota/quota-monitor.py
-
-# Install quota-monitor.service
-sudo cp host/systemd/quota-monitor.service /etc/systemd/system/quota-monitor.service
-sudo chown root:root /etc/systemd/system/quota-monitor.service
-sudo chmod 644 /etc/systemd/system/quota-monitor.service
-
-# Install strongswan-iptables-watchdog (re-applies rules.v4 on container events)
-sudo cp host/systemd/strongswan-iptables-watchdog.sh /usr/local/bin/strongswan-iptables-watchdog.sh
-sudo cp host/systemd/strongswan-iptables-watchdog.service /etc/systemd/system/strongswan-iptables-watchdog.service
-sudo chown root:root /usr/local/bin/strongswan-iptables-watchdog.sh /etc/systemd/system/strongswan-iptables-watchdog.service
-sudo chmod +x /usr/local/bin/strongswan-iptables-watchdog.sh
-sudo chmod 644 /etc/systemd/system/strongswan-iptables-watchdog.service
-
-# Install the per-VIP iptables counter rules (idempotent — safe to re-run)
-sudo bash quota/install_quota_rules.sh > /tmp/install_quota_rules.log 2>&1
-if [ $? -eq 0 ]; then
-    ok "Per-VIP quota counter rules installed (508 rules)"
-else
-    warn "install_quota_rules.sh failed; check /tmp/install_quota_rules.log"
-fi
-
-# Enable + start everything
-sudo systemctl daemon-reload
-sudo systemctl enable quota-monitor.service strongswan-iptables-watchdog.service
-sudo systemctl start quota-monitor.service strongswan-iptables-watchdog.service
-sleep 2
-
-if systemctl is-active --quiet quota-monitor; then
-    ok "quota-monitor service active (60s poll)."
-else
-    warn "quota-monitor failed to start. Check: journalctl -u quota-monitor"
-fi
-if systemctl is-active --quiet strongswan-iptables-watchdog; then
-    ok "strongswan-iptables-watchdog service active."
-else
-    warn "strongswan-iptables-watchdog failed to start. Check: journalctl -u strongswan-iptables-watchdog"
-fi
-
 # ─── Smoke test ─────────────────────────────────────────────────────────────
 info ""
 info "=== SMOKE TEST ==="
@@ -669,25 +487,12 @@ systemctl is-active fail2ban | grep -q "active" && ok "fail2ban running" || warn
 echo ""
 ok "=== Bootstrap complete ==="
 info "Next step: Connect a client from outside the VPS (e.g. your phone on LTE)."
-info ""
 info "  Server: ${SERVER_ID}"
 info "  Type:   IKEv2 EAP-MSCHAPv2"
-info ""
-info "  ─── Credentials (auto-generated if left empty) ──────────────────"
-info "  Operator (admin):  ${OPERATOR_USER} / ${OPERATOR_PASSWORD}"
-info "  Demo customer:     ${DEMO_CUSTOMER_USER} / ${DEMO_CUSTOMER_PASSWORD}"
-info "  Friend PSK:        ${FRIEND_PSK:0:8}...${FRIEND_PSK: -8}  (48 chars)"
-info ""
-info "  All credentials also persisted to ${ENV_FILE}"
-info "  CA cert: /opt/strongswan-vpn-gateway/docker/swanctl/x509ca/strongswan-ca.crt.pem"
+info "  User:   ${OPERATOR_USER} / ${OPERATOR_PASSWORD}"
 info ""
 info "Check logs: docker logs strongswan --tail 30"
 info "Full status: docker exec strongswan swanctl --uri=tcp://127.0.0.1:4502 --list-sas"
 info ""
 info "NOTE: Remember to update Cloudflare DNS A record for ${SERVER_ID} → ${PUBLIC_IPV4}"
 info "      Use DNS-only (grey cloud) — Cloudflare proxy does NOT proxy UDP 500/4500."
-info ""
-info "For Windows IKEv2 clients: install the CA cert into Trusted Root CAs"
-info "  PowerShell (admin):"
-info "    Import-Certificate -FilePath \"<path-to-strongswan-ca.crt.pem>\" \\"
-info "      -CertStoreLocation Cert:\\LocalMachine\\Root"
