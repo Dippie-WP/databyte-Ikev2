@@ -701,7 +701,16 @@ class QuotaMonitor:
             self._refresh_session_tracking(db)
             db.commit()
 
-            # 3. TKT-011 v2.0 — kill expired customers (per (c) = #1 Hard-cut + DELETE)
+            # 3. Keep radcheck.Expiration in step with customers.expires_at (2026-11-07)
+            #    Guarded: a sync fault must never stop expiry enforcement below.
+            try:
+                self._sync_expirations(db)
+                db.commit()
+            except Exception as _ex:
+                log.error("expiration sync FAILED - expiry dates may be stale: %s", _ex)
+
+
+            # 4. Expired customers: soft-cut (mark expired, keep credentials) — 2026-11-07
             self._kill_expired_customers(db)
             db.commit()
         finally:
@@ -768,31 +777,84 @@ class QuotaMonitor:
             n_updated += 1
         log.info("refreshed session tracking for %d customer(s) (of %d radacct usernames)", n_updated, len(rows))
 
+    def _sync_expirations(self, db) -> None:
+        """Keep radcheck.Expiration in step with customers.expires_at (2026-11-07).
+
+        Single writer for the expiry date: covers customer create / renew /
+        tier-change / backfill automatically, so no per-call-site wiring is needed
+        and any drift self-heals on the next pass.
+
+        FORMAT IS LOAD-BEARING. FreeRADIUS accepts only "DD MMM YYYY[ HH:MM[:SS]]".
+        A malformed value is rejected by rlm_sql ("failed to parse time string")
+        -> "Invalid user" -> Access-Reject: it fails CLOSED and locks the customer
+        out immediately. /usr/local/bin/vpn-expiration-canary.py guards this daily.
+        """
+        MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT u.name AS identity, c.expires_at AS exp, r.value AS current
+            FROM customers c
+            JOIN users u ON u.id = c.user_id
+            LEFT JOIN radcheck r
+                   ON r.username = u.name COLLATE utf8mb4_general_ci
+                  AND r.attribute = 'Expiration'
+            WHERE c.is_operator = 0 AND u.name IS NOT NULL
+        """)
+        changed = 0
+        for row in cursor.fetchall():
+            ident = row['identity']
+            exp = row['exp']
+            current = row['current']
+            if isinstance(exp, str):
+                try:
+                    from datetime import datetime as _dt
+                    exp = _dt.strptime(exp, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    log.warning("expiration sync: cannot parse expires_at %r for %s", exp, ident)
+                    continue
+            if exp is None:
+                if current is not None:
+                    cursor.execute("DELETE FROM radcheck WHERE username = %s "
+                                   "AND attribute = 'Expiration'", (ident,))
+                    changed += 1
+                continue
+            desired = "%d %s %d %02d:%02d:%02d" % (
+                exp.day, MONTHS[exp.month - 1], exp.year, exp.hour, exp.minute, exp.second)
+            if current != desired:
+                cursor.execute("DELETE FROM radcheck WHERE username = %s "
+                               "AND attribute = 'Expiration'", (ident,))
+                cursor.execute("INSERT INTO radcheck (username, attribute, op, value) "
+                               "VALUES (%s, 'Expiration', ':=', %s)", (ident, desired))
+                log.info("expiration sync: %s -> %r", ident, desired)
+                changed += 1
+        if changed:
+            log.info("expiration sync: %d row(s) reconciled with customers.expires_at", changed)
+
     def _kill_expired_customers(self, db) -> None:
         """Per (c) = #1 Hard-cut + DELETE: at expires_at, kill VPN + delete customer.
 
         TKT-011 v2.0 — kill trigger is time-based, NOT data-cap. For each
-        customer with expires_at < NOW() AND is_active=1:
-          1. disable_customer_radcheck  — delete radcheck rows
-          2. kill_customer_credentials   — remove EAP block from rw-eap.conf
-          3. send_dae_disconnect         — DAE Disconnect-Request
-          4. terminate_customer_sas      — terminate active SAs
-          5. DELETE FROM devices WHERE customer_id = ?
-          6. DELETE FROM customers WHERE id = ?
-          7. log_audit                   — audit log entry
+        customer with expires_at < NOW() AND status='active' (2026-11-07):
+          1. send_dae_disconnect         — DAE Disconnect-Request  (unchanged)
+          2. terminate_customer_sas      — terminate active SAs    (unchanged)
+          3. UPDATE customers SET status='expired'                 (NEW: no delete)
+          4. log_audit                   — audit log entry
+        Credentials, eap block, devices and the customer row are all KEPT.
+        FreeRADIUS enforces the expiry via radcheck.Expiration.
         """
         cursor = db.cursor()
         cursor.execute("""
             SELECT id, name, user_id FROM customers
             WHERE expires_at IS NOT NULL
               AND expires_at < NOW()
-              AND is_active = 1
+              AND status = 'active'
         """)
         expired = cursor.fetchall()
         if not expired:
             log.debug("no expired customers")
             return
-        log.warning("=== %d customer(s) EXPIRED — hard-cut + DELETE per (c) = #1 ===",
+        log.warning("=== %d customer(s) EXPIRED — SOFT-CUT (mark expired, keep credentials) ===",
                     len(expired))
         for row in expired:
             customer_id = row['id']
@@ -813,7 +875,7 @@ class QuotaMonitor:
                 log.warning("customer %s (id=%d) has no user_id linked, "
                             "falling back to customer_name for kill",
                             cust_name, customer_id)
-            log.warning("customer %s (id=%d, device=%s) EXPIRED — killing",
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — terminating session",
                         cust_name, customer_id, auth_id)
             # 2026-10-25 fix (orphan litter): an expiry is a HARD delete. The
             # KILLED- secret marker and the DISABLED- radcheck placeholder belong
@@ -842,25 +904,28 @@ class QuotaMonitor:
                 dae_result = send_dae_disconnect(ident)
                 n_terminated += terminate_customer_sas(ident)
 
-            eap_removed = remove_customer_eap_blocks(db, customer_id, identities)
-
-            # Purge the RADIUS rows outright -- no DISABLED- placeholder left.
-            radcheck_killed = True
-            for ident in identities:
-                cursor.execute("DELETE FROM radcheck WHERE username = %s", (ident,))
-                cursor.execute("DELETE FROM radusergroup WHERE username = %s", (ident,))
-                cursor.execute("DELETE FROM radreply WHERE username = %s", (ident,))
-            rw_eap_killed = eap_removed > 0
-            cursor.execute("DELETE FROM devices WHERE customer_id = %s", (customer_id,))
-            cursor.execute("DELETE FROM customers WHERE id = %s", (customer_id,))
-            log_audit(db, "quota-monitor", "expired_delete", "customer", customer_id,
+            # 2026-11-07 SOFT-CUT — NOTHING is deleted.
+            # The credential rows, the rw-eap.conf block, radusergroup, radreply,
+            # the device row and the customer row all survive, so the device can
+            # reconnect the moment the expiry is extended. Enforcement is delegated
+            # to FreeRADIUS via the Expiration check item kept in step by
+            # _sync_expirations(). Removing the eap block (as the old code did)
+            # would break the identity outright — never do that on expiry.
+            radcheck_killed = False
+            rw_eap_killed = False
+            eap_removed = 0
+            cursor.execute(
+                "UPDATE customers SET status = 'expired', updated_at = UNIX_TIMESTAMP() "
+                "WHERE id = %s", (customer_id,))
+            log_audit(db, "quota-monitor", "expired_softcut", "customer", customer_id,
                       f'{{"name": "{cust_name}", "auth_id": "{auth_id}", '
                       f'"radcheck_killed": {radcheck_killed}, '
                       f'"rw_eap_killed": {rw_eap_killed}, '
                       f'"eap_blocks_removed": {eap_removed}, '
                       f'"identities": {identities}, "sas_terminated": {n_terminated}, '
                       f'"dae_result": "{dae_result}"}}')
-            log.warning("customer %s (id=%d, device=%s) EXPIRED — killed and deleted",
+            log.warning("customer %s (id=%d, device=%s) EXPIRED — marked expired, "
+                        "credentials kept (reconnect after extending expires_at)",
                         cust_name, customer_id, auth_id)
 
     def _warn_customer(self, db, cust: dict, data_used: int, pct: float) -> None:
