@@ -28,6 +28,7 @@ Production build (v1.0.0+, 2026-06-24): live at https://vpn-portal.databyte.co.z
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import subprocess
 import time
@@ -779,6 +780,93 @@ def enable_customer_radcheck(username: str, plaintext_password: str, nt_hash_hex
         )
         conn.commit()
         log.info(f"radcheck: re-enabled {username}")
+
+
+# ---------------------------------------------------------------------------
+# Expiration check item — added 2026-11-07 (prod VPN graceful-expiry work)
+#
+# rlm_expiration enforces the `Expiration` check item. Two hard rules, BOTH
+# proven by live spike against this server on 2026-11-07 (PAP radtest +
+# eapol_test EAP-MSCHAPv2, throwaway identities):
+#
+#   1. The value MUST be "DD MMM YYYY[ HH:MM[:SS]]"  e.g. "8 Nov 2026 13:10:24".
+#      Accepted variants: "8 Nov 2027", "8 Nov 2027 13:10", "08 Nov 2027 13:10:24".
+#      REJECTED by rlm_sql: ISO ("2026-10-12 00:00:00"), date(1) output
+#      ("Sat Nov  7 16:27:30 SAST 2026"), and every timezone-suffixed variant.
+#
+#   2. A malformed value FAILS CLOSED. rlm_sql logs
+#      "Error parsing value: failed to parse time string" -> "Invalid user"
+#      -> Access-Reject. It does NOT ignore the row. A bad date locks the
+#      customer out immediately, and the message reads like a missing account.
+#
+# Therefore nothing may write this attribute directly: always go through
+# format_expiration() / set_customer_expiration().
+# EAP path verified: future date -> Login OK; past date ->
+# "expiration: Account expired at '...'".
+# ---------------------------------------------------------------------------
+
+EXPIRATION_ATTR = "Expiration"
+EXPIRATION_RE = re.compile(r"^\d{1,2} [A-Z][a-z]{2} \d{4}( \d{2}:\d{2}(:\d{2})?)?$")
+
+
+def format_expiration(expiry) -> str:
+    """Render a FreeRADIUS-parseable Expiration value; raise on anything else.
+
+    Accepts a datetime/date, or a pre-formatted string (validated as-is).
+    Raises ValueError rather than returning a value rlm_sql would reject --
+    a malformed value rejects the user outright (see the module note above).
+    """
+    if isinstance(expiry, str):
+        value = expiry.strip()
+    else:
+        value = "%d %s %d %02d:%02d:%02d" % (
+            expiry.day,
+            expiry.strftime("%b"),
+            expiry.year,
+            getattr(expiry, "hour", 0),
+            getattr(expiry, "minute", 0),
+            getattr(expiry, "second", 0),
+        )
+    if not EXPIRATION_RE.match(value):
+        raise ValueError(
+            "Expiration value %r is not the accepted format "
+            "'DD MMM YYYY[ HH:MM[:SS]]' -- refusing to write it (a malformed "
+            "value makes rlm_sql reject the user outright)." % (value,)
+        )
+    return value
+
+
+def set_customer_expiration(username: str, expiry) -> str:
+    """UPSERT the Expiration check item for an EAP identity. Returns the value.
+
+    Idempotent: replaces any existing Expiration row for this username.
+    """
+    value = format_expiration(expiry)
+    with _db() as conn:
+        conn.execute("DELETE FROM radcheck WHERE username = ? AND attribute = ?",
+                     (username, EXPIRATION_ATTR))
+        conn.execute(
+            "INSERT INTO radcheck (username, attribute, op, value) VALUES (?, ?, ':=', ?)",
+            (username, EXPIRATION_ATTR, value),
+        )
+        conn.commit()
+    log.info(f"radcheck: set Expiration={value!r} for {username}")
+    return value
+
+
+def clear_customer_expiration(username: str) -> int:
+    """Remove the Expiration check item (account no longer time-limited).
+
+    Returns the number of rows deleted. The credential rows are untouched --
+    that is the point of this design: expiry is authorisation, not credentials.
+    """
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM radcheck WHERE username = ? AND attribute = ?",
+                           (username, EXPIRATION_ATTR))
+        conn.commit()
+        n = getattr(cur, "rowcount", 0)
+    log.info(f"radcheck: cleared Expiration for {username} ({n} row(s))")
+    return n
 
 
 def add_customer_usergroup(username: str, groupname: str = "default", priority: int = 0):
