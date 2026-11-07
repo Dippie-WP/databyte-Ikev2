@@ -87,7 +87,7 @@ secrets {
   }
   ike-psk {
     id = vpn.example.com
-    secret = "jzm+7IIsL+8lXwktTn8M5+kV4VTM2L1KjAotUQtKMyc="  # generate your own
+    secret = "REPLACE_WITH_YOUR_OWN_BASE64_PSK"  # generate your own
   }
 }
 ```
