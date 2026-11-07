@@ -3,7 +3,7 @@
 **Status:** ⏳ NOT STARTED — last-last phase per Zun (2026-06-20 10:45 UTC)
 **Owner:** Misha + Zun sign-off
 **Target version:** v2.0 (HA+LB is a major architecture change)
-**Phase placement:** After 5B (quota) sign-off, before 5D (commercial). Currently 5D is SHELVED.
+**Phase placement:** After 5B (quota) sign-off, before 5D. **5D was SHELVED as SaaS billing (2026-06-19) and repurposed 2026-07-05 as the RADIUS migration (FreeRADIUS + daloRADIUS) — currently 🟡 In progress.** HA + LB still follows 5D completion; this doc remains valid as the plan-of-record for that future work.
 
 ---
 
@@ -11,7 +11,7 @@
 
 **Single-point-of-failure today:** LXC 903 (vpn-gateway, 192.168.10.98) hosts the entire VPN stack — charon in Docker + the FastAPI portal + quota-monitor + the SQLite DB. If that container dies, all customers disconnect simultaneously. They reconnect manually after recovery.
 
-**Customer-facing SLA:** Per the ToS §7 "Experimental Nature of the Service" we currently make no SLA promise. But Zun's commercial ambition (5D, shelved) requires a tier-1 reliability story. HA+LB is the foundation.
+**Customer-facing SLA:** Per the ToS §7 "Experimental Nature of the Service" we currently make no SLA promise. But Zun's commercial ambition (5D = RADIUS migration, in progress since 2026-07-05, building toward SaaS billing and multi-customer onboarding) will eventually require a tier-1 reliability story. HA+LB is the foundation for that future step.
 
 **Zun's principle (LOCKED 2026-06-19):** "When production is solid, recovery = HA/LB (more of the same), not version regression (fall back to older broken version). v1.1 fallback = WRONG. v1.2 + HA = RIGHT."
 

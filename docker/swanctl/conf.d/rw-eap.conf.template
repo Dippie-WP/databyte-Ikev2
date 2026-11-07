@@ -10,10 +10,33 @@
 # 5A.6 — install_virtual_ip = no (gateway-mode, NOT client default)
 # 5A.7 — server-side MSS clamp at 1260 (5G PMTUD fix; lives on LXC, not here)
 #
+# v1.5.0 — LE cert migration (2026-06-24):
+#   - certs = server.pem (was server.crt.pem) — canonical LE cert name
+#   - cacerts REMOVED — LE server cert chains via public trust
+#     (ISRG Root X1/X2 in client system trust stores). No CA install
+#     needed on clients. Eliminates the chicken-and-egg CA cert
+#     install step in client setup scripts and mobileconfig.
+#   - proposals add ecp256 — iOS 18+ defaults to ECP_256 KE; without
+#     this, iOS gets N(INVAL_KE) and silently gives up.
+#
+# v1.8.0 — reauth_time 24h → 1h. The pool lease is sticky for reauth_time
+#   after the IKE_SA dies (DPD timeout, iOS sleep, etc.). A 24h retention
+#   meant stale leases accumulated: the operator panel showed 'Active
+#   session' for days after the customer's phone had stopped using the
+#   tunnel. 1h is short enough that stale state clears within a working
+#   day, long enough that a brief reconnect after a battery-saving sleep
+#   doesn't drop the assigned VIP.
+#
+# v1.9.0 — dpd_timeout 120s → 240s (2026-07-13). iPhone strongSwan client
+#   loses carrier NAT mapping during deep sleep; original 120s + 5
+#   retransmits tore the IKE_SA down every 4-6 minutes. 240s gives the
+#   iPhone 4 minutes of grace when it wakes up before we declare the
+#   peer dead. See CORR-2026-07-13-039 and memory/2026-07-13.md
+#   ("iOS+Win drops" section) for evidence and rollback plan.
+#
 # Notable choices:
 #   - send_cert = always (NOT inside local{}) — forces charon to send the
 #     cert in every IKE_AUTH response, even when not requested
-#   - cacerts = strongswan-ca.crt.pem — clients verify chain
 #   - eap_id = %any — any EAP username accepted (the secrets block matches)
 #   - fragmentation = yes — large EAP packets (cert chain exchange)
 #   - pools = rw-pool — references the pool in swanctl.conf
@@ -25,20 +48,19 @@ connections {
     local_addrs  = 0.0.0.0
     remote_addrs = %any
     pools        = rw-pool
-    proposals    = aes256-sha256-modp2048,aes128-sha256-modp2048
+    proposals    = aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256
     unique       = replace
     rekey_time   = 24h
-    reauth_time  = 24h
+    reauth_time  = 1h
     mobike       = yes
     fragmentation = yes
     dpd_delay    = 30s
-    dpd_timeout  = 120s
+    dpd_timeout  = 240s
 
     local {
       auth = pubkey
-      certs = server.crt.pem
-      cacerts = strongswan-ca.crt.pem
-      id    = "vpn.homelab.local"
+      certs = server.pem
+      id    = "myvpn.databyte.co.za"
     }
     remote {
       auth = eap-mschapv2
@@ -53,7 +75,7 @@ connections {
         dpd_action   = clear
         start_action = start
         rekey_time   = 1h
-        esp_proposals = aes256-sha256-modp2048,aes128-sha256-modp2048
+        esp_proposals = aes256-sha256-modp2048-ecp256,aes128-sha256-modp2048-ecp256
       }
     }
   }
