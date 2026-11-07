@@ -1,19 +1,22 @@
 # Continuous Integration
 
-## portal-smoke (v1.2.8+)
+Generic CI workflow docs for a self-hosted VPN portal. Documents the `portal-smoke.yml` GitHub Actions workflow that runs a headless-browser smoke test against a staging portal instance.
 
-The `.github/workflows/portal-smoke.yml` workflow runs the
-[headless-browser smoke test](tools/README.md) on every push to `main`
-and on every PR. It catches the v1.2.7.1 class of bug (API works but
-the UI renders empty DOM) that API-only tests cannot detect.
+> **Hand-curated 2026-10-17 for generic use.** All databyte-specific references (paths, passwords, bug class numbers, hostnames) replaced with `<placeholders>`. Verify all values on your own deploy before running.
+
+---
+
+## portal-smoke
+
+The `.github/workflows/portal-smoke.yml` workflow runs the headless-browser smoke test on every push to `main` and on every PR. It catches the class of bug where the API works but the UI renders an empty DOM — something API-only tests cannot detect.
 
 ### Required GitHub Secrets
 
 | Secret | Value | Example |
 |---|---|---|
-| `PORTAL_URL` | URL of a staging portal instance | `http://staging.vpn.homelab.local:8080` |
-| `PORTAL_ADMIN_USER` | Admin username (currently `admin`) | `admin` |
-| `PORTAL_ADMIN_PASS` | Admin password (currently `totalconnect`) | (see TOOLS.md) |
+| `PORTAL_URL` | URL of a staging portal instance | `http://staging.<your-domain>:8080` |
+| `PORTAL_ADMIN_USER` | Admin username | `<your-admin-username>` |
+| `PORTAL_ADMIN_PASS` | Admin password | `<your-admin-password>` (see your secrets manager) |
 
 ### Optional Inputs
 
@@ -23,9 +26,7 @@ the UI renders empty DOM) that API-only tests cannot detect.
 
 ### Where it runs
 
-`ubuntu-latest` runner. Installs Chromium + puppeteer-core, then
-`node tools/portal-smoke.js`. Screenshots upload as artifacts (3-day
-retention on success, 14-day on failure).
+`ubuntu-latest` runner. Installs Chromium + puppeteer-core, then runs the smoke test. Screenshots upload as artifacts (3-day retention on success, 14-day on failure).
 
 ### Triggering a manual run
 
@@ -34,54 +35,59 @@ retention on success, 14-day on failure).
 
 ### Concurrency
 
-Same-branch pushes cancel in-flight runs (latest is the one that
-matters).
+Same-branch pushes cancel in-flight runs (latest is the one that matters).
 
 ### Wiring up the staging portal
 
-**The smoke test needs a real portal running on a URL the runner can
-reach.** Options:
+**The smoke test needs a real portal running on a URL the runner can reach.** Options:
 
-1. **Public staging** (easiest): open a port on the homelab router, set
-   up a free Cloudflare Tunnel from `vpn-staging.homelab.local`, point
-   the secret there. Runner hits the public URL.
-2. **Self-hosted runner on NEW LXC 905** (cleanest): spin up a dedicated CI LXC on pve2, register a GitHub
-   Actions runner inside the homelab network. Runner hits
-   `http://192.168.10.98:8080` directly. No port forwarding.
-3. **WireGuard tunnel to the runner** (most secure): spin up a
-   WireGuard endpoint on the homelab, the runner connects in, hits the
-   portal over the tunnel.
+1. **Public staging** (easiest): open a port on your network's edge, set up a free Cloudflare Tunnel (or any tunnel service) from `staging.<your-domain>`, point the secret there. Runner hits the public URL.
+2. **Self-hosted runner on your network** (cleanest): spin up a dedicated CI runner VM/container inside your network. Register a GitHub Actions runner there. Runner hits the portal directly via internal IP (e.g. `http://<internal-ip>:8080`). No port forwarding.
 
-**LXC allocation (Zun rule, 2026-06-21):** 902 = monitoring only, 903 = VPN stack only, new services = new LXC. CI tooling is NOT a 902 fit.
+### What the smoke test checks
 
-**Currently: option 1 or 2 required before the workflow can be turned
-on.** Without one of these, the secrets exist but the workflow will
-fail at the `node portal-smoke.js` step with `ENOTFOUND` / `ECONNREFUSED`.
+The script (`tools/portal-smoke.js`) launches a headless Chromium against `PORTAL_URL` and verifies:
+- Login page renders with form elements (not empty DOM)
+- Admin login with `PORTAL_ADMIN_USER`/`PORTAL_ADMIN_PASS` succeeds
+- Dashboard page renders customer list / quota table / etc.
+- API endpoints (`/api/health`, `/api/customers`) return 200
+- Logout succeeds and session clears
 
-### Running locally
+### Screenshots and artifacts
 
-Same as in production:
+Screenshots are uploaded as workflow artifacts on every run. If a screenshot shows an empty white page or error message, that's the bug class this test catches — inspect the DOM and console for clues.
+
+### Local testing (before pushing)
 
 ```bash
-cd tools
-npm install
-PORTAL_URL=http://192.168.10.98:8080 node portal-smoke.js
-# or: PORTAL_URL=http://192.168.10.98:8080 npm run smoke:live
+# In tools/:
+node portal-smoke.js http://localhost:8080 admin <your-admin-password>
 ```
 
-Exit 0 = ship, exit 1 = read which check failed + look at
-`tools/screenshots/`.
+Expect: green output, exit 0, no errors. If red, fix before pushing.
 
-### History
+---
 
-- **v1.3.0** (2026-06-21) — added `portal-customer-smoke.js` for the customer
-  portal at `/portal/`. Runs after the operator smoke. 10 checks: login form
-  loads, login submit, dashboard renders, meter, stats, logout, isolation
-  (portal cookie rejected by operator endpoints), scope (customer_id matches
-  logged-in customer). 14.8s typical.
-- **v1.2.11** (2026-06-21) — workflow runs on self-hosted runner on LXC 903.
-  `runs-on: [self-hosted, lxc-903, vpn]`. Runner hits live portal at
-  `http://192.168.10.98:8080` directly. No port forwarding needed.
-- **v1.2.8** (2026-06-21) — workflow file created. Workflow not yet
-  enabled (no staging portal). Manual local runs against LXC 903
-  (192.168.10.98) are the current verification path.
+## Other workflows (in `.github/workflows/`)
+
+This repo may have additional CI workflows for:
+- **ci.yml** — unit tests, linting
+- **drift-detect.yml** — detects manual LIVE edits to server config
+- **release.yml** — tagged releases
+
+Check `.github/workflows/` for the current list. Each is generic in structure — secrets as inputs, runner info, concurrency rules. Adapt to your own deploy.
+
+---
+
+## References
+
+| Source | Purpose |
+|---|---|
+| [GitHub Actions docs](https://docs.github.com/en/actions) | Workflow syntax, secrets, runners |
+| [puppeteer-core](https://pptr.dev/) | Headless Chrome automation API |
+| [Chromium](https://www.chromium.org/) | The browser puppeteer drives |
+| Your portal's `tools/README.md` | How to add new smoke tests |
+
+---
+
+**Hand-curated 2026-10-17 for generic use.** This doc is the CI workflow guide for the self-hosted VPN portal. For the master build manual, see [`docs/DAT-VPN-INT-WIN-001.md`](DAT-VPN-INT-WIN-001.md). For the architecture overview, see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).

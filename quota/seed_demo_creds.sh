@@ -17,6 +17,8 @@ set -euo pipefail
 
 # --- read DB path + lock the operation ---
 DB_PATH="${DB_PATH:-/var/lib/strongswan/ipsec.db}"
+DEMO_SERVER_IP="${DEMO_SERVER_IP:-102.182.117.43}"
+DEMO_REMOTE_ID="${DEMO_REMOTE_ID:-vpn.homelab.local}"
 if [ ! -f "$DB_PATH" ]; then
     echo "ERROR: DB not found at $DB_PATH" >&2
     exit 1
@@ -73,7 +75,7 @@ ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 with open(creds_file, "w") as f:
     f.write("# Phase 5B demo VPN credentials\n")
     f.write(f"# Generated: {ts}\n")
-    f.write("# Server: 102.182.117.43 (vpn.homelab.local)\n")
+    f.write(f"# Server: {os.environ.get('DEMO_SERVER_IP', '102.182.117.43')} (vpn.homelab.local)\n")
     f.write("# Connection: rw-eap (EAP-MSCHAPv2, server cert auth)\n")
     f.write("# Tier: 100MB (demo_100mb) — used for 5B.2 + 5B.5 testing\n\n")
     for name, pw in creds.items():
@@ -90,8 +92,8 @@ for name, pw in creds.items():
 print()
 print(f"  Saved to: {creds_file} (mode 600)")
 print()
-print("  Server:    102.182.117.43")
-print("  Remote ID: vpn.homelab.local")
+print(f"  Server:    {os.environ.get('DEMO_SERVER_IP', '102.182.117.43')}")
+print(f"  Remote ID: {os.environ.get('DEMO_REMOTE_ID', 'vpn.homelab.local')}")
 print("  Local ID:  <device-name> (e.g. demo-phone)")
 print("  Auth:      EAP-MSCHAPv2 (username + password)")
 print("  Pool:      rw-pool (10.99.0.0/24)")

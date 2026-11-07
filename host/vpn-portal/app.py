@@ -324,8 +324,10 @@ def recent_sessions(limit: int = 2, exclude_usernames=None, lookback_days: int =
     AcctStopTime, AcctSessionTime, AcctInputOctets, AcctOutputOctets.
     """
     from datetime import datetime, timezone, timedelta
+    SAST = timezone(timedelta(hours=2))
     exclude_usernames = exclude_usernames or []
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).replace(tzinfo=None)
+    # AcctStopTime is written in host-local time (SAST), not UTC (audit 2026-11-05).
+    cutoff = (datetime.now(SAST) - timedelta(days=lookback_days)).replace(tzinfo=None)
     base_select = (
         "SELECT r.UserName, r.FramedIPAddress, r.AcctStartTime, r.AcctStopTime, "
         "       r.AcctSessionTime, r.AcctInputOctets, r.AcctOutputOctets "
@@ -2560,7 +2562,7 @@ def update_customer(customer_id: int, req: CustomerUpdate, user: dict = Depends(
         sets.append(f"tier_id = {int(tier_id)}")
         # TKT-011 v2.0 — Q1=(a) Reset: expires_at = NOW() + duration_days (treat as new purchase)
         if duration_days is not None:
-            sets.append(f"expires_at = DATE_ADD(NOW(), INTERVAL {int(duration_days)} DAY)")
+            sets.append(f"expires_at = DATE_ADD(UTC_TIMESTAMP(), INTERVAL {int(duration_days)} DAY)")
 
     if not sets:
         # v1.7.0 — speed_plan='custom' sent standalone is a meaningful no-op
@@ -2880,6 +2882,36 @@ def delete_customer(customer_id: int, confirm: str = "", user: dict = Depends(re
     if eap_identities:
         in_list = ",".join(_q(i) for i in eap_identities)
         db_exec(f"DELETE FROM users WHERE name IN ({in_list});")
+    # 2026-10-25 fix (bare-name leak): the HTTP delete path only swept the
+    # device-suffixed identities. The BARE customer-name radcheck row and the
+    # bare eap-<customer> block were left behind every time -- the bot's
+    # /deleteuser already removed both (cmd_deleteuser adds bare_name to the
+    # sweep set). Match that behaviour here so the two paths agree.
+    try:
+        portal_auth.remove_customer_radcheck_and_usergroup(cust["name"])
+    except Exception as e:
+        log.warning("bare-name RADIUS cleanup failed for %s: %s", cust["name"], e)
+    try:
+        _remove_eap_block(cust["name"])
+    except Exception as ex:
+        log.warning("could not remove bare eap block %s: %s", cust["name"], ex)
+    # 2026-10-25 fix (orphan-user leak): a customer delete must ALSO sweep
+    # users rows that have NO device but whose name matches the customer
+    # identity pattern (e.g. "cust-android" left behind after the device row
+    # was already gone). The device-derived IN (...) delete above cannot see
+    # them, so every such delete left one orphan users row behind -- exactly
+    # what /orphans reports as "users with no device".
+    orphan_user_rows = db_query(
+        "SELECT id, name FROM users u "
+        "WHERE NOT EXISTS (SELECT 1 FROM devices d WHERE d.strongswan_user_id = u.id) "
+        f"AND (u.name = {_q(cust['name'])} OR u.name LIKE {_q(cust['name'] + '-%')});"
+    )
+    for ou in orphan_user_rows:
+        try:
+            portal_auth.remove_customer_radcheck_and_usergroup(ou["name"])
+        except Exception as e:
+            log.warning("orphan user RADIUS cleanup failed for %s: %s", ou["name"], e)
+        db_exec(f"DELETE FROM users WHERE id = {int(ou['id'])};")
     db_exec(f"DELETE FROM devices WHERE customer_id = {int(customer_id)};")
     db_exec(f"DELETE FROM alerts WHERE customer_id = {int(customer_id)};")
     db_exec(f"DELETE FROM purchases WHERE customer_id = {int(customer_id)};")

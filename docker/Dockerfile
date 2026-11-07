@@ -63,3 +63,7 @@ COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
 EXPOSE 500 4500
+
+# Phase 5: eap-radius plugin connects outbound to FreeRADIUS on 127.0.0.1:1812/1813.
+# Container uses network_mode: host so EXPOSE is documentation only — no port mapping.
+# UDP 1812 (auth) and UDP 1813 (acct) are FreeRADIUS-bound, not charon-bound.
