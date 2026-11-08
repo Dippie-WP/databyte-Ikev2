@@ -1451,7 +1451,9 @@ async def cmd_renew(update, context):
     old_tier = app.db_query("SELECT name FROM tiers WHERE id = ?", (old_tier_id,)) if old_tier_id else None
 
     device_rows = app.db_query(
-        "SELECT device_type FROM devices WHERE customer_id = ? AND is_active = 1 LIMIT 1",
+        "SELECT d.device_type, u.name AS eap_identity FROM devices d "
+        "LEFT JOIN users u ON u.id = d.strongswan_user_id "
+        "WHERE d.customer_id = ? AND d.is_active = 1 LIMIT 1",
         (cust["id"],),
     )
     if not device_rows:
@@ -1459,8 +1461,12 @@ async def cmd_renew(update, context):
             f"Customer `{name}` has no active device record -- cannot determine EAP identity."
         )
         return
-    device_type = device_rows[0]["device_type"].lower()
-    eap_identity = f"{name}-{device_type}"
+    # The EAP identity is whatever users.name holds for this device -- NOT
+    # f"{name}-{device_type}": a device created by /renew_orphan carries
+    # device_type='OTHER', and create_client ones can carry a mixed-case
+    # device_name ('hometab-Home'), so the derived string misses the real
+    # radcheck rows. The users row is the authoritative link.
+    eap_identity = device_rows[0]["eap_identity"] or f"{name}-{device_rows[0]['device_type'].lower()}"
 
     import datetime as _dt
     # 2026-10-30: true UTC epoch. Was datetime.utcnow().timestamp(), which on
@@ -2286,6 +2292,8 @@ def _ro_summary_text(context):
 
 
 def _ro_creds_text(res):
+    _reuse_note = ("\n\n*Password unchanged - the existing credential was kept.*"
+                   if res.get("password_reused") else "")
     return (f"OK Orphan `{res['eap_identity']}` renewed (customer.id=`{res['cust_id']}`)\n"
             f"Tier: `{res['tier_name']}`\n"
             f"Device: `{res['device_name']}`\n"
@@ -2294,7 +2302,89 @@ def _ro_creds_text(res):
             f"Server: `myvpn.databyte.co.za`\n"
             f"EAP identity: `{res['eap_identity']}`\n"
             f"Password: `{res['password']}`\n"
-            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem")
+            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem{_reuse_note}")
+
+
+def _eap_secret_from_conf(conf_text: str, eap_identity: str):
+    """Pull the secret out of an `eap-<identity>` block in rw-eap.conf text."""
+    import re as _re
+    m = _re.search(
+        rf"^\s*eap-{_re.escape(eap_identity)}\s*\{{[^}}]*?secret\s*=\s*\"([^\"]+)\"",
+        conf_text, _re.MULTILINE | _re.DOTALL,
+    )
+    return m.group(1) if m else None
+
+
+def _recover_existing_credential(eap_identity: str, user_row: dict):
+    """Find the identity's existing credential so a renewal need not rotate it.
+
+    Returns {"password", "ntlm_hex", "source"} or None when nothing is recoverable.
+    Sources, most trusted first:
+      1. the live radcheck Cleartext-Password row (the DB of record);
+      2. the live rw-eap.conf eap block secret;
+      3. the newest rw-eap.conf backup that still holds the identity's eap
+         block -- for a legacy orphan the expiry hard-delete removed the radcheck
+         rows and the eap block, but the surviving users row still carries the
+         NT hash of the password that identity was issued, so the backup secret
+         can be proven to be that same password and reused.
+    A candidate is accepted only when its NT hash equals the identity's
+    users.password blob, so a stale or unrelated secret is never adopted.
+    """
+    import app
+    import binascii
+    import os
+
+    candidates = []
+    ct_rows = app.db_query(
+        "SELECT value FROM radcheck WHERE username = ? AND attribute = 'Cleartext-Password'",
+        (eap_identity,),
+    )
+    if ct_rows and ct_rows[0].get("value"):
+        candidates.append(("radcheck", ct_rows[0]["value"]))
+
+    try:
+        live_secret = _eap_secret_from_conf(app.read_rw_eap_conf(), eap_identity)
+    except Exception as ex:
+        logger.warning("renew_orphan: could not read rw-eap.conf: %s", ex)
+        live_secret = None
+    if live_secret:
+        candidates.append(("eap-block", live_secret))
+
+    blob = user_row.get("password")
+    blob_hex = binascii.hexlify(blob).decode().upper() if blob else None
+
+    for source, secret in candidates:
+        ntlm_hex = app.ntlm_hash_bytes(secret).hex().upper()
+        if blob_hex and ntlm_hex != blob_hex:
+            logger.warning(
+                "renew_orphan: %s secret for %s does not match the users row - ignoring",
+                source, eap_identity)
+            continue
+        return {"password": secret, "ntlm_hex": ntlm_hex, "source": source}
+
+    # Legacy orphan: the cleartext survives only in a rw-eap.conf backup.
+    if blob_hex:
+        try:
+            names = [n for n in os.listdir(app.BACKUP_DIR) if n.startswith("rw-eap.conf")]
+            names.sort(key=lambda n: os.path.getmtime(os.path.join(app.BACKUP_DIR, n)),
+                       reverse=True)
+        except Exception as ex:
+            logger.warning("renew_orphan: cannot list %s: %s", app.BACKUP_DIR, ex)
+            return None
+        for name in names:
+            path = os.path.join(app.BACKUP_DIR, name)
+            try:
+                with open(path, "r", errors="ignore") as fh:
+                    secret = _eap_secret_from_conf(fh.read(), eap_identity)
+            except Exception:
+                continue
+            if not secret:
+                continue
+            ntlm_hex = app.ntlm_hash_bytes(secret).hex().upper()
+            if ntlm_hex != blob_hex:
+                continue
+            return {"password": secret, "ntlm_hex": ntlm_hex, "source": "backup:" + name}
+    return None
 
 
 def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "standard") -> dict:
@@ -2350,8 +2440,15 @@ def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "stand
     except Exception:
         down_mbps, up_mbps = 20, 20
 
-    password = app.secrets.token_urlsafe(16)
-    ntlm = app.ntlm_hash_bytes(password)
+    reused = _recover_existing_credential(eap_identity, user_row)
+    if reused:
+        password = reused["password"]
+        ntlm_hex = reused["ntlm_hex"]
+        logger.info("renew_orphan: keeping existing credential for %s (from %s)",
+                    eap_identity, reused["source"])
+    else:
+        password = app.secrets.token_urlsafe(16)
+        ntlm_hex = app.ntlm_hash_bytes(password).hex().upper()
     now = int(app.time.time())
     expires_at = None
     if duration_days is not None:
@@ -2367,12 +2464,20 @@ def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "stand
             (cust_name, cust_name, expires_at, tier_id, int(down_mbps), int(up_mbps), now, now),
         )
         cust_id = wrapped.execute("SELECT id FROM customers WHERE name = ?", (cust_name,)).fetchone()["id"]
-        wrapped.execute("DELETE FROM users WHERE id = ?", (user_row["id"],))
-        wrapped.execute(
-            "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
-            (eap_identity, ntlm.hex().upper()),
-        )
-        user_id = wrapped.execute("SELECT id FROM users WHERE name = ?", (eap_identity,)).fetchone()["id"]
+        if reused:
+            # Keep the users row (and its id) so nothing referencing it breaks.
+            wrapped.execute(
+                "UPDATE users SET password = UNHEX(?) WHERE id = ?",
+                (ntlm_hex, user_row["id"]),
+            )
+            user_id = user_row["id"]
+        else:
+            wrapped.execute("DELETE FROM users WHERE id = ?", (user_row["id"],))
+            wrapped.execute(
+                "INSERT INTO users (name, password) VALUES (?, UNHEX(?))",
+                (eap_identity, ntlm_hex),
+            )
+            user_id = wrapped.execute("SELECT id FROM users WHERE name = ?", (eap_identity,)).fetchone()["id"]
         wrapped.execute(
             "INSERT INTO devices (customer_id, strongswan_user_id, device_name, is_active, "
             "created_at, updated_at, device_type) "
@@ -2380,17 +2485,31 @@ def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "stand
             (int(cust_id), int(user_id), device_name, now, now),
         )
         wrapped.execute("UPDATE customers SET user_id = ? WHERE id = ?", (int(user_id), int(cust_id)))
-        wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
-        wrapped.execute(
-            "INSERT INTO radcheck (username, attribute, op, value) VALUES "
-            "(?, 'Cleartext-Password', ':=', ?)",
-            (eap_identity, password),
-        )
-        wrapped.execute(
-            "INSERT INTO radcheck (username, attribute, op, value) VALUES "
-            "(?, 'NT-Password', ':=', ?)",
-            (eap_identity, ntlm.hex().upper()),
-        )
+        if reused:
+            # Re-assert only the two credential attributes; leave the
+            # Expiration row and anything else untouched.
+            for _attr, _val in (("Cleartext-Password", password), ("NT-Password", ntlm_hex)):
+                wrapped.execute(
+                    "DELETE FROM radcheck WHERE username = ? AND attribute = ?",
+                    (eap_identity, _attr),
+                )
+                wrapped.execute(
+                    "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                    "(?, ?, ':=', ?)",
+                    (eap_identity, _attr, _val),
+                )
+        else:
+            wrapped.execute("DELETE FROM radcheck WHERE username = ?", (eap_identity,))
+            wrapped.execute(
+                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                "(?, 'Cleartext-Password', ':=', ?)",
+                (eap_identity, password),
+            )
+            wrapped.execute(
+                "INSERT INTO radcheck (username, attribute, op, value) VALUES "
+                "(?, 'NT-Password', ':=', ?)",
+                (eap_identity, ntlm_hex),
+            )
         wrapped.execute(
             "INSERT INTO radusergroup (username, groupname, priority) VALUES (?, 'default', 1)",
             (eap_identity,),
@@ -2414,6 +2533,8 @@ def renew_orphan_core(eap_identity: str, tier_name: str, speed_key: str = "stand
         "eap_identity": eap_identity,
         "device_name": device_name,
         "password": password,
+        "password_reused": bool(reused),
+        "credential_source": reused["source"] if reused else "new",
         "expires_at": expires_at,
         "tier_name": tier_name,
         "down_mbps": int(down_mbps),
