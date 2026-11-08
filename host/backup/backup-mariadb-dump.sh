@@ -139,7 +139,7 @@ else
     fi
 fi
 
-# 2026-11-08 2026-11-08 12:40 UTC / 2026-11-08 14:40 SAST (Misha): retention prune gate.
+# 2026-11-08 12:32 UTC / 2026-11-08 14:32 SAST (Misha): retention prune gate.
 # The list parse above was broken: `rclone lsf --format "tp"` emits
 # "timestamp;path", so `awk '{print $2}'` produced "00:00:00;2026-10-18/" -
 # a path that does not exist. The parse is now --format "p". Because the
