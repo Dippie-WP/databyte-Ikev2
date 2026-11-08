@@ -139,48 +139,73 @@ else
     fi
 fi
 
+# 2026-11-08 2026-11-08 12:40 UTC / 2026-11-08 14:40 SAST (Misha): retention prune gate.
+# The list parse above was broken: `rclone lsf --format "tp"` emits
+# "timestamp;path", so `awk '{print $2}'` produced "00:00:00;2026-10-18/" -
+# a path that does not exist. The parse is now --format "p". Because the
+# correct parse makes pruning actually delete aged backup objects, deletion
+# stays OFF until approved: set PRUNE_ENABLED=true (e.g. via the unit's
+# Environment=, or a drop-in) to activate it.
+PRUNE_ENABLED="${PRUNE_ENABLED:-false}"
+
 # Prune: keep 14 daily + 8 weekly (rustfs side)
-DAILY_LIST=$(rclone lsf --format "tp" "$REMOTE/daily/" 2>/dev/null | awk '{print $2}' | sort -r)
+DAILY_LIST=$(rclone lsf --format "p" "$REMOTE/daily/" 2>/dev/null | sort -r)
 DAILY_COUNT=$(echo "$DAILY_LIST" | grep -c '^radius-' || true)
 if [ "$DAILY_COUNT" -gt 14 ]; then
     PRUNE=$(echo "$DAILY_LIST" | tail -n +15)
-    for f in $PRUNE; do
-        rclone deletefile $RCLONE_DRY "$REMOTE/daily/$f" 2>&1 | tee -a "$LOG" >/dev/null
-        log "Pruned old daily: $f"
-    done
+    if [ "$PRUNE_ENABLED" != true ]; then
+        log "RETENTION PRUNE DISABLED (PRUNE_ENABLED!=true) - would remove old daily: $(echo $PRUNE | tr '\n' ' ')"
+    else
+        for f in $PRUNE; do
+            rclone deletefile $RCLONE_DRY "$REMOTE/daily/$f" 2>&1 | tee -a "$LOG" >/dev/null
+            log "Pruned old daily: $f"
+        done
+    fi
 fi
 
-WEEKLY_LIST=$(rclone lsf --format "tp" "$REMOTE/weekly/" 2>/dev/null | awk '{print $2}' | sort -r)
+WEEKLY_LIST=$(rclone lsf --format "p" "$REMOTE/weekly/" 2>/dev/null | sort -r)
 WEEKLY_COUNT=$(echo "$WEEKLY_LIST" | grep -c '^radius-' || true)
 if [ "$WEEKLY_COUNT" -gt 8 ]; then
     PRUNE=$(echo "$WEEKLY_LIST" | tail -n +9)
-    for f in $PRUNE; do
-        rclone deletefile $RCLONE_DRY "$REMOTE/weekly/$f" 2>&1 | tee -a "$LOG" >/dev/null
-        log "Pruned old weekly: $f"
-    done
+    if [ "$PRUNE_ENABLED" != true ]; then
+        log "RETENTION PRUNE DISABLED (PRUNE_ENABLED!=true) - would remove old weekly: $(echo $PRUNE | tr '\n' ' ')"
+    else
+        for f in $PRUNE; do
+            rclone deletefile $RCLONE_DRY "$REMOTE/weekly/$f" 2>&1 | tee -a "$LOG" >/dev/null
+            log "Pruned old weekly: $f"
+        done
+    fi
 fi
 
 # Prune: keep 14 daily + 8 weekly (pi-usb side, best-effort)
-PI_USB_DAILY_LIST=$(rclone lsf --format "tp" "$PI_USB_DAILY_BASE/" 2>/dev/null | awk '{print $2}' | sort -r)
+PI_USB_DAILY_LIST=$(rclone lsf --format "p" "$PI_USB_DAILY_BASE/" 2>/dev/null | sort -r)
 PI_USB_DAILY_COUNT=$(echo "$PI_USB_DAILY_LIST" | grep -c '^radius-' || true)
 if [ "$PI_USB_DAILY_COUNT" -gt 14 ]; then
     PRUNE=$(echo "$PI_USB_DAILY_LIST" | tail -n +15)
-    for f in $PRUNE; do
-        rclone deletefile $RCLONE_DRY "$PI_USB_DAILY_BASE/$f" 2>&1 | tee -a "$LOG" >/dev/null \
-            && log "Pruned pi-usb daily: $f" \
-            || log "WARNING: pi-usb daily prune failed for $f"
-    done
+    if [ "$PRUNE_ENABLED" != true ]; then
+        log "RETENTION PRUNE DISABLED (PRUNE_ENABLED!=true) - would remove old pi-usb daily: $(echo $PRUNE | tr '\n' ' ')"
+    else
+        for f in $PRUNE; do
+            rclone deletefile $RCLONE_DRY "$PI_USB_DAILY_BASE/$f" 2>&1 | tee -a "$LOG" >/dev/null \
+                && log "Pruned pi-usb daily: $f" \
+                || log "WARNING: pi-usb daily prune failed for $f"
+        done
+    fi
 fi
 
-PI_USB_WEEKLY_LIST=$(rclone lsf --format "tp" "$PI_USB_WEEKLY_BASE/" 2>/dev/null | awk '{print $2}' | sort -r)
+PI_USB_WEEKLY_LIST=$(rclone lsf --format "p" "$PI_USB_WEEKLY_BASE/" 2>/dev/null | sort -r)
 PI_USB_WEEKLY_COUNT=$(echo "$PI_USB_WEEKLY_LIST" | grep -c '^radius-' || true)
 if [ "$PI_USB_WEEKLY_COUNT" -gt 8 ]; then
     PRUNE=$(echo "$PI_USB_WEEKLY_LIST" | tail -n +9)
-    for f in $PRUNE; do
-        rclone deletefile $RCLONE_DRY "$PI_USB_WEEKLY_BASE/$f" 2>&1 | tee -a "$LOG" >/dev/null \
-            && log "Pruned pi-usb weekly: $f" \
-            || log "WARNING: pi-usb weekly prune failed for $f"
-    done
+    if [ "$PRUNE_ENABLED" != true ]; then
+        log "RETENTION PRUNE DISABLED (PRUNE_ENABLED!=true) - would remove old pi-usb weekly: $(echo $PRUNE | tr '\n' ' ')"
+    else
+        for f in $PRUNE; do
+            rclone deletefile $RCLONE_DRY "$PI_USB_WEEKLY_BASE/$f" 2>&1 | tee -a "$LOG" >/dev/null \
+                && log "Pruned pi-usb weekly: $f" \
+                || log "WARNING: pi-usb weekly prune failed for $f"
+        done
+    fi
 fi
 
 log "=== mariadb-dump-backup done ==="
