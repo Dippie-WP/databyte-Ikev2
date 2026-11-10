@@ -237,6 +237,35 @@ g_up = Gauge(
     "vpn_exporter_up",
     "1 if last scrape was successful, 0 if errored",
 )
+# Expiry enforcement invariants (added 2026-11-10, Zun-approved).
+# The daily EAP canary only ever exercises its OWN synthetic row, so it can
+# never see a REAL customer whose expiry is wrong. These four counts close
+# that gap. All are plain counters: 0 = healthy.
+g_expiry_malformed = Gauge(
+    "vpn_expiry_malformed_rows",
+    "radcheck Expiration rows whose value rlm_sql cannot parse -> the "
+    "fail-closed lockout class (Access-Reject 'Invalid user')",
+)
+g_expiry_drift = Gauge(
+    "vpn_expiry_drift_rows",
+    "Customer identities whose enforced radcheck Expiration differs from "
+    "customers.expires_at (or is enforced with no expiry sold)",
+)
+g_expiry_leak = Gauge(
+    "vpn_expiry_leak_rows",
+    "Customers past expires_at but still status='active' -> expired tier "
+    "still served (revenue leak)",
+)
+g_expiry_overcut = Gauge(
+    "vpn_expiry_overcut_rows",
+    "Customers status='expired' while expires_at is still in the future -> "
+    "a paying customer cut off early",
+)
+g_expiry_check_ok = Gauge(
+    "vpn_expiry_check_ok",
+    "1 if the expiry invariant check completed this scrape, 0 if it failed "
+    "(never reads green on a stale result)",
+)
 
 # Tracker for stale-label removal (mirrors strongswan_exporter pattern)
 QUOTA_COMMENT_RE = re.compile(r"quota:(\d+\.\d+\.\d+\.\d+)")
@@ -765,6 +794,97 @@ def step_radacct_sessions_per_hour():
         ).set(r["n"])
 
 
+def _expiry_count(sql):
+    """Run a COUNT(*) query on the radius DB.
+
+    db_query_mariadb() returns [] on error, which a bare rows[0] would turn
+    into an IndexError. A COUNT query always returns exactly one row, so an
+    empty result means the query FAILED -> raise, so the step is marked failed
+    and check_ok goes to 0 instead of silently reporting 0 (= healthy).
+    """
+    rows = db_query_mariadb(sql)
+    if not rows:
+        raise RuntimeError("expiry invariant query returned no rows (DB error?)")
+    return int(rows[0]["n"])
+
+
+def step_expiry_invariants():
+    """Expiry enforcement invariants (MariaDB), added 2026-11-10.
+
+    Four read-only counts over the radius DB + customers table:
+
+      malformed - radcheck.Expiration values that rlm_sql cannot parse.
+                  These lock the customer out with 'Invalid user' (the
+                  fail-closed behaviour), so they must be zero.
+      drift     - the enforced date (radcheck.Expiration) differs from the
+                  sold date (customers.expires_at), or is enforced for a
+                  customer with no expiry sold.
+      leak      - customer is still status='active' although expires_at has
+                  passed: the expired tier is still being served.
+      overcut   - customer is status='expired' although expires_at is still
+                  in the future: a paying customer cut off early.
+
+    The frame is deliberately identical to the enforcement path:
+    quota-monitor._kill_expired_customers() selects
+    "expires_at IS NOT NULL AND expires_at < NOW() AND status = 'active'",
+    and the DB clock (NOW()) is the host's SAST clock.
+
+    check_ok is set to 0 before the work and to 1 only after every count
+    succeeds, so a failed check can never present as a healthy 0.
+    """
+    g_expiry_check_ok.set(0)
+
+    malformed = _expiry_count("""
+        SELECT COUNT(*) AS n FROM radcheck
+        WHERE attribute = 'Expiration'
+          AND (value COLLATE utf8mb4_bin) NOT REGEXP
+              '^[0-9]{1,2} [A-Z][a-z]{2} [0-9]{4}( [0-9]{2}:[0-9]{2}(:[0-9]{2})?)?$'
+    """)
+
+    drift = _expiry_count("""
+        SELECT COUNT(*) AS n FROM (
+          SELECT c.id AS id FROM customers c
+          JOIN devices d ON d.customer_id = c.id
+          LEFT JOIN radcheck rc
+            ON rc.username COLLATE utf8mb4_unicode_ci
+               = CONCAT(c.name,'-',d.device_name) COLLATE utf8mb4_unicode_ci
+           AND rc.attribute = 'Expiration'
+          WHERE c.expires_at IS NOT NULL
+            AND (rc.value IS NULL
+                 OR STR_TO_DATE(rc.value, '%%d %%b %%Y %%H:%%i:%%s') IS NULL
+                 OR STR_TO_DATE(rc.value, '%%d %%b %%Y %%H:%%i:%%s') <> c.expires_at)
+          UNION ALL
+          SELECT c.id AS id FROM customers c
+          JOIN devices d ON d.customer_id = c.id
+          JOIN radcheck rc
+            ON rc.username COLLATE utf8mb4_unicode_ci
+               = CONCAT(c.name,'-',d.device_name) COLLATE utf8mb4_unicode_ci
+           AND rc.attribute = 'Expiration'
+          WHERE c.expires_at IS NULL
+        ) t
+    """)
+
+    leak = _expiry_count("""
+        SELECT COUNT(*) AS n FROM customers c
+        WHERE c.expires_at IS NOT NULL
+          AND c.status = 'active'
+          AND c.expires_at < NOW()
+    """)
+
+    overcut = _expiry_count("""
+        SELECT COUNT(*) AS n FROM customers c
+        WHERE c.expires_at IS NOT NULL
+          AND c.status = 'expired'
+          AND c.expires_at > NOW()
+    """)
+
+    g_expiry_malformed.set(malformed)
+    g_expiry_drift.set(drift)
+    g_expiry_leak.set(leak)
+    g_expiry_overcut.set(overcut)
+    g_expiry_check_ok.set(1)
+
+
 # ---------- main scrape ----------
 
 def scrape():
@@ -794,6 +914,7 @@ def scrape():
         step_radacct_active,         # MariaDB (RADIUS)
         step_radacct_sessions_7d,    # MariaDB (RADIUS)
         step_radacct_sessions_per_hour,  # MariaDB (RADIUS, hourly trend)
+        step_expiry_invariants,     # MariaDB (expiry enforcement invariants)
     ):
         try:
             step_fn()

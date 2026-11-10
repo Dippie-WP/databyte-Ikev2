@@ -692,7 +692,11 @@ async def cmd_status(update, context):
     health = app.health()
     auth24 = app.db_query(
         "SELECT COUNT(*) AS n FROM radpostauth "
-        "WHERE authdate >= NOW() - INTERVAL 1 DAY"
+        "WHERE authdate >= NOW() - INTERVAL 1 DAY "
+        "AND username NOT LIKE 'zzcanary-%' "
+        "AND username NOT LIKE 'zzeap-%' "
+        "AND username NOT LIKE 'zzfmt-%' "
+        "AND username NOT LIKE 'zzspike%'"
     )
     n24 = auth24[0]["n"] if auth24 else 0
     sessions = app.swanctl_parse_sas()
@@ -1776,6 +1780,10 @@ async def cmd_logs(update, context):
         "SELECT authdate, username, reply "
         "FROM radpostauth "
         "WHERE authdate >= ? "
+        "AND username NOT LIKE 'zzcanary-%' "
+        "AND username NOT LIKE 'zzeap-%' "
+        "AND username NOT LIKE 'zzfmt-%' "
+        "AND username NOT LIKE 'zzspike%' "
         "ORDER BY authdate DESC LIMIT ?",
         (cutoff, n),
     )
