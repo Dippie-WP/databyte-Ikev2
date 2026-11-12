@@ -1409,47 +1409,53 @@ async def ct_confirm(update, context):
         context.user_data.pop(k, None)
     return ConversationHandler.END
 
-async def cmd_renew(update, context):
-    """/renew <customer_name> <new_tier> -- renew a customer's tier without changing the EAP identity.
-
-    The customer keeps the same EAP username + password. The radcheck entry is
-    un-disabled (DISABLED- prefix stripped), the tier is updated, the expiry
-    is reset, and the customer's existing device config keeps working.
-    (Zun msg #44105, #44118.)
-    """
-    if not context.args or len(context.args) < 2:
-        await update.message.reply_text(
-            "Usage: /renew <customer_name> <new_tier>\n"
-            "Example: /renew test-customer 30day_20"
-        )
-        return
-
-    name = context.args[0].lower()
-    new_tier = context.args[1]
-
+def _resolve_customer(arg):
+    """Resolve a /renew argument to a customers row. Accepts <id|name>."""
     import app
-    cust_rows = app.db_query(
-        "SELECT id, tier_id, is_operator, status FROM customers WHERE name = ?", (name,),
-    )
-    if not cust_rows:
-        await update.message.reply_text(f"Customer `{name}` not found.")
-        return
-    cust = cust_rows[0]
+    a = str(arg).strip()
+    if a.isdigit():
+        rows = app.db_query(
+            "SELECT id, name, tier_id, is_operator, status FROM customers WHERE id = ?",
+            (int(a),),
+        )
+    else:
+        rows = app.db_query(
+            "SELECT id, name, tier_id, is_operator, status FROM customers WHERE name = ?",
+            (a.lower(),),
+        )
+    return rows[0] if rows else None
+
+
+RN_SELECT, RN_DURATION, RN_CAP, RN_CONFIRM = range(20, 24)
+
+
+class RenewError(Exception):
+    """Refusal from renew_customer_core; .args[0] is the operator-facing message."""
+
+
+def renew_customer_core(cust: dict, new_tier: str) -> dict:
+    """Extend an existing customer's expiry onto a new tier, keeping the EAP identity
+    and password unchanged (2026-11-12). One write path shared by the /renew one-shot
+    and the /renew wizard, so the two can never drift.
+
+    Raises RenewError carrying the operator-facing message on any refusal.
+    """
+    import app
+    import datetime as _dt
+
     if cust.get("is_operator"):
-        await update.message.reply_text("Cannot renew an operator account.")
-        return
+        raise RenewError("Cannot renew an operator account.")
 
     tier_rows = app.db_query(
         "SELECT id, name, duration_days FROM tiers WHERE name = ? AND is_active = 1",
         (new_tier,),
     )
     if not tier_rows:
-        valid = app.db_query("SELECT name FROM tiers WHERE is_active = 1 ORDER BY name")
-        await update.message.reply_text(
-            f"Tier `{new_tier}` not found. Active tiers: "
-            f"{', '.join(t['name'] for t in valid)}"
+        valid = app.db_query("SELECT name FROM tiers WHERE is_active = 1 ORDER BY duration_days, name")
+        raise RenewError(
+            "Tier `%s` not found. Active tiers: %s"
+            % (new_tier, ", ".join(t["name"] for t in valid))
         )
-        return
     new_tier_row = tier_rows[0]
     old_tier_id = cust.get("tier_id")
     old_tier = app.db_query("SELECT name FROM tiers WHERE id = ?", (old_tier_id,)) if old_tier_id else None
@@ -1461,18 +1467,13 @@ async def cmd_renew(update, context):
         (cust["id"],),
     )
     if not device_rows:
-        await update.message.reply_text(
-            f"Customer `{name}` has no active device record -- cannot determine EAP identity."
+        raise RenewError(
+            "Customer `%s` has no active device record -- cannot determine EAP identity."
+            % cust["name"]
         )
-        return
-    # The EAP identity is whatever users.name holds for this device -- NOT
-    # f"{name}-{device_type}": a device created by /renew_orphan carries
-    # device_type='OTHER', and create_client ones can carry a mixed-case
-    # device_name ('hometab-Home'), so the derived string misses the real
-    # radcheck rows. The users row is the authoritative link.
-    eap_identity = device_rows[0]["eap_identity"] or f"{name}-{device_rows[0]['device_type'].lower()}"
+    eap_identity = device_rows[0]["eap_identity"] or "%s-%s" % (
+        cust["name"], device_rows[0]["device_type"].lower())
 
-    import datetime as _dt
     # 2026-10-30: true UTC epoch. Was datetime.utcnow().timestamp(), which on
     # this SAST (+2) box read naive-UTC as local -> created_at landed 2h early.
     now_ts = int(_dt.datetime.now(_dt.timezone.utc).timestamp())
@@ -1494,18 +1495,71 @@ async def cmd_renew(update, context):
             app.db_exec("UPDATE radcheck SET username = ? WHERE id = ?", (eap_identity, r["id"]))
             logger.info("renew: un-disabled radcheck id=%s (%s -> %s)", r["id"], old_username, eap_identity)
 
-    old_tier_name = old_tier[0]["name"] if old_tier else "(none)"
-    audit("renew", customer_id=cust["id"],
-          old_tier=old_tier_name, new_tier=new_tier,
-          operator=update.effective_user.username if update.effective_user else None)
+    return {
+        "customer_id": cust["id"],
+        "name": cust["name"],
+        "old_tier": old_tier[0]["name"] if old_tier else "(none)",
+        "new_tier": new_tier,
+        "expires_at": expires_at,
+        "eap_identity": eap_identity,
+    }
 
-    await update.message.reply_text(
-        f"OK *Renewed*\n\n"
-        f"Customer: `{name}` (id=`{cust['id']}`)\n"
-        f"Tier: `{old_tier_name}` -> `{new_tier}`\n"
-        f"Expires: `{expires_at[:10]}`\n"
-        f"EAP identity: `{eap_identity}` (unchanged -- customer keeps connecting)"
+
+def _renewed_text(res: dict) -> str:
+    return (
+        "OK *Renewed*\n\n"
+        "Customer: `%s` (id=`%s`)\n"
+        "Tier: `%s` -> `%s`\n"
+        "Expires: `%s`\n"
+        "EAP identity: `%s` (unchanged -- customer keeps connecting)"
+        % (res["name"], res["customer_id"], res["old_tier"], res["new_tier"],
+           res["expires_at"][:10], res["eap_identity"])
     )
+
+
+async def cmd_renew(update, context):
+    """/renew <customer_name|id> <new_tier> -- renew a customer's tier without changing the EAP identity.
+
+    Bare /renew opens a tappable wizard (pick the client -> duration -> cap -> confirm);
+    the one-shot argument form is unchanged. The customer keeps the same EAP username +
+    password. The radcheck entry is un-disabled (DISABLED- prefix stripped), the tier is
+    updated, the expiry is reset, and the customer's existing device config keeps working.
+    """
+    if context.args and len(context.args) >= 2:
+        cust = _resolve_customer(context.args[0])
+        if not cust:
+            await update.message.reply_text(
+                "Customer `%s` not found (accepts the id or the name)." % context.args[0]
+            )
+            return ConversationHandler.END
+        try:
+            res = renew_customer_core(cust, context.args[1])
+        except RenewError as e:
+            await update.message.reply_text(str(e.args[0]))
+            return ConversationHandler.END
+        audit("renew", customer_id=res["customer_id"], old_tier=res["old_tier"],
+              new_tier=res["new_tier"],
+              operator=update.effective_user.username if update.effective_user else None)
+        await update.message.reply_text(_renewed_text(res), parse_mode=ParseMode.MARKDOWN)
+        return ConversationHandler.END
+
+    if context.args:
+        await update.message.reply_text(
+            "Usage: `/renew <customer_name|id> <new_tier>`\n"
+            "Example: `/renew mesquita 30day_20`\n"
+            "Or send a bare `/renew` to pick the client from a list.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+
+    cands = _rn_candidates()
+    if not cands:
+        await update.message.reply_text("No clients with an expiry to renew.")
+        return ConversationHandler.END
+    _rn_reset(context)
+    await update.message.reply_text(_rn_pick_text(cands), parse_mode=ParseMode.MARKDOWN,
+                                    reply_markup=_rn_pick_kb(cands))
+    return RN_SELECT
 
 
 async def cmd_creds(update, context):
@@ -2197,6 +2251,221 @@ async def cmd_cleanup_orphans(update, context):
         )
     except Exception as e:
         await update.message.reply_text(f"\u274c Cleanup failed (rolled back): {e}", parse_mode=ParseMode.MARKDOWN)
+
+
+# ---------- /renew wizard (added 2026-11-12) ----------
+# Bare /renew -> tappable client list (expired first) -> duration -> cap -> confirm.
+# Mirrors the /create + /renew_orphan picker layout; distinct callback prefixes (rn*)
+# and state ids 20..23 so no ConversationHandler can claim another's callbacks.
+# One write path: the confirm step calls renew_customer_core().
+
+def _rn_candidates():
+    """Non-operator clients with an expiry set, expired first (HOT-244 prefix filter)."""
+    import app
+    import datetime as _dt
+    SAST = _dt.timezone(_dt.timedelta(hours=2))
+    rows = app.db_query(
+        "SELECT id, name, expires_at, status FROM customers "
+        "WHERE COALESCE(is_operator,0) = 0 AND expires_at IS NOT NULL "
+        "ORDER BY (status = 'expired') DESC, expires_at"
+    )
+    out = []
+    for r in rows:
+        if (r["name"] or "").lower().startswith(("zun", "zunaid")):
+            continue
+        out.append(r)
+    return out[:12]
+
+
+def _rn_left(r) -> float:
+    """Seconds until r['expires_at'] (UTC reading, same convention as cmd_expiry)."""
+    import datetime as _dt
+    exp = r["expires_at"]
+    if isinstance(exp, str):
+        try:
+            exp = _dt.datetime.strptime(exp, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return 0.0
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=_dt.timezone.utc)
+    return (exp - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+
+
+def _rn_when(r) -> str:
+    """Short 'when' label for a picker row."""
+    left = _rn_left(r)
+    if left < 0:
+        return "EXPIRED %dh ago" % int(-left // 3600)
+    if left < 86400:
+        return "expires in %.1fh" % (left / 3600.0)
+    return "expires in %.1fd" % (left / 86400.0)
+
+def _rn_pick_text(cands):
+    lines = ["*[1/4] Renew a client* -- tap one:", ""]
+    for r in cands:
+        left = _rn_left(r)
+        if left < 0:
+            flag = "\U0001f534"
+        elif left < 86400:
+            flag = "\U0001f7e0"
+        elif left < 3 * 86400:
+            flag = "\U0001f7e1"
+        else:
+            flag = "\U0001f7e2"
+        lines.append("%s `%s` -- id=%s -- %s" % (flag, r["name"], r["id"], _rn_when(r)))
+    return "\n".join(lines)
+
+
+def _rn_pick_kb(cands):
+    rows = [[InlineKeyboardButton(
+        "%s | id=%s | %s" % (r["name"], r["id"], _rn_when(r)),
+        callback_data="rn:%s" % r["id"])] for r in cands]
+    rows.append([InlineKeyboardButton("Cancel", callback_data="rnx")])
+    return _kb(rows)
+
+
+def _rn_duration_kb():
+    row1 = [InlineKeyboardButton(l, callback_data="rnd:%s" % k) for k, l in RO_DURATIONS[:4]]
+    row2 = [InlineKeyboardButton(l, callback_data="rnd:%s" % k) for k, l in RO_DURATIONS[4:]]
+    return _kb([row1, row2, [InlineKeyboardButton("Cancel", callback_data="rnx")]])
+
+
+def _rn_cap_kb():
+    row = [InlineKeyboardButton(l, callback_data="rnc:%s" % k) for k, l in CAPS]
+    return _kb([row, [InlineKeyboardButton("\u2039 Back", callback_data="rnb"),
+                      InlineKeyboardButton("Cancel", callback_data="rnx")]])
+
+
+def _rn_confirm_kb():
+    return _kb([[InlineKeyboardButton("Confirm", callback_data="rnk"),
+                 InlineKeyboardButton("\u2039 Back", callback_data="rnb"),
+                 InlineKeyboardButton("Cancel", callback_data="rnx")]])
+
+
+def _rn_reset(context):
+    for k in [k for k in context.user_data if k.startswith("rn_")]:
+        context.user_data.pop(k, None)
+
+
+def _rn_summary_text(context):
+    days = context.user_data.get("rn_days", 30)
+    cap = context.user_data.get("rn_cap", "20")
+    name = context.user_data.get("rn_name", "?")
+    cid = context.user_data.get("rn_cust_id")
+    ident = context.user_data.get("rn_identity", "?")
+    return ("*[4/4] Confirm?*\n\n"
+            "Client: `%s` (id=`%s`)\n"
+            "Tier: `%dday_%s` (%s)\n"
+            "EAP identity: `%s` (unchanged)\n"
+            "Password: kept -- no re-entry needed" % (name, cid, int(days), cap,
+                                                      cap_label(cap), ident))
+
+
+async def rn_client_selected(update, context):
+    q = update.callback_query
+    await q.answer()
+    import app
+    cid = int(q.data.split(":", 1)[1])
+    rows = app.db_query(
+        "SELECT id, name FROM customers WHERE id = ? AND COALESCE(is_operator,0) = 0", (cid,))
+    if not rows:
+        await _safe_edit_text(q, "Client not found.", parse_mode=ParseMode.MARKDOWN)
+        _rn_reset(context)
+        return ConversationHandler.END
+    dev = app.db_query(
+        "SELECT u.name AS eap_identity FROM devices d "
+        "LEFT JOIN users u ON u.id = d.strongswan_user_id "
+        "WHERE d.customer_id = ? AND d.is_active = 1 LIMIT 1", (cid,))
+    context.user_data["rn_cust_id"] = cid
+    context.user_data["rn_name"] = rows[0]["name"]
+    context.user_data["rn_identity"] = (dev[0]["eap_identity"] if dev else "?")
+    await _safe_edit_text(q, "*[2/4] Duration for `%s`*" % rows[0]["name"],
+                          parse_mode=ParseMode.MARKDOWN, reply_markup=_rn_duration_kb())
+    return RN_DURATION
+
+
+async def rn_duration_chosen(update, context):
+    q = update.callback_query
+    await q.answer()
+    key = q.data.split(":", 1)[1]
+    days = RO_DAYS.get(key)
+    if not days:
+        await _safe_edit_text(q, "Unknown duration.", parse_mode=ParseMode.MARKDOWN)
+        _rn_reset(context)
+        return ConversationHandler.END
+    context.user_data["rn_days"] = days
+    await _safe_edit_text(q, "*[3/4] Data cap for `%s`*" % context.user_data.get("rn_name", "?"),
+                          parse_mode=ParseMode.MARKDOWN, reply_markup=_rn_cap_kb())
+    return RN_CAP
+
+
+async def rn_cap_chosen(update, context):
+    q = update.callback_query
+    await q.answer()
+    cap = q.data.split(":", 1)[1]
+    if cap not in dict(CAPS):
+        await _safe_edit_text(q, "Unknown cap.", parse_mode=ParseMode.MARKDOWN)
+        _rn_reset(context)
+        return ConversationHandler.END
+    context.user_data["rn_cap"] = cap
+    await _safe_edit_text(q, _rn_summary_text(context), parse_mode=ParseMode.MARKDOWN,
+                          reply_markup=_rn_confirm_kb())
+    return RN_CONFIRM
+
+
+async def rn_back(update, context):
+    q = update.callback_query
+    await q.answer()
+    cands = _rn_candidates()
+    if not cands:
+        await _safe_edit_text(q, "No clients with an expiry to renew.")
+        return ConversationHandler.END
+    await _safe_edit_text(q, _rn_pick_text(cands), parse_mode=ParseMode.MARKDOWN,
+                          reply_markup=_rn_pick_kb(cands))
+    return RN_SELECT
+
+
+async def rn_confirm(update, context):
+    q = update.callback_query
+    await q.answer("Renewing...")
+    import app
+    cid = context.user_data.get("rn_cust_id")
+    days = context.user_data.get("rn_days")
+    cap = context.user_data.get("rn_cap")
+    if not (cid and days and cap):
+        await _safe_edit_text(q, "Wizard state lost -- send /renew again.")
+        _rn_reset(context)
+        return ConversationHandler.END
+    tier_name = "%dday_%s" % (int(days), cap)
+    rows = app.db_query(
+        "SELECT id, name, tier_id, is_operator, status FROM customers WHERE id = ?", (cid,))
+    if not rows:
+        await _safe_edit_text(q, "Client not found.", parse_mode=ParseMode.MARKDOWN)
+        _rn_reset(context)
+        return ConversationHandler.END
+    try:
+        res = renew_customer_core(rows[0], tier_name)
+    except RenewError as e:
+        await _safe_edit_text(q, str(e.args[0]), parse_mode=ParseMode.MARKDOWN)
+        _rn_reset(context)
+        return ConversationHandler.END
+    audit("renew", customer_id=res["customer_id"], old_tier=res["old_tier"],
+          new_tier=res["new_tier"], via="wizard",
+          operator=update.effective_user.username if update.effective_user else None)
+    await _safe_edit_text(q, _renewed_text(res), parse_mode=ParseMode.MARKDOWN)
+    _rn_reset(context)
+    return ConversationHandler.END
+
+
+async def rn_cancel(update, context):
+    q = getattr(update, "callback_query", None)
+    _rn_reset(context)
+    if q:
+        await q.answer()
+        await _safe_edit_text(q, "Renew cancelled.")
+    else:
+        await update.message.reply_text("Renew cancelled.")
+    return ConversationHandler.END
 
 
 # ---------- /renew_orphan wizard (added 2026-11-01) ----------
@@ -3125,6 +3394,41 @@ def build_application() -> Application:
     )
     renew_conv.persistence_ref = persistence
     application.add_handler(renew_conv)
+
+    # /renew wizard (2026-11-12): bare /renew -> tappable client list -> duration
+    # -> cap -> confirm. Registered after the other conversation handlers and before
+    # the BOT_COMMANDS loop so it claims `renew` ahead of the plain CommandHandler.
+    renew_wiz_conv = MultiWorkerConversationHandler(
+        entry_points=[
+            CommandHandler("renew", cmd_renew, filters=whitelist),
+        ],
+        states={
+            RN_SELECT: [
+                CallbackQueryHandler(rn_client_selected, pattern=r"^rn:"),
+                CallbackQueryHandler(rn_cancel, pattern=r"^rnx$"),
+            ],
+            RN_DURATION: [
+                CallbackQueryHandler(rn_duration_chosen, pattern=r"^rnd:"),
+                CallbackQueryHandler(rn_back, pattern=r"^rnb$"),
+                CallbackQueryHandler(rn_cancel, pattern=r"^rnx$"),
+            ],
+            RN_CAP: [
+                CallbackQueryHandler(rn_cap_chosen, pattern=r"^rnc:"),
+                CallbackQueryHandler(rn_back, pattern=r"^rnb$"),
+                CallbackQueryHandler(rn_cancel, pattern=r"^rnx$"),
+            ],
+            RN_CONFIRM: [
+                CallbackQueryHandler(rn_confirm, pattern=r"^rnk$"),
+                CallbackQueryHandler(rn_back, pattern=r"^rnb$"),
+                CallbackQueryHandler(rn_cancel, pattern=r"^rnx$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", rn_cancel)],
+        persistent=True,
+        name="renew_wizard_conv",
+    )
+    renew_wiz_conv.persistence_ref = persistence
+    application.add_handler(renew_wiz_conv)
 
     for name, handler, _desc in BOT_COMMANDS:
         application.add_handler(CommandHandler(name, handler, filters=whitelist))
