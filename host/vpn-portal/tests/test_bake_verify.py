@@ -34,12 +34,12 @@ SAMPLE_SAS_TEXT = (
     # Convention: each conn is eap-{customer_name}-{device_name} and the
     # EAP identity inside it matches the rw-eap.conf `id =` field.
     "eap-bob-laptop: #1, ESTABLISHED, IKEv2 SPIs 1234_abcd public=5678_def\n"
-    "  local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]\n"
+    "  local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]\n"
     "  remote 'client.public' @ 41.13.22.5[4500] EAP:'bob-laptop'\n"
     "  AES_CBC/256/HMAC_SHA2_256/128/PRF_HMAC_SHA2_256/MODP_2048\n"
     "  established 127s ago, rekeying in 86400s\n"
     "eap-zunaid-test-vm-windows: #2, ESTABLISHED, IKEv2 SPIs aaaa_bbbb public=cccc_dddd\n"
-    "  local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]\n"
+    "  local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]\n"
     "  remote 'roaming.public' @ 102.45.91.7[4500] EAP:'zunaid-test-vm-windows'\n"
     "  AES_CBC/256/HMAC_SHA2_256/128/PRF_HMAC_SHA2_256/MODP_2048\n"
     "  established 23s ago, rekeying in 86400s\n"
@@ -103,7 +103,7 @@ def _register_app(*, bake_rows, dev_rows=None, customer_rows=None,
             if cur is None:
                 continue
             if "local  '" in line:
-                # e.g. "  local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]"
+                # e.g. "  local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]"
                 try:
                     cur["local_id"]   = line.split("'")[1]
                     cur["local_ip"]   = line.split("@")[1].split("[")[0].strip()
@@ -185,7 +185,7 @@ def test_verify_returns_verified_true_when_eap_identity_matches():
     assert out["match"]["state"] == "ESTABLISHED"
     assert out["all_matching_sas_count"] == 1
     assert out["live_sas_total"] == 2   # bob + zunaid both in sample
-    assert out["server_local_id"] == "myvpn.databyte.co.za"
+    assert out["server_local_id"] == "za-jnb-01-vpn.databyte.co.za"
     # 5xx safe: never expose the eap password or the SHA-256 of it (Polish #3 invariant)
     assert "password" not in out
     assert "eap_credential" not in out
@@ -197,7 +197,7 @@ def test_verify_matches_by_conn_name_fallback():
     # Build a sample with no EAP field (non-EAP conn)
     non_eap_sas_text = (
         "rw-psk-somebody: #10, ESTABLISHED, IKEv2 SPIs ...\n"
-        "  local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]\n"
+        "  local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]\n"
         "  remote 'somebody' @ 1.2.3.4[4500]\n"
         "  AES_CBC/256\n"
         "  established 50s ago\n"
@@ -208,7 +208,7 @@ def test_verify_matches_by_conn_name_fallback():
         non_eap_sas_text
         + "\n"
         + "eap-zunaid-test-vm-windows: #11, ESTABLISHED, IKEv2 SPIs ...\n"
-        + "  local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]\n"
+        + "  local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]\n"
         + "  remote 'someone' @ 5.6.7.8[4500] EAP:'zunaid-test-vm-windows'\n"
         + "  AES_CBC/256\n"
         + "  established 10s ago\n"
@@ -240,7 +240,7 @@ def test_verify_returns_verified_false_when_no_sa_present():
     assert out["all_matching_sas_count"] == 0
     assert out["live_sas_total"] == 2
     assert out["eap_identity"] == "alice-laptop"
-    assert out["server_local_id"] == "myvpn.databyte.co.za"
+    assert out["server_local_id"] == "za-jnb-01-vpn.databyte.co.za"
 
 
 def test_verify_handles_empty_sas_list():
@@ -388,7 +388,7 @@ def test_verify_does_NOT_call_db_exec_after_register():
     fake_app.swanctl_list_sas = MagicMock(return_value=SAMPLE_SAS_TEXT)
     fake_app._parse_sas_text = lambda x: [
         {"eap_id": "zunaid-test-vm-windows", "conn": "eap-zunaid-test-vm-windows",
-         "local_id": "myvpn.databyte.co.za", "state": "ESTABLISHED",
+         "local_id": "za-jnb-01-vpn.databyte.co.za", "state": "ESTABLISHED",
          "remote_ip": "1.2.3.4", "vip": "10.99.0.5", "established_secs": 10,
          "algo": "AES_CBC/256"},
     ]
@@ -464,7 +464,7 @@ def test_verify_does_NOT_call_db_exec_after_register():
     fake_app.swanctl_list_sas = MagicMock(return_value=SAMPLE_SAS_TEXT)
     fake_app._parse_sas_text = lambda x: [
         {"eap_id": "zunaid-test-vm-windows", "conn": "eap-zunaid-test-vm-windows",
-         "local_id": "myvpn.databyte.co.za", "state": "ESTABLISHED",
+         "local_id": "za-jnb-01-vpn.databyte.co.za", "state": "ESTABLISHED",
          "remote_ip": "1.2.3.4", "vip": "10.99.0.5", "established_secs": 10,
          "algo": "AES_CBC/256"},
     ]

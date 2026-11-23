@@ -2631,8 +2631,8 @@
   function renderOneshotPanel(r, installerData) {
     const c = r.customer, d = r.device;
     const eapId = r.eap_identity, pw = r.password;
-    const server    = 'myvpn.databyte.co.za';
-    const remoteId  = 'myvpn.databyte.co.za';
+    const server    = 'za-jnb-01-vpn.databyte.co.za';
+    const remoteId  = 'za-jnb-01-vpn.databyte.co.za';
     const localId   = eapId;
 
     function fieldRow(label, value, copy = true) {

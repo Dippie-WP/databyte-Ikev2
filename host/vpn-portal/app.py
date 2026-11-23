@@ -513,7 +513,7 @@ def fingerprint_device(algo_str: str) -> dict:
 # swanctl --list-sas parser — extracts structured data for the UI.
 # Format (strongSwan 6.x):
 #   rw-eap: #22, ESTABLISHED, IKEv2, <spi_i>_i <spi_r>_r*
-#     local  'myvpn.databyte.co.za' @ 154.65.110.44[4500]
+#     local  'za-jnb-01-vpn.databyte.co.za' @ 154.65.104.57[4500]
 #     remote '192.168.10.18' @ 102.182.117.43[4500] EAP: 'saalieg-laptop' [10.99.0.2]
 #     AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
 #     established 614s ago, rekeying in 79344s, reauth in 78406s

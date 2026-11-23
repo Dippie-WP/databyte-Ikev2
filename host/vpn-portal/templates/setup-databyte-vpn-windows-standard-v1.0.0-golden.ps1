@@ -11,8 +11,8 @@ $ErrorActionPreference = 'Stop'
 # ============================================================================
 # BAKED-IN CONFIG (PATCHED: real password baked in)
 # ============================================================================
-$ServerAddress  = "myvpn.databyte.co.za"
-$RemoteId       = "myvpn.databyte.co.za"
+$ServerAddress  = "za-jnb-01-vpn.databyte.co.za"
+$RemoteId       = "za-jnb-01-vpn.databyte.co.za"
 $ConnectionName = "DatabyteVPN"
 $PortalBase     = "https://vpn-portal.databyte.co.za"
 $ServerCertSha256 = "01:B1:E8:06:82:F7:05:8D:33:B0:37:FB:97:DA:54:A2:F4:83:88:3B:C8:E7:05:99:FF:E5:BE:09:70:21:29:DB"

@@ -7,7 +7,7 @@
     There are no other versions. If you find another setup-*.ps1 in this
     repo or on the portal, it is rot and should be deleted.
 
-    Server:         myvpn.databyte.co.za (VPS 154.65.110.44)
+    Server:         za-jnb-01-vpn.databyte.co.za (VPS 154.65.104.57)
     Auth:           EAP-MSCHAPv2
     Crypto:         AES128 / SHA256128 / Group14 / SHA256 / PFS2048
     Credential API: rasapi32!RasSetCredentials (canonical Microsoft API)
@@ -72,8 +72,8 @@ $ErrorActionPreference = 'Stop'
 # ============================================================================
 # CONFIG
 # ============================================================================
-$ServerAddress  = "myvpn.databyte.co.za"
-$RemoteId       = "myvpn.databyte.co.za"
+$ServerAddress  = "za-jnb-01-vpn.databyte.co.za"
+$RemoteId       = "za-jnb-01-vpn.databyte.co.za"
 $ConnectionName = "DatabyteVPN"
 $PortalBase     = "https://vpn-portal.databyte.co.za"
 
@@ -472,7 +472,7 @@ Write-Host ""
 Write-Host "  (No -k flag. No -zun suffix. No archived script. THIS is the way.)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  If that URL ever fails, fallback (uses myvpn.* which has Origin Cert):" -ForegroundColor DarkGray
-Write-Host "  curl.exe -k -o `$env:TEMP\setup.ps1 https://myvpn.databyte.co.za/static/setup-databyte-vpn.ps1" -ForegroundColor DarkGray
+Write-Host "  curl.exe -k -o `$env:TEMP\setup.ps1 https://za-jnb-01-vpn.databyte.co.za/static/setup-databyte-vpn.ps1" -ForegroundColor DarkGray
 Write-Host "  & `$env:TEMP\setup.ps1" -ForegroundColor DarkGray
 Write-Host "  rasdial DatabyteVPN" -ForegroundColor DarkGray
 Write-Host ""
@@ -480,8 +480,8 @@ Write-Host "  Disconnect:  rasdial DatabyteVPN /disconnect" -ForegroundColor Cya
 Write-Host "  Reconnect:   rasdial DatabyteVPN" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Test after connecting:" -ForegroundColor Cyan
-Write-Host "    tracert 8.8.8.8                       (first hop = 154.65.110.44)"
-Write-Host "    Invoke-WebRequest https://ifconfig.me (returns 154.65.110.44)"
+Write-Host "    tracert 8.8.8.8                       (first hop = 154.65.104.57)"
+Write-Host "    Invoke-WebRequest https://ifconfig.me (returns 154.65.104.57)"
 Write-Host ""
 Write-Host "  Setup log: $transcriptPath" -ForegroundColor DarkGray
 Write-Host ""

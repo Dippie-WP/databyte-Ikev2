@@ -1,6 +1,6 @@
 # databyte VPN Portal — nginx config (CP4 + CP5)
 
-Production nginx site config for vpn-prod-01 (154.65.110.44).
+Production nginx site config for vpn-prod-01 (154.65.104.57).
 
 ## Files
 
@@ -59,9 +59,9 @@ RuntimeDirectoryMode=0755
 
 ```bash
 # From VPS (or anywhere with Cloudflare proxy access):
-curl -skI https://myvpn.databyte.co.za/api/health
-curl -skI https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem
-curl -skI https://myvpn.databyte.co.za/static/app.js
+curl -skI https://za-jnb-01-vpn.databyte.co.za/api/health
+curl -skI https://za-jnb-01-vpn.databyte.co.za/certs/strongswan-ca.crt.pem
+curl -skI https://za-jnb-01-vpn.databyte.co.za/static/app.js
 # Expect: HSTS + CSP + X-Frame + X-Content + Referrer + Permissions + COOP headers
 ```
 

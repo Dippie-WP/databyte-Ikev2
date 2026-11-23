@@ -362,7 +362,7 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
             "customer_name": "acme-corp",
             "username":      "acme-corp-laptop",  # EAP identity
             "password":      "...",                # plain-text, only returned ONCE
-            "server":        "myvpn.databyte.co.za",
+            "server":        "za-jnb-01-vpn.databyte.co.za",
             "portal":        "https://vpn-portal.databyte.co.za/portal/",
             "device_name":   "laptop",
             "device_type":   "windows",
@@ -492,7 +492,7 @@ def register(app: FastAPI, db_query, db_exec, q, audit_fn, require_session_dep):
             "customer_display": row.get("display_name"),
             "username":        eap_identity,
             "password":        plain_password,
-            "server":          "myvpn.databyte.co.za",
+            "server":          "za-jnb-01-vpn.databyte.co.za",
             "portal":          "https://vpn-portal.databyte.co.za/portal/",
             "device_name":     dev["device_name"],
             "device_type":     dev.get("device_type"),

@@ -185,7 +185,7 @@ def test_hostile_does_not_invoke_https():
     ), "https:// present in executable code"
 
     # Specifically: no portal URL references in actual command lines
-    forbidden_in_executable = ["vpn-portal.databyte.co.za", "myvpn.databyte.co.za/static/", ".ps1' "]
+    forbidden_in_executable = ["vpn-portal.databyte.co.za", "za-jnb-01-vpn.databyte.co.za/static/", ".ps1' "]
     for forbidden in forbidden_in_executable:
         assert forbidden not in body_exec, (
             f"{forbidden!r} present in executable code -- would break hostile flow. "
@@ -206,11 +206,11 @@ def test_hostile_skips_cert_validation():
 
 
 def test_hostile_server_address_correct():
-    """Must point at myvpn.databyte.co.za (cloudflare-free direct DNS), per skill."""
+    """Must point at za-jnb-01-vpn.databyte.co.za (cloudflare-free direct DNS), per skill."""
     out = build(CUST, DEV, MODE_HOSTILE, eap_password=PW)
     body = out["content"]
-    assert "$ServerAddress = \"myvpn.databyte.co.za\"" in body
-    assert "154.65.110.44" in body  # IP literal also works through firewalls
+    assert "$ServerAddress = \"za-jnb-01-vpn.databyte.co.za\"" in body
+    assert "154.65.104.57" in body  # IP literal also works through firewalls
 
 
 def test_hostile_crypto_matches_strongswan_server():

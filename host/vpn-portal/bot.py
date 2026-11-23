@@ -1379,7 +1379,7 @@ async def ct_confirm(update, context):
             setup_path = f"/opt/vpn-portal/www/static/baked/{setup_filename}"
             build_installer_script(customer=customer_dict, device=device_dict,
                                     out_path=setup_path, eap_identity=eap_id, password=password)
-            setup_url = f"https://myvpn.databyte.co.za/static/baked/{setup_filename}"
+            setup_url = f"https://za-jnb-01-vpn.databyte.co.za/static/baked/{setup_filename}"
         except Exception as bake_err:
             logger.warning("TKT-BAKE: failed to bake Windows installer: %s", bake_err)
     else:
@@ -1392,11 +1392,11 @@ async def ct_confirm(update, context):
         f"Device: `{device_type}`\n"
         f"Expires: `{expires_at}`\n\n"
         f"! *Self-destructs in 60s*\n\n"
-        f"Server: `myvpn.databyte.co.za`\n"
+        f"Server: `za-jnb-01-vpn.databyte.co.za`\n"
         f"EAP identity: `{eap_id}`\n"
         f"Password: `{password}`\n"
         f"Setup: {_md(setup_url)}\n"
-        f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem"
+        f"CA cert: https://za-jnb-01-vpn.databyte.co.za/certs/strongswan-ca.crt.pem"
     )
     msg = await _safe_edit_text(q, text, parse_mode=ParseMode.MARKDOWN)
     if msg is None:
@@ -1617,7 +1617,7 @@ async def cmd_creds(update, context):
     text = (
         f"Creds for `{rows[0]['name']}` (id=`{customer_id}`)\n\n"
         f"! *Self-destructs in 60s*\n\n"
-        f"Server: `myvpn.databyte.co.za`\n"
+        f"Server: `za-jnb-01-vpn.databyte.co.za`\n"
         f"EAP identity: `{eap_identity}`\n"
         f"Password: `{password}`"
     )
@@ -2576,10 +2576,10 @@ def _ro_creds_text(res):
             f"Device: `{res['device_name']}`\n"
             f"Expires: `{res['expires_at'] or '?'}`\n\n"
             f"! *Self-destructs in 60s*\n\n"
-            f"Server: `myvpn.databyte.co.za`\n"
+            f"Server: `za-jnb-01-vpn.databyte.co.za`\n"
             f"EAP identity: `{res['eap_identity']}`\n"
             f"Password: `{res['password']}`\n"
-            f"CA cert: https://myvpn.databyte.co.za/certs/strongswan-ca.crt.pem{_reuse_note}")
+            f"CA cert: https://za-jnb-01-vpn.databyte.co.za/certs/strongswan-ca.crt.pem{_reuse_note}")
 
 
 def _eap_secret_from_conf(conf_text: str, eap_identity: str):
@@ -3116,7 +3116,7 @@ async def cmd_health(update, context):
     cert_days = None
     try:
         out = _run(["openssl", "x509", "-enddate", "-noout", "-in",
-                    "/etc/letsencrypt/live/myvpn.databyte.co.za/fullchain.pem"])
+                    "/etc/letsencrypt/live/za-jnb-01-vpn.databyte.co.za/fullchain.pem"])
         ds = out.split("=", 1)[1]
         cert_exp = datetime.strptime(ds, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
         cert_days = (cert_exp - datetime.now(timezone.utc)).days
