@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from typing import Any, Optional
 
 log = logging.getLogger("build_installer")
@@ -62,8 +63,8 @@ MODE_HOSTILE = "hostile"
 ALLOWED_MODES = (MODE_STANDARD, MODE_HOSTILE)
 
 # Server identity (matches rw-eap.conf `leftid` on vps-01  -  SAN of LE cert)
-SERVER_ADDRESS = "za-jnb-01-vpn.databyte.co.za"
-REMOTE_ID = "za-jnb-01-vpn.databyte.co.za"
+SERVER_ADDRESS = os.environ.get("SITE_FQDN", "za-jnb-01-vpn.databyte.co.za")
+REMOTE_ID = SERVER_ADDRESS
 
 # Profile / connection name (per skill  -  same constant across both skills)
 CONNECTION_NAME = "DatabyteVPN"
@@ -193,7 +194,7 @@ def _build_hostile(
     portals that intercept TCP/443.
 
     5 steps (matches skills/windows-vpn-hostile-network-setup):
-      1. Add-VpnConnection (IKEv2 + EAP, -ServerAddress za-jnb-01-vpn.databyte.co.za)
+      1. Add-VpnConnection (IKEv2 + EAP, -ServerAddress <SITE_FQDN>)
       2. Set-VpnConnectionIPsecConfiguration (Group14 / SHA256 / AES256 / PFS2048)
       3. Registry: NegotiateDH2048_AES256 = 2
       4. cmdkey clear + RasSetCredentials (P/Invoke rasapi32.dll)

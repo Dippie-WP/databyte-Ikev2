@@ -61,7 +61,6 @@ FILES=(
   # New: quota script (1)
   "quota/quota-exporter.py"
   # New: strongswan charon configs (2)
-  "docker/strongswan.d/10-eap-radius.conf"
   "docker/strongswan.d/debug.conf"
   # Added 2026-10-20: build_installer.py had live-only HOT-177/HOT-183 fixes
   # (ByValTStr SizeConst, Mask=0x7) that drift-detect was NOT watching.
@@ -92,7 +91,6 @@ declare -A LIVE_PATHS=(
   # Quota script (1)
   ["quota/quota-exporter.py"]="/opt/strongswan-vpn-gateway/quota/quota-exporter.py"
   # strongswan charon configs (2)
-  ["docker/strongswan.d/10-eap-radius.conf"]="/opt/strongswan-vpn-gateway/docker/strongswan.d/10-eap-radius.conf"
   ["docker/strongswan.d/debug.conf"]="/opt/strongswan-vpn-gateway/docker/strongswan.d/debug.conf"
   # Added 2026-10-20
   ["host/vpn-portal/scripts/build_installer.py"]="/opt/vpn-portal/scripts/build_installer.py"

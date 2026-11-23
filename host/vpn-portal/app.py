@@ -69,6 +69,7 @@ from pydantic import BaseModel, Field
 
 # ---------- Config ----------
 VPN_HOST        = os.environ.get("VPN_HOST", "")
+SITE_FQDN       = os.environ.get("SITE_FQDN", "za-jnb-01-vpn.databyte.co.za")
 if not VPN_HOST:
     raise RuntimeError(
         "VPN_HOST env var is REQUIRED. "
@@ -1035,6 +1036,7 @@ def health():
         "db_ok": db_ok, "db_customers": db_count,
         "charon_ok": charon_ok,
         "vpn_host": VPN_HOST,
+        "site_fqdn": SITE_FQDN,
         "ts": datetime.utcnow().isoformat() + "Z",
         "error": err,
     }
