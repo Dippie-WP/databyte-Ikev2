@@ -1,13 +1,10 @@
-/* databyte VPN Customer Portal — v1.4.0
-   Extracted from inline <style> in /portal/index.html to comply with
-   strict CSP `style-src 'self'` (no inline <style> elements allowed).
-   Reference via <link rel="stylesheet" href="/static/portal.css?v=1.4.0">.
+/* databyte VPN Customer Portal — v2.0.0 (2026-11-24)
+   Account revamp: name + tier badge + time-left (text + period bar) +
+   sign-up / expiry dates, alongside the data-usage meter.
 
-   v1.5.0 — 2026-06-28 — responsive @media pass. Breakpoints mirror
-   app.css (900 / 600 / 480 / 360) for consistency. Before: 0 @media
-   rules; card was hard-locked to 480px max-width which left huge empty
-   margins on tablets / large phones and cramped content on small phones.
-   Pattern source: app.css lines 428-485 (operator portal @media tree).
+   Strict CSP `style-src 'self'` — no inline <style>/style= anywhere.
+   Reference via <link rel="stylesheet" href="/static/portal.css?v=20261124">.
+   Responsive breakpoints mirror app.css (900 / 600 / 480 / 360).
 */
 
 body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -30,7 +27,33 @@ body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-syste
 .vp-portal button:hover { background: #2ea043; }
 .vp-portal button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
 .vp-portal .vp-error { background: #4c1f1f; color: #ff7b72; padding: 10px 12px; border-radius: 4px; margin-bottom: 16px; font-size: 0.9rem; }
+
+/* ─── Account card ─────────────────────────────────────────────── */
+.vp-portal .vp-card.vp-account { padding: 20px 20px 16px; }
+.vp-portal .vp-account-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.vp-portal .vp-name { font-size: 1.25rem; font-weight: 700; color: #e6edf3; line-height: 1.2; overflow-wrap: anywhere; }
+.vp-portal .vp-badge {
+  display: inline-block; font-size: 0.78rem; font-weight: 600; color: #58a6ff;
+  background: rgba(88, 166, 255, 0.12); border: 1px solid rgba(88, 166, 255, 0.35);
+  border-radius: 999px; padding: 4px 10px; white-space: nowrap;
+}
+
+/* Time-left: label + period bar */
+.vp-portal .vp-timerow { margin-bottom: 16px; }
+.vp-portal .vp-timelabel { font-size: 0.95rem; font-weight: 600; color: #e6edf3; margin-bottom: 6px; }
+.vp-portal .vp-time-meter { height: 12px; }
+.vp-portal .vp-time-meter .vp-meter-fill { background: #58a6ff; }
+
+/* Sign-up / expiry rows */
+.vp-portal .vp-dates { margin: 0; padding: 14px 0 0; border-top: 1px solid #21262d; }
+.vp-portal .vp-date-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.vp-portal .vp-date-row dt { color: #8b949e; font-size: 0.85rem; }
+.vp-portal .vp-date-row dd { margin: 0; color: #e6edf3; font-size: 0.9rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.vp-portal .vp-card-title { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e; margin-bottom: 12px; }
 .vp-portal .vp-tier { font-size: 1.1rem; color: #58a6ff; margin-bottom: 12px; font-weight: 600; }
+
+/* Meters (shared by usage + time) */
 .vp-portal .vp-meter { background: #21262d; border-radius: 4px; height: 16px; overflow: hidden; margin-bottom: 8px; position: relative; }
 .vp-portal .vp-meter-fill { background: #238636; height: 100%; transition: width 0.3s; width: var(--pct, 0%); }
 .vp-portal .vp-meter-fill.vp-warn { background: #d29922; }
@@ -45,27 +68,19 @@ body { background: #0e1419; color: #e6edf3; margin: 0; font-family: -apple-syste
 .vp-portal .vp-meta { font-size: 0.75rem; color: #6e7681; text-align: center; margin-top: 24px; }
 .vp-portal .vp-hidden { display: none !important; }
 
-/* ─── v1.5.0 — responsive @media pass ──────────────────────────── */
-/* Breakpoints mirror app.css (900 / 600 / 480 / 360) for consistency.
-   The customer portal is a single-column centered card; the only thing
-   that changes across breakpoints is card width and outer padding. */
-@media (min-width: 481px) {
-  .vp-portal { max-width: 560px; }
-}
-@media (min-width: 768px) {
-  .vp-portal { max-width: 640px; }
-}
+/* ─── responsive @media pass ───────────────────────────────────── */
+@media (min-width: 481px) { .vp-portal { max-width: 560px; } }
+@media (min-width: 768px) { .vp-portal { max-width: 640px; } }
 @media (max-width: 480px) {
   .vp-portal { padding: 16px 12px; }
   .vp-portal h1 { font-size: 1.35rem; }
   .vp-portal .vp-card { padding: 16px; }
+  .vp-portal .vp-name { font-size: 1.15rem; }
 }
 @media (max-width: 360px) {
-  /* Galaxy Fold cover / very small phones */
   .vp-portal { padding: 12px 10px; }
   .vp-portal .vp-card { padding: 14px; }
-  .vp-portal input[type=text], .vp-portal input[type=password] {
-    padding: 9px 10px; font-size: 0.95rem;
-  }
+  .vp-portal input[type=text], .vp-portal input[type=password] { padding: 9px 10px; font-size: 0.95rem; }
   .vp-portal button { padding: 11px; font-size: 0.95rem; }
+  .vp-portal .vp-account-head { gap: 8px; }
 }

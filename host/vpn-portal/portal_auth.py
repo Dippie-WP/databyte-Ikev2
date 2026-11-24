@@ -412,7 +412,7 @@ def lookup_customer_full(customer_id: int) -> Optional[dict]:
     with _db() as conn:
         rows = conn.execute(
             "SELECT c.id, c.name, c.display_name, c.email, c.status, c.is_operator, c.is_active, "
-            "c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, "
+            "c.data_used_bytes, c.data_limit_bytes, c.over_quota, c.max_devices, c.created_at, c.updated_at, c.expires_at, "
             "t.name AS tier_name, t.display_name AS tier_display "
             "FROM customers c LEFT JOIN tiers t ON t.id = c.tier_id "
             "WHERE c.id = ?",

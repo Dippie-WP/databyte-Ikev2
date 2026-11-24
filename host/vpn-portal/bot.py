@@ -11,7 +11,7 @@ Commands:
   /customers - all customers
   /customer <id|name> - drill-down
   /create <name> [display] - create customer, return creds (auto-delete 60s)
-  /creds <id|name> - fetch current creds from rw-eap.conf (auto-delete 60s)
+  /creds <id|name|eap-identity> - fetch current creds from rw-eap.conf (auto-delete 60s)
   /disable <id|name> - set is_active=0
   /enable <id|name> - set is_active=1
   /disconnect <name> - CoA kick via radclient 127.0.0.1:3779
@@ -673,7 +673,7 @@ async def cmd_start(update, context):
         "/customers - all customers\n"
         "/customer <id|name> - drill-down\n"
         "/create <name> [display] - new customer\n"
-        "/creds <id|name> - fetch creds (auto-del 60s)\n"
+        "/creds <id|name|eap-identity> - fetch creds (auto-del 60s)\n"
         "/disable /enable <id|name>\n"
         "/disconnect <name> - CoA kick\n"
         "/logs <name> [n]"
@@ -1566,7 +1566,7 @@ async def cmd_renew(update, context):
 
 async def cmd_creds(update, context):
     if not context.args:
-        await update.message.reply_text("Usage: /creds <id|name>")
+        await update.message.reply_text("Usage: /creds <id|name|eap-identity>")
         return
     arg = context.args[0]
     audit("creds", arg=arg)
@@ -1580,6 +1580,14 @@ async def cmd_creds(update, context):
         rows = app.db_query(
             "SELECT id, name, user_id FROM customers WHERE name = ?", (arg,)
         )
+        if not rows:
+            # v2.0.1 (2026-11-24): also accept the EAP identity (users.name),
+            # e.g. /creds ant-android -> customer `ant`. One identity = one customer.
+            rows = app.db_query(
+                "SELECT c.id AS id, c.name AS name, c.user_id AS user_id "
+                "FROM customers c JOIN users u ON u.id = c.user_id "
+                "WHERE u.name = ?", (arg,)
+            )
     if not rows:
         await update.message.reply_text(f"No customer `{arg}`.")
         return

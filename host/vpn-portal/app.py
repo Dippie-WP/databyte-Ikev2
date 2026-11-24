@@ -3194,6 +3194,43 @@ def portal_usage(session: dict = Depends(portal_auth.require_portal_session)):
     if not no_cap and limit > 0:
         pct = round(used / limit * 100, 1)
 
+    # --- account lifecycle (portal revamp, 2026-11-24) ---
+    # expires_at is a naive DATETIME; container + MariaDB both run UTC, so
+    # datetime.utcnow() is the correct comparison base.
+    import math as _math
+    from datetime import timezone as _tz
+    _now = datetime.utcnow()
+    _exp = cust.get("expires_at")
+    _created_epoch = cust.get("created_at")
+    _secs = None
+    signup_date = None
+    if _created_epoch:
+        try:
+            signup_date = datetime.utcfromtimestamp(int(_created_epoch)).strftime("%Y-%m-%d")
+        except (ValueError, OSError, TypeError):
+            signup_date = None
+    expiry_date = None
+    expiry_datetime = None
+    days_left = None
+    seconds_left = None
+    account_days = None
+    if _exp is not None:
+        _exp_dt = _exp if isinstance(_exp, datetime) else datetime.fromisoformat(str(_exp))
+        if _exp_dt.tzinfo is not None:
+            _exp_dt = _exp_dt.astimezone(_tz.utc).replace(tzinfo=None)
+        expiry_date = _exp_dt.strftime("%Y-%m-%d")
+        expiry_datetime = _exp_dt.strftime("%Y-%m-%d %H:%M UTC")
+        _secs = (_exp_dt - _now).total_seconds()
+        seconds_left = int(_secs)
+        # ceil so a partial day reads as "1 day left", never a bogus "0 days left"
+        days_left = int(_math.ceil(_secs / 86400.0)) if _secs > 0 else 0
+        if _created_epoch:
+            try:
+                _secs_period = (_exp_dt - datetime.utcfromtimestamp(int(_created_epoch))).total_seconds()
+                account_days = max(1, int(round(_secs_period / 86400.0)))
+            except (ValueError, OSError, TypeError):
+                account_days = None
+
     return {
         "customer_id": cust["id"],
         "customer_name": cust["name"],
@@ -3208,6 +3245,15 @@ def portal_usage(session: dict = Depends(portal_auth.require_portal_session)):
         "max_devices": cust.get("max_devices"),
         "is_operator": is_operator,
         "status": cust.get("status"),
+        "signup_date": signup_date,
+        "expiry_date": expiry_date,
+        "expiry_datetime": expiry_datetime,
+        "days_left": days_left,
+        "seconds_left": seconds_left,
+        "account_days": account_days,
+        "has_expiry": _exp is not None,
+        "expired": bool(_exp is not None and _secs is not None and _secs <= 0)
+                   or cust.get("status") == "expired",
     }
 
 

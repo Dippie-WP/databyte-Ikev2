@@ -1,16 +1,18 @@
-// v1.4.0 — Customer portal SPA. Vanilla JS, no framework.
+// v2.0.0 — Customer portal SPA. Vanilla JS, no framework.
 // Login → /api/portal/login → cookie → /api/portal/usage → render.
 // On 401, show login. On logout, clear and show login.
-// v1.4.0: refactored fill.style.width → fill.style.setProperty('--pct', ...)
-// for strict-CSP compliance (no inline style attributes).
-// v1.4.1: add 30s auto-refresh on dashboard so data usage updates without
-// page reload. Matches operator portal cadence. Pauses on 401 / logout / page
-// hidden. Re-fires on visibility return.
+//
+// v2.0.0 (2026-11-24) — account revamp: dashboard now shows the customer
+//   name, tier badge, time-left (text + period bar), sign-up date and expiry
+//   date, alongside the existing data-usage meter. All values come from
+//   /api/portal/usage (server-computed; the client does no date math, so
+//   browser timezone cannot drift the result).
+// v1.4.1: 30s auto-refresh on the dashboard. Pauses on 401 / logout / hidden tab.
+// v1.4.0: fill.style.setProperty('--pct', ...) for strict-CSP compliance.
 
 (function () {
   'use strict';
 
-  // v1.4.1 — auto-refresh state
   const AUTO_REFRESH_MS = 30000;
   let _refreshTimer = null;
   function startAutoRefresh() {
@@ -29,28 +31,23 @@
     return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GiB';
   }
 
-  function show(id) {
-    document.getElementById(id).classList.remove('vp-hidden');
-  }
-  function hide(id) {
-    document.getElementById(id).classList.add('vp-hidden');
-  }
-  function showLogin() {
-    hide('vp-dashboard-view');
-    show('vp-login-view');
-  }
-  function showDashboard() {
-    hide('vp-login-view');
-    show('vp-dashboard-view');
-  }
+  function show(id) { document.getElementById(id).classList.remove('vp-hidden'); }
+  function hide(id) { document.getElementById(id).classList.add('vp-hidden'); }
+  function showLogin() { hide('vp-dashboard-view'); show('vp-login-view'); }
+  function showDashboard() { hide('vp-login-view'); show('vp-dashboard-view'); }
 
   function showError(msg) {
     const el = document.getElementById('vp-login-error');
     el.textContent = msg;
     show('vp-login-error');
   }
-  function hideError() {
-    hide('vp-login-error');
+  function hideError() { hide('vp-login-error'); }
+
+  // Strict-CSP safe: set the meter fill via CSS custom property through CSSOM.
+  function setFill(el, pct, cls) {
+    el.style.setProperty('--pct', pct + '%');
+    el.classList.remove('vp-warn', 'vp-over');
+    if (cls) el.classList.add(cls);
   }
 
   async function doLogin(identity, password) {
@@ -71,7 +68,6 @@
         return;
       }
       await loadUsage();
-      // v1.4.1 — start 30s auto-refresh once we're past auth
       startAutoRefresh();
     } catch (e) {
       showError('Network error: ' + e.message);
@@ -83,13 +79,8 @@
 
   async function doLogout() {
     try {
-      await fetch('/api/portal/logout', {
-        method: 'POST',
-        credentials: 'include',
-      });
-    } catch (e) {
-      // best effort
-    }
+      await fetch('/api/portal/logout', { method: 'POST', credentials: 'include' });
+    } catch (e) { /* best effort */ }
     stopAutoRefresh();
     showLogin();
     document.getElementById('vp-identity').value = '';
@@ -99,9 +90,7 @@
   async function loadUsage() {
     let r;
     try {
-      r = await fetch('/api/portal/usage', {
-        credentials: 'include',
-      });
+      r = await fetch('/api/portal/usage', { credentials: 'include' });
     } catch (e) {
       showLogin();
       stopAutoRefresh();
@@ -123,10 +112,46 @@
     showDashboard();
   }
 
-  function renderUsage(u) {
-    const tierName = u.tier_display || u.tier_name || 'Unknown tier';
-    document.getElementById('vp-tier').textContent = tierName;
+  function renderAccount(u) {
+    // Name (display name preferred) + tier badge
+    document.getElementById('vp-name').textContent =
+      u.customer_display_name || u.customer_name || 'Account';
+    document.getElementById('vp-tier').textContent =
+      u.tier_display || u.tier_name || 'Unknown tier';
 
+    // Time left — text + period bar
+    const label = document.getElementById('vp-time-label');
+    const fill = document.getElementById('vp-time-fill');
+    const expired = u.expired || (u.has_expiry && (u.seconds_left || 0) <= 0);
+    if (!u.has_expiry) {
+      label.textContent = 'No expiry set';
+      setFill(fill, 0, null);
+    } else if (expired) {
+      label.textContent = 'Expired';
+      setFill(fill, 100, 'vp-over');
+    } else {
+      const d = u.days_left;
+      if (u.seconds_left != null && u.seconds_left < 86400) {
+        label.textContent = 'Less than a day left';
+      } else {
+        label.textContent = (d === 1) ? '1 day left' : d + ' days left';
+      }
+      let p = 0;
+      if (u.account_days && u.account_days > 0) {
+        p = Math.min(100, Math.max(0, ((u.account_days - d) / u.account_days) * 100));
+      }
+      setFill(fill, p.toFixed(1), d <= 3 ? 'vp-warn' : null);
+    }
+
+    // Dates
+    document.getElementById('vp-signup').textContent = u.signup_date || '\u2014';
+    document.getElementById('vp-expiry').textContent = u.expiry_date || '\u2014';
+  }
+
+  function renderUsage(u) {
+    renderAccount(u);
+
+    // Data usage meter
     if (u.no_cap) {
       hide('vp-meter-fill');
       hide('vp-meter-text');
@@ -140,16 +165,7 @@
 
       const pct = Math.min(100, u.data_pct || 0);
       const fill = document.getElementById('vp-meter-fill');
-      // v1.4.0 — strict-CSP compliant: use CSS custom property via CSSOM API.
-      // element.setProperty is allowed by strict CSP per W3C CSP3 §6.7.3.1.
-      // Only the `style="..."` *attribute* is blocked; CSSOM writes are not.
-      fill.style.setProperty('--pct', pct + '%');
-      fill.classList.remove('vp-warn', 'vp-over');
-      if (u.over_quota || pct >= 100) {
-        fill.classList.add('vp-over');
-      } else if (pct >= 80) {
-        fill.classList.add('vp-warn');
-      }
+      setFill(fill, pct.toFixed(1), (u.over_quota || pct >= 100) ? 'vp-over' : (pct >= 80 ? 'vp-warn' : null));
       document.getElementById('vp-meter-text').textContent = pct.toFixed(1) + '%';
 
       const used = fmtBytes(u.data_used_bytes);
@@ -161,12 +177,10 @@
         '<span><strong>' + limit + '</strong> cap</span>';
     }
 
-    // Footer: who you're logged in as + session info
+    // Footer
     const me = document.getElementById('vp-meta');
-    const createdAt = u._session_created_at
-      ? new Date(u._session_created_at * 1000).toLocaleString()
-      : '';
-    me.textContent = 'Session active. ' + (createdAt ? 'Signed in at ' + createdAt + '. ' : '') + 'Idle expiry: 30 days.';
+    me.textContent = 'Signed in as ' + (u.customer_name || 'your account') +
+      '. Auto-refreshes every 30s. Idle expiry: 30 days.';
   }
 
   // Wire up
@@ -182,26 +196,17 @@
   });
   document.getElementById('vp-logout-btn').addEventListener('click', doLogout);
 
-  // On load: try to fetch usage. If 401, show login.
   loadUsage().then(() => {
-    // v1.4.1 — if we already have a valid session cookie (returning customer),
-    // loadUsage() rendered the dashboard. Start the 30s auto-refresh now.
     const dashVisible = !document.getElementById('vp-dashboard-view').classList.contains('vp-hidden');
     if (dashVisible) startAutoRefresh();
   });
 
-  // v1.4.1 — pause auto-refresh when tab is hidden (Chrome throttles setInterval
-  // to 1s+ in background anyway, but stopping avoids spurious 401 storms if the
-  // server-side session expires while the tab is hidden). Resume on return.
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       stopAutoRefresh();
     } else {
       const dashVisible = !document.getElementById('vp-dashboard-view').classList.contains('vp-hidden');
-      if (dashVisible) {
-        loadUsage();
-        startAutoRefresh();
-      }
+      if (dashVisible) { loadUsage(); startAutoRefresh(); }
     }
   });
 })();

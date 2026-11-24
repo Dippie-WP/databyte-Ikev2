@@ -7,7 +7,7 @@
 <meta name="referrer" content="no-referrer" />
 <meta name="robots" content="noindex, nofollow" />
 <title>databyte · Customer Portal</title>
-<link rel="stylesheet" href="/static/portal.css?v=89b0569" />
+<link rel="stylesheet" href="/static/portal.css?v=20261124" />
 <!-- portal-autorefresh-marker: 30s-auto-refresh-2026-07-06 -->
 </head>
 <body>
@@ -33,8 +33,26 @@
   <div id="vp-dashboard-view" class="vp-hidden">
     <h1>databyte</h1>
     <div class="vp-subtitle">Customer Portal</div>
+
+    <div class="vp-card vp-account">
+      <div class="vp-account-head">
+        <div class="vp-name" id="vp-name">&#8212;</div>
+        <div class="vp-badge" id="vp-tier">Loading&#8230;</div>
+      </div>
+      <div class="vp-timerow">
+        <div class="vp-meter vp-time-meter">
+          <div class="vp-meter-fill" id="vp-time-fill"></div>
+        </div>
+        <div class="vp-timelabel" id="vp-time-label">&#8212;</div>
+      </div>
+      <dl class="vp-dates">
+        <div class="vp-date-row"><dt>Signed up</dt><dd id="vp-signup">&#8212;</dd></div>
+        <div class="vp-date-row"><dt>Expires</dt><dd id="vp-expiry">&#8212;</dd></div>
+      </dl>
+    </div>
+
     <div class="vp-card">
-      <div class="vp-tier" id="vp-tier">Loading...</div>
+      <div class="vp-card-title">Data usage</div>
       <div class="vp-meter">
         <div class="vp-meter-fill" id="vp-meter-fill"></div>
         <div class="vp-meter-text" id="vp-meter-text"></div>
@@ -44,11 +62,12 @@
         <strong>No data cap.</strong> Your account is not metered.
       </div>
     </div>
+
     <button class="vp-logout" id="vp-logout-btn">Sign out</button>
     <div class="vp-meta" id="vp-meta"></div>
   </div>
 </div>
-<script src="/static/portal.js?v=89b0569"></script>
+<script src="/static/portal.js?v=20261124"></script>
 <!-- /portal-autorefresh-marker -->
 </body>
 </html>
