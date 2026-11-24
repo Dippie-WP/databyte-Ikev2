@@ -171,7 +171,7 @@ class TestInstallerTokenConsume:
         assert body["customer_name"] == "consume-co"
         assert body["username"] == "consume-co-laptop"
         assert "password" in body and len(body["password"]) >= 16
-        assert body["server"] == "myvpn.databyte.co.za"
+        assert body["server"] == "za-jnb-01-vpn.databyte.co.za"
         assert body["tier"] == "tier_5gb"
 
     def test_consume_twice_returns_404(self, client, operator_login):
