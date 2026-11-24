@@ -25,6 +25,14 @@ cd "$REPO_ROOT"
 VPS_HOST="${VPS_HOST:-vps-01}"
 VPS_USER="${VPS_USER:-root}"
 
+# bot.py carries a LIVE secret that the public repos store as "REDACTED".
+# Normalise secret values before hashing so a redacted repo still compares
+# equal to LIVE; otherwise this drift can never clear without publishing the
+# secret. Pattern-based only - it never embeds the secret value itself.
+norm_secrets() {
+  sed -E 's/(secret[[:space:]]*=[[:space:]]*")[^"]*(")/\1REDACTED\2/g; s/(with secret[[:space:]]*`)[^`]*(`)/\1REDACTED\2/g'
+}
+
 # Files we want to verify are in sync between LIVE VPS and git HEAD.
 # Expanded 2026-08-17 to cover the 3 atomic-write callers + backup script that
 # were part of the TKT-002 refactor (previously uncommitted, drift went
@@ -135,12 +143,19 @@ if [ ${#deployed_paths[@]} -gt 0 ]; then
   done <<< "$live_md5_output"
 
   for rel in "${FILES[@]}"; do
-    git_md5=$(git show "HEAD:$rel" 2>/dev/null | md5sum | awk '{print $1}')
     if [ -z "${LIVE_PATHS[$rel]:-}" ]; then
       echo "  SKIP:    $rel (no LIVE_PATH configured — file not deployed yet)"
       continue
     fi
-    live_md5="${live_md5s[${LIVE_PATHS[$rel]}]:-}"
+    if [ "$rel" = "host/vpn-portal/bot.py" ]; then
+      # redaction-aware: repo stores the live secret as REDACTED
+      git_md5=$(git show "HEAD:$rel" 2>/dev/null | norm_secrets | md5sum | awk '{print $1}')
+      live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" \
+                 "cat ${LIVE_PATHS[$rel]}" 2>/dev/null | norm_secrets | md5sum | awk '{print $1}')
+    else
+      git_md5=$(git show "HEAD:$rel" 2>/dev/null | md5sum | awk '{print $1}')
+      live_md5="${live_md5s[${LIVE_PATHS[$rel]}]:-}"
+    fi
 
     if [ -z "$git_md5" ] || [ -z "$live_md5" ]; then
       echo "  SKIP:    $rel (could not compute one or both hashes)"
@@ -197,12 +212,21 @@ if [ ${#vab_paths[@]} -gt 0 ]; then
   done <<< "$vab_md5_output"
   for i in "${!vab_rels[@]}"; do
     rel="${vab_rels[$i]}"
-    live_md5="${vab_md5s[${vab_paths[$i]}]:-}"
+    if [ "$rel" = "bot.py" ]; then
+      live_md5=$(ssh -o BatchMode=yes -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" \
+                 "cat ${vab_paths[$i]}" 2>/dev/null | norm_secrets | md5sum | awk '{print $1}')
+    else
+      live_md5="${vab_md5s[${vab_paths[$i]}]:-}"
+    fi
     if [ -z "$live_md5" ]; then
     echo "  SKIP (vpn-admin-bot): $rel (could not hash live file)"
     continue
   fi
-  remote_md5=$(curl -sSL "https://raw.githubusercontent.com/$VPN_ADMIN_BOT_REPO/$VPN_ADMIN_BOT_BRANCH/$rel" 2>/dev/null | md5sum | awk '{print $1}')
+  if [ "$rel" = "bot.py" ]; then
+    remote_md5=$(curl -sSL "https://raw.githubusercontent.com/$VPN_ADMIN_BOT_REPO/$VPN_ADMIN_BOT_BRANCH/$rel" 2>/dev/null | norm_secrets | md5sum | awk '{print $1}')
+  else
+    remote_md5=$(curl -sSL "https://raw.githubusercontent.com/$VPN_ADMIN_BOT_REPO/$VPN_ADMIN_BOT_BRANCH/$rel" 2>/dev/null | md5sum | awk '{print $1}')
+  fi
   if [ -z "$remote_md5" ]; then
     echo "  SKIP (vpn-admin-bot): $rel (could not fetch from $VPN_ADMIN_BOT_REPO)"
     continue
